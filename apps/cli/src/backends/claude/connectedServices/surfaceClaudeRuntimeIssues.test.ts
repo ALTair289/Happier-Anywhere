@@ -29,6 +29,23 @@ function createClaudeFailTurnSpy() {
   return vi.fn<ClaudeFailTurn>(async () => undefined);
 }
 
+async function awaitBeforeDurableTurnWrite<T>(promise: Promise<T>): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('recovery remained blocked by the durable turn write')),
+          1_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+  }
+}
+
 function createScheduledRuntimeAuthRecoveryReport(input: Readonly<{ includeTranscriptEvent?: boolean }> = {}) {
   const diagnostic = {
     code: 'recovery_retry_scheduled',
@@ -338,6 +355,82 @@ describe('surfaceClaudeRuntimeIssues runtime-auth projection', () => {
       }));
       expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalled();
     } finally {
+      restoreClaudeSelectionEnv(previousSelectionEnv);
+    }
+  });
+
+  it('does not let a stalled durable turn write block parent-scoped 401 recovery', async () => {
+    const previousSelectionEnv = installClaudeSelectionEnv();
+    let releaseTurnWrite!: () => void;
+    const failTurn = vi.fn<ClaudeFailTurn>(() => new Promise<void>((resolve) => {
+      releaseTurnWrite = resolve;
+    }));
+    mockNotifyDaemonConnectedServiceRuntimeAuthFailure.mockResolvedValueOnce(
+      createScheduledRuntimeAuthRecoveryReport(),
+    );
+    try {
+      const surfaced = surfaceClaudeRuntimeAuthFailure({
+        client: {
+          sessionId: 'sess_claude_stalled_turn_write_auth',
+          sendSessionEvent: vi.fn(),
+          sessionTurnLifecycle: { failTurn },
+        },
+      }, {
+        type: 'assistant',
+        isApiErrorMessage: true,
+        apiErrorStatus: 401,
+        error: 'authentication_failed',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Please run /login · API Error: 401 OAuth access token has been revoked.' }],
+        },
+      }, '[claude-test]');
+
+      expect(failTurn).toHaveBeenCalledOnce();
+      await expect(awaitBeforeDurableTurnWrite(surfaced)).resolves.toBe(true);
+      expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalledOnce();
+    } finally {
+      releaseTurnWrite?.();
+      restoreClaudeSelectionEnv(previousSelectionEnv);
+    }
+  });
+
+  it('does not let a stalled durable turn write block connected-service usage-limit recovery', async () => {
+    const previousSelectionEnv = installClaudeSelectionEnv();
+    let releaseTurnWrite!: () => void;
+    const failTurn = vi.fn<ClaudeFailTurn>(() => new Promise<void>((resolve) => {
+      releaseTurnWrite = resolve;
+    }));
+    mockNotifyDaemonConnectedServiceRuntimeAuthFailure.mockResolvedValueOnce(
+      createScheduledRuntimeAuthRecoveryReport(),
+    );
+    try {
+      const surfaced = surfaceClaudeRateLimitRuntimeIssue({
+        client: {
+          sessionId: 'sess_claude_stalled_turn_write_limit',
+          sendSessionEvent: vi.fn(),
+          sessionTurnLifecycle: { failTurn },
+        },
+      }, {
+        v: 1,
+        resetAtMs: 1_781_221_200_000,
+        retryAfterMs: null,
+        limitCategory: 'usage_limit',
+        quotaScope: 'account',
+        recoverability: 'switch_account',
+        providerLimitId: 'five_hour',
+        planType: null,
+        utilization: 100,
+        overage: null,
+        action: null,
+        connectedService: null,
+      }, '[claude-test]');
+
+      expect(failTurn).toHaveBeenCalledOnce();
+      await expect(awaitBeforeDurableTurnWrite(surfaced)).resolves.toBeUndefined();
+      expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalledOnce();
+    } finally {
+      releaseTurnWrite?.();
       restoreClaudeSelectionEnv(previousSelectionEnv);
     }
   });

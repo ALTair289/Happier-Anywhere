@@ -52,6 +52,30 @@ const recentRecoveryProjectionByClient = new WeakMap<
 >();
 const continuingRuntimeAuthRecoveries = new WeakSet<object>();
 
+function beginConnectedClaudeTurnFailure(
+    session: RuntimeIssueSession,
+    issue: SessionRuntimeIssueV1,
+    logPrefix: string,
+): void {
+    try {
+        // `failTurn` commits the local terminal transition synchronously before its returned
+        // promise waits for the durable session-event write. Connected Services recovery must
+        // not be serialized behind that unrelated durable acknowledgement: doing so leaves the
+        // selected account unchanged whenever the event write stalls, even though the provider
+        // has already rejected the turn. Keep the write owned by the turn lifecycle and observe
+        // its failure, while allowing the canonical recovery report to proceed immediately.
+        const settlement = session.client.sessionTurnLifecycle?.failTurn?.({
+            provider: 'claude',
+            issue,
+        });
+        void Promise.resolve(settlement).catch((error) => {
+            logger.debug(`${logPrefix} Failed to persist Claude terminal turn failure`, error);
+        });
+    } catch (error) {
+        logger.debug(`${logPrefix} Failed to begin Claude terminal turn failure`, error);
+    }
+}
+
 export function isClaudeRuntimeAuthRecoveryContinuing(error: unknown): boolean {
     if (!error || typeof error !== 'object') return false;
     return continuingRuntimeAuthRecoveries.has(error);
@@ -430,10 +454,14 @@ export async function surfaceClaudeRateLimitRuntimeIssue(
             connectedService,
             occurredAt,
         });
-        await session.client.sessionTurnLifecycle?.failTurn?.({
-            provider: 'claude',
-            issue,
-        });
+        if (selection) {
+            beginConnectedClaudeTurnFailure(session, issue, logPrefix);
+        } else {
+            await session.client.sessionTurnLifecycle?.failTurn?.({
+                provider: 'claude',
+                issue,
+            });
+        }
     }
     // RD-QUO-2: in-band rate-limit evidence is the freshest usage signal for the real quota
     // subject. Record it for BOTH the native identity and the selected member (mirroring Codex)
@@ -523,13 +551,10 @@ export async function surfaceClaudeRuntimeAuthFailure(
         return true;
     }
 
-    // The provider has already rejected this exact turn. Settle that provider-input fact before
-    // asking Connected Services to repair the account. Recovery may remain retryable/verifying,
-    // but it must not own or delay the turn terminal boundary that continuation and Pending consume.
-    await session.client.sessionTurnLifecycle?.failTurn?.({
-        provider: 'claude',
-        issue,
-    });
+    // The provider has already rejected this exact turn. Begin its local terminal transition
+    // before asking Connected Services to repair the account, but do not let the terminal event's
+    // durable write prevent the recovery owner from receiving the rejection.
+    beginConnectedClaudeTurnFailure(session, issue, logPrefix);
     const recoveryReport = await reportConnectedServiceRuntimeAuthFailureToDaemon({
         sessionId: session.client.sessionId,
         switchesThisTurn: 0,
