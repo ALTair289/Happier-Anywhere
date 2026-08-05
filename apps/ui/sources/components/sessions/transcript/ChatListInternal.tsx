@@ -2195,7 +2195,11 @@ export const ChatListInternal = React.memo((props: ChatListInternalProps) => {
         sessionId: props.sessionId,
         stampViewportAnchorForEmit,
         targetWindowHasMoreNewer: targetWindowHostFacts.hasMoreNewer,
-        targetWindowIsWindowMode: targetWindowHostFacts.targetWindowActive,
+        // The newer gap descriptor IS the adapter's answer to "is the live tail below what we
+        // rendered" — an unexhausted newer cursor OR loaded rows the window range leaves out —
+        // and it is the same fact that decides whether a newer gap row is rendered. The jump
+        // affordance reads it so the pill and the gap row cannot disagree.
+        targetWindowHasNewerBeyondRenderedWindow: targetWindowHostFacts.gaps.newer !== null,
         transcriptNavigationEntries: props.transcriptNavigationEntries,
         transcriptNavigationRuntimeAnchorsRef,
         usesNativeFlashListBottomMaintenance:

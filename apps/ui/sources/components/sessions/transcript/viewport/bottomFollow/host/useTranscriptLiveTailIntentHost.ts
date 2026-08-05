@@ -82,6 +82,13 @@ export function useTranscriptLiveTailIntentHost(deps: LiveTailIntentHostDeps) {
                 continue;
             }
             current.commitScrollPinState({ ...current.scrollPinRef.current, isPinned: effect.isPinned, newActivityCount: 0 });
+            // The explicit return is the one owner that knows where the reader ends up, and
+            // `distanceFromLiveTailPx` is its own answer — already the emit's offsetY below and
+            // already what the sync boundary persists. The jump affordance was the only consumer
+            // of that answer left unwritten, so it kept reading whichever producer last wrote a
+            // detached distance (the renderer detach sentinel, or a restored entry anchor) and
+            // offered the reader a way back to a tail they were already on.
+            current.commitJumpToBottomDistanceForVisibilityRef.current(effect.distanceFromLiveTailPx);
             const emitted = current.emitViewportChange({
                 isPinned: effect.isPinned,
                 offsetY: effect.distanceFromLiveTailPx,

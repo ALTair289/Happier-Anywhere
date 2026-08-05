@@ -167,7 +167,6 @@ describe('useTranscriptLiveTailIntentHost commit timing', () => {
         expect(readAffordance(true).isVisible).toBe(true);
 
         apiRef.current!.commitExplicitReturnToLiveTailState('jump-to-bottom');
-        distanceFromBottom = 0;
         expect(deps.isPinnedRef.current).toBe(true);
         expect(scrollPin.isPinned).toBe(true);
         expect(readAffordance(false).isVisible).toBe(false);
@@ -238,6 +237,143 @@ describe('useTranscriptLiveTailIntentHost commit timing', () => {
         }, { cause: 'user' });
         expect(emitA).toHaveBeenCalledTimes(1);
         expect(emitB).not.toHaveBeenCalled();
+
+        await act(async () => {
+            tree.unmount();
+        });
+    });
+});
+
+describe('useTranscriptLiveTailIntentHost explicit-return distance refresh', () => {
+    // Live-measured affordance geometry from the three SAFE sessions where "Jump to bottom"
+    // never disappeared after being used (revealThresholdPx 127, viewport height 319). At
+    // those numbers a stale distance defeats BOTH gates in resolveJumpToBottomAffordanceState
+    // with the same wrong value — the pin early return is skipped because the distance
+    // contradicts the pin claim, and the standard reveal fires — so the assertion is on the
+    // affordance the reader sees, not on the raw committed number.
+    const REVEAL_THRESHOLD_PX = 127;
+    const VIEWPORT_HEIGHT_PX = 319;
+
+    function createExplicitReturnHarness(sessionId: string) {
+        const baseDeps = createDeps(sessionId, 'renderer', vi.fn(() => true));
+        const state = {
+            committedDistance: 0,
+            scrollPin: { isPinned: true, lastActivityKey: null as string | null, newActivityCount: 0 },
+        };
+        baseDeps.commitJumpToBottomDistanceForVisibilityRef.current = vi.fn((nextDistance: number) => {
+            state.committedDistance = nextDistance;
+        });
+        const deps = {
+            ...baseDeps,
+            commitScrollPinEvent: vi.fn((event: { type: string; enabled: boolean; isAtEnd: boolean }) => {
+                if (event.type !== 'rendererAtEnd') return;
+                state.scrollPin = { ...state.scrollPin, isPinned: event.enabled && event.isAtEnd };
+                baseDeps.scrollPinRef.current = state.scrollPin;
+            }),
+            commitScrollPinState: vi.fn((next: typeof state.scrollPin) => {
+                state.scrollPin = next;
+                baseDeps.scrollPinRef.current = next;
+            }),
+            lifecycleHost: {
+                planExplicitReturnToLiveTail: vi.fn(() => ({
+                    explicitReturnEffects: [
+                        { sessionId, type: 'apply-explicit-return-clear-user-scroll-intent' },
+                        {
+                            distanceFromLiveTailPx: 0,
+                            isPinned: true,
+                            sessionId,
+                            type: 'apply-explicit-return-to-live-tail-viewport',
+                        },
+                    ],
+                    lifecycleEffects: [],
+                    state: {
+                        automaticPinAuthority: true,
+                        bottomFollowState: { dragSession: null, mode: 'following' },
+                        fingerDown: false,
+                        followMode: 'following',
+                        gesturePhase: 'settled',
+                        sessionId,
+                    },
+                    viewportEffects: [],
+                } as const)),
+            },
+        } as unknown as HostDeps;
+        const readAffordance = () => resolveJumpToBottomAffordanceState({
+            distanceFromBottom: state.committedDistance,
+            enabled: true,
+            hasMoreNewerBeyondRenderedWindow: false,
+            isPinned: state.scrollPin.isPinned,
+            minNewActivityCount: 1,
+            newActivityCount: 0,
+            revealThresholdPx: REVEAL_THRESHOLD_PX,
+            viewportHeightPx: VIEWPORT_HEIGHT_PX,
+        });
+        return { deps, readAffordance, state };
+    }
+
+    it('replaces the renderer detach sentinel with the reader real distance', async () => {
+        // Shape 1 of 2 (sessions cmqf5jyxj0, cmpu1qhhx0): the reader entered at the tail and
+        // scrolled up, so the last producer to write the pill distance was the renderer detach
+        // callback with its MAX_SAFE_INTEGER sentinel. A jump must not leave that behind.
+        const { deps, readAffordance, state } = createExplicitReturnHarness('session-jump-sentinel');
+        const apiRef = { current: null as Host | null };
+        let tree!: renderer.ReactTestRenderer;
+
+        await act(async () => {
+            tree = renderer.create(renderHarness({ apiRef, deps }));
+        });
+
+        // Produced, not assigned: the reader's own wheel is the only cause the detach
+        // producer accepts, and this is what arms the sentinel in production.
+        apiRef.current!.handleRendererAtEndChange({
+            isAtEnd: false,
+            isFollowing: false,
+            isNearEnd: false,
+            isWithinMaintainScrollAtEndThreshold: false,
+        }, { cause: 'user' });
+        expect(state.committedDistance).toBe(Number.MAX_SAFE_INTEGER);
+        expect(readAffordance().isVisible).toBe(true);
+
+        apiRef.current!.commitExplicitReturnToLiveTailState('jump-to-bottom');
+
+        // The renderer's own post-jump at-end fact is command-attributed end to end, so it is
+        // refused before the detach producer's distance commit. The explicit return is the only
+        // owner that can describe where the reader now is.
+        apiRef.current!.handleRendererAtEndChange({
+            isAtEnd: true,
+            isFollowing: true,
+            isNearEnd: true,
+            isWithinMaintainScrollAtEndThreshold: true,
+        }, { cause: 'command' });
+
+        expect(state.committedDistance).toBe(0);
+        expect(readAffordance().isVisible).toBe(false);
+
+        await act(async () => {
+            tree.unmount();
+        });
+    });
+
+    it('replaces a restored entry anchor distance with the reader real distance', async () => {
+        // Shape 2 of 2 (session cmqbxq1nb0): the reader opened straight into a restored
+        // detached entry, so the last producer was the entry-restore host writing the durable
+        // anchor distance (3412) through this same shared ref. The detach sentinel never ran,
+        // and the latched anchor distance survived the jump just as the sentinel did.
+        const { deps, readAffordance, state } = createExplicitReturnHarness('session-jump-entry-restore');
+        const apiRef = { current: null as Host | null };
+        let tree!: renderer.ReactTestRenderer;
+
+        await act(async () => {
+            tree = renderer.create(renderHarness({ apiRef, deps }));
+        });
+
+        deps.commitJumpToBottomDistanceForVisibilityRef.current(3412);
+        expect(readAffordance().isVisible).toBe(true);
+
+        apiRef.current!.commitExplicitReturnToLiveTailState('jump-to-bottom');
+
+        expect(state.committedDistance).toBe(0);
+        expect(readAffordance().isVisible).toBe(false);
 
         await act(async () => {
             tree.unmount();
