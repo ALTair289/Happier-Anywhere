@@ -2,13 +2,15 @@ import { describe, expect, it } from 'vitest';
 
 import {
   CLAUDE_OAUTH_AUTHORIZE_URL,
+  CLAUDE_OAUTH_CALLBACK_URL,
   CLAUDE_OAUTH_TOKEN_URL,
   normalizeClaudeOauthProfileEntitlement,
 } from './oauthProfile';
 
 describe('normalizeClaudeOauthProfileEntitlement', () => {
   it('uses Claude Code current OAuth token endpoint', () => {
-    expect(CLAUDE_OAUTH_AUTHORIZE_URL).toBe('https://platform.claude.com/oauth/authorize');
+    expect(CLAUDE_OAUTH_AUTHORIZE_URL).toBe('https://claude.com/cai/oauth/authorize');
+    expect(CLAUDE_OAUTH_CALLBACK_URL).toBe('https://platform.claude.com/oauth/code/callback');
     expect(CLAUDE_OAUTH_TOKEN_URL).toBe('https://platform.claude.com/v1/oauth/token');
   });
 

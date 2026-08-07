@@ -245,12 +245,35 @@ export {
 } from './providers/claude/oauthScopes.js';
 export {
   CLAUDE_OAUTH_AUTHORIZE_URL,
+  CLAUDE_OAUTH_CALLBACK_URL,
+  CLAUDE_OAUTH_CLIENT_ID,
   normalizeClaudeOauthProfileEntitlement,
   CLAUDE_OAUTH_PROFILE_BETA_HEADER,
   CLAUDE_OAUTH_PROFILE_URL,
   CLAUDE_OAUTH_TOKEN_URL,
   type ClaudeOauthEntitlementMetadata,
 } from './providers/claude/oauthProfile.js';
+export {
+  OPENAI_CODEX_DEVICE_REDIRECT_URI,
+  OPENAI_CODEX_DEVICE_TOKEN_URL,
+  OPENAI_CODEX_DEVICE_USER_CODE_URL,
+  OPENAI_CODEX_DEVICE_VERIFICATION_URL,
+  OPENAI_CODEX_OAUTH_AUTHORIZE_URL,
+  OPENAI_CODEX_OAUTH_BASE_URL,
+  OPENAI_CODEX_OAUTH_CALLBACK_URL,
+  OPENAI_CODEX_OAUTH_CLIENT_ID,
+  OPENAI_CODEX_OAUTH_SCOPE,
+  OPENAI_CODEX_OAUTH_SCOPES,
+  OPENAI_CODEX_OAUTH_TOKEN_URL,
+} from './providers/codex/oauth.js';
+export {
+  GEMINI_CLI_OAUTH_AUTHORIZE_URL,
+  GEMINI_CLI_OAUTH_CALLBACK_URL,
+  GEMINI_CLI_OAUTH_CLIENT_ID,
+  GEMINI_CLI_OAUTH_CLIENT_SECRET,
+  GEMINI_CLI_OAUTH_SCOPES,
+  GEMINI_CLI_OAUTH_TOKEN_URL,
+} from './providers/gemini/oauth.js';
 
 export { computeMonotonicUpdatedAt, type MonotonicUpdatedAtPolicy } from './sessionControls/monotonic.js';
 export {

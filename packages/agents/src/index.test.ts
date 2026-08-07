@@ -98,18 +98,36 @@ describe('agents package exports', () => {
       'user:sessions:claude_code',
     ]);
     expect(mod.CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPES).toEqual([
-      'user:inference',
+      'org:create_api_key',
       'user:profile',
+      'user:inference',
       'user:sessions:claude_code',
       'user:mcp_servers',
       'user:file_upload',
     ]);
     expect(mod.CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE).toBe([
-      'user:inference',
+      'org:create_api_key',
       'user:profile',
+      'user:inference',
       'user:sessions:claude_code',
       'user:mcp_servers',
       'user:file_upload',
     ].join(' '));
+    expect(mod.GEMINI_CLI_OAUTH_CLIENT_ID).toBe(
+      '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
+    );
+    expect(mod.GEMINI_CLI_OAUTH_CLIENT_SECRET).toBe(
+      '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',
+    );
+    expect(mod.OPENAI_CODEX_OAUTH_CLIENT_ID).toBe('app_EMoamEEZ73f0CkXaXp7hrann');
+    expect(mod.OPENAI_CODEX_OAUTH_CALLBACK_URL).toBe(
+      'http://localhost:1455/auth/callback',
+    );
+    expect(mod.OPENAI_CODEX_DEVICE_USER_CODE_URL).toBe(
+      'https://auth.openai.com/api/accounts/deviceauth/usercode',
+    );
+    expect(mod.OPENAI_CODEX_DEVICE_TOKEN_URL).toBe(
+      'https://auth.openai.com/api/accounts/deviceauth/token',
+    );
   });
 });
