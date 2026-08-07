@@ -10,7 +10,6 @@ import {
     PUSH_NOTIFICATION_ANDROID_CHANNEL_IDS,
     PUSH_NOTIFICATION_CATEGORY_IDS,
 } from '@happier-dev/protocol';
-import { TokenStorage, type AuthCredentials } from '@/auth/storage/tokenStorage';
 import { AuthProvider, useAuth } from '@/auth/context/AuthContext';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
@@ -53,6 +52,7 @@ import { consumeRestartBugReportIntent } from '@/utils/system/restartBugReportIn
 import { getCurrentReactOwnerHint, getUnexpectedPrimitiveViewChildInfo } from '@/utils/system/debugUnexpectedTextNodeCapture';
 import { resolveForegroundNotificationBehavior } from '@/activity/notifications/resolveForegroundNotificationBehavior';
 import { resolveBootCredentials } from '@/boot/resolveBootCredentials';
+import { runAppBootSequence, type AppBootReadyState } from '@/boot/runAppBootSequence';
 import { installTauriMcpBridgeOnce } from '@/desktop/mcp/maybeInstallTauriMcpBridge';
 import { DesktopShellUpdateIndicatorHost } from '@/components/navigation/shell/desktopChrome/DesktopShellUpdateIndicatorHost';
 import { DesktopShellWindowControlsHost } from '@/components/navigation/shell/desktopChrome/DesktopShellWindowControlsHost';
@@ -642,7 +642,7 @@ function AppBoot(props: {
         !isDesktopPetOverlayWindow,
     );
     const isTerminalConnectRoute = isTerminalConnectWebPathname(pathname);
-    const [initState, setInitState] = React.useState<{ credentials: AuthCredentials | null } | null>(null);
+    const [initState, setInitState] = React.useState<AppBootReadyState | null>(null);
     const restartBugReportCheckedRef = React.useRef(false);
 
     React.useEffect(() => {
@@ -651,33 +651,16 @@ function AppBoot(props: {
 
     React.useEffect(() => {
         let cancelled = false;
-        (async () => {
-            let credentials: AuthCredentials | null = null;
-            try {
-                try {
-                    await loadFonts();
-                } catch (error) {
-                    // Font loading failures should not brick startup.
-                    console.error('Failed to load fonts during init, continuing startup:', error);
-                }
-                await sodium.ready;
-                credentials = await resolveBootCredentials(Platform.OS);
-                if (credentials) {
-                    try {
-                        await syncRestore(credentials);
-                    } catch (error) {
-                        // Preserve app usability even if sync restore fails during boot.
-                        console.error('Failed to restore sync during init, continuing startup:', error);
-                    }
-                }
-            } catch (error) {
-                console.error('Error initializing:', error);
-            } finally {
-                if (!cancelled) {
-                    setInitState({ credentials });
-                }
-            }
-        })();
+        void runAppBootSequence({
+            loadFonts,
+            sodiumReady: sodium.ready,
+            resolveCredentials: () => resolveBootCredentials(Platform.OS),
+            restoreSync: syncRestore,
+            onReady: (ready) => {
+                if (cancelled) return;
+                setInitState(ready);
+            },
+        });
         return () => {
             cancelled = true;
         };
@@ -733,7 +716,13 @@ function AppBoot(props: {
             <ChromeSafeAreaInsetsWarmup />
             <KeyboardProvider>
                 <GestureHandlerRootView style={{ flex: 1 }}>
-                    <AuthProvider initialCredentials={initState.credentials}>
+                    {/*
+                      * `authGeneration` is 0 for every normal boot, so this key never changes and the
+                      * tree never remounts. It only advances when a keychain read that missed its boot
+                      * deadline lands afterwards, which is exactly when the auth tree has to adopt the
+                      * recovered session instead of leaving the user signed out until the next launch.
+                      */}
+                    <AuthProvider key={initState.authGeneration} initialCredentials={initState.credentials}>
                         <ThemeProvider value={props.navigationTheme}>
                             <StatusBarProvider />
                             <AppPaneModalProvider>
