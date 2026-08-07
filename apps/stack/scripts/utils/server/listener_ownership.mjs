@@ -2,6 +2,19 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { listListenPids, listListenPidsWithStatus, probeTcpPortBinding } from '../net/ports.mjs';
 import { getProcessGroupId, isPidOwnedByStack, resolvePidStackOwnership } from '../proc/ownership.mjs';
 
+const DEFAULT_SPAWNED_LISTENER_OWNERSHIP_TIMEOUT_MS = 60_000;
+const MAX_SPAWNED_LISTENER_OWNERSHIP_TIMEOUT_MS = 10 * 60_000;
+
+export function resolveSpawnedListenerOwnershipTimeoutMs(env = process.env) {
+  const configured = Number.parseInt(
+    String(env?.HAPPIER_STACK_LISTENER_OWNERSHIP_TIMEOUT_MS ?? '').trim(),
+    10,
+  );
+  return Number.isFinite(configured) && configured >= 100
+    ? Math.min(configured, MAX_SPAWNED_LISTENER_OWNERSHIP_TIMEOUT_MS)
+    : DEFAULT_SPAWNED_LISTENER_OWNERSHIP_TIMEOUT_MS;
+}
+
 function inconclusiveListenerError(observation) {
   const error = new Error(`listener discovery is inconclusive: ${observation?.reason ?? observation?.status ?? 'error'}`);
   error.code = 'ELISTENERDISCOVERYINCONCLUSIVE';
@@ -36,7 +49,7 @@ function createObservationImpl({ listListenPidsImpl, listListenPidsWithStatusImp
 export function createListenerOwnershipObservationScope({
   totalTimeoutMs = 750,
   attemptTimeoutMs = 250,
-  processGroupAttemptTimeoutMs = 1000,
+  processGroupAttemptTimeoutMs = Number.POSITIVE_INFINITY,
   retryDelayMs = 25,
   retryInconclusive = true,
   listListenPidsImpl,
@@ -159,9 +172,9 @@ export function createListenerOwnershipObservationScope({
       const key = `pgid:${pgid}:port:${Number(port)}`;
       if (!observations.has(key)) {
         // Prefer the strongest positive proof while reserving the final third
-        // of the command scope for broad listener evidence. A one-second
-        // attempt matches the underlying listener command's normal budget and
-        // avoids rejecting a just-ready server after one 250ms lsof timeout.
+        // of the command scope for broad listener evidence. By default, one
+        // in-flight discovery can consume that reserved subdeadline; callers
+        // can inject a smaller cap when retries are preferable.
         const observationTimeoutMs = Math.max(1, Math.floor((remainingMs() * 2) / 3));
         const attemptTimeoutCapMs = Math.max(1, Math.min(
           Math.max(1, Number(processGroupAttemptTimeoutMs) || 1),
@@ -307,7 +320,7 @@ export async function resolveSpawnedProcessGroupListenPid(
     listListenPidsWithStatusImpl = listListenPidsWithStatus,
     getProcessGroupIdImpl = getProcessGroupId,
     observationScope,
-    listenerOwnershipTimeoutMs = 3_000,
+    listenerOwnershipTimeoutMs = resolveSpawnedListenerOwnershipTimeoutMs(),
     listenerOwnershipRetryDelayMs = 25,
   } = {},
 ) {

@@ -61,6 +61,7 @@ test('runtime start proves its spawned listener after a loaded group-filtered di
     HAPPIER_STACK_CLI_ROOT_DISABLE: '1',
     HAPPIER_STACK_STACK: fixture.stackName,
     HAPPIER_STACK_ENV_FILE: join(fixture.stackDir, 'env'),
+    HAPPIER_STACK_LISTENER_OWNERSHIP_TIMEOUT_MS: '1000',
     ...fixture.listenerDiscoveryEnv,
   };
   const args = [
@@ -98,6 +99,7 @@ test('runtime start fails closed and cleans up when spawned and broad listener d
     HAPPIER_STACK_CLI_ROOT_DISABLE: '1',
     HAPPIER_STACK_STACK: fixture.stackName,
     HAPPIER_STACK_ENV_FILE: join(fixture.stackDir, 'env'),
+    HAPPIER_STACK_LISTENER_OWNERSHIP_TIMEOUT_MS: '1000',
     ...fixture.listenerDiscoveryEnv,
   };
   const args = [

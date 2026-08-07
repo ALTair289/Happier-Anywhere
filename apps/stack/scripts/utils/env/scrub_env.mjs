@@ -46,6 +46,7 @@ export const STACK_WRAPPER_PRESERVE_KEYS = [
 
   // Safe global defaults.
   'HAPPIER_STACK_STACK_PORT_START',
+  'HAPPIER_STACK_LISTENER_OWNERSHIP_TIMEOUT_MS',
 
   // Explicit local runtime/build overrides for source-mode stack launches.
   'HAPPIER_STACK_CLI_BUILD',
