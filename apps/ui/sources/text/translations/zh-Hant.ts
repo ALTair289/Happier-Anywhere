@@ -4349,6 +4349,8 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
               awaitingReply: '正在等待回覆',
               replyNotLoaded: '回覆尚未載入',
               loadingBody: '正在建立此工作階段的時間軸',
+              railScrollUpA11y: '向上捲動導覽',
+              railScrollDownA11y: '向下捲動導覽',
           },
           usageLimitRecovery: {
             title: '已達到使用限制',
@@ -4720,6 +4722,7 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
                     reorderFailed: '重新排序待傳送訊息失敗',
                     retrySendFailed: '重試傳送訊息失敗',
                     retryDeliveryFailed: '重試待遞送訊息失敗',
+                    actionConflict: '套用操作時，這則待處理訊息的狀態已變更。請檢查目前狀態後再試一次。',
                     markHandledFailed: '將待遞送訊息標記為已處理失敗',
                     clearTerminalComposerFailed: '清空終端機輸入框失敗',
                     clearTerminalComposerUnsupported: '此工作階段不支援從 Happier 清空終端機輸入框。',

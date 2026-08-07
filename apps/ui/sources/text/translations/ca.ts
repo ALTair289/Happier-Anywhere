@@ -4701,6 +4701,8 @@ deps: {
             awaitingReply: 'Esperant la resposta',
             replyNotLoaded: 'Resposta encara no carregada',
             loadingBody: 'Creant la cronologia de la sessió',
+            railScrollUpA11y: 'Desplaça la navegació amunt',
+            railScrollDownA11y: 'Desplaça la navegació avall',
         },
         usageLimitRecovery: {
             title: 'S’ha assolit el límit d’ús',
@@ -5154,6 +5156,7 @@ deps: {
                   sendDiscardedFailed: 'No s’ha pogut enviar el missatge descartat',
                   reorderFailed: 'No s’ha pogut reordenar els missatges pendents',
                   retryDeliveryFailed: 'No s’ha pogut reintentar el lliurament pendent',
+                  actionConflict: 'Aquest missatge pendent ha canviat mentre s’aplicava l’acció. Revisa’n l’estat actual i torna-ho a provar.',
                   retrySendFailed: 'No s’ha pogut tornar a enviar el missatge',
                   markHandledFailed: 'No s’ha pogut marcar el lliurament pendent com a gestionat',
                   clearTerminalComposerFailed: 'No s’ha pogut esborrar el compositor del terminal',

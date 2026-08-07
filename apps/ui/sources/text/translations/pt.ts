@@ -5146,6 +5146,8 @@ export const pt: TranslationStructure = {
       awaitingReply: "A aguardar a resposta",
       replyNotLoaded: "Resposta ainda não carregada",
       loadingBody: "A criar a cronologia desta sessão",
+      railScrollUpA11y: "Deslocar a navegação para cima",
+      railScrollDownA11y: "Deslocar a navegação para baixo",
     },
     usageLimitRecovery: {
       title: "Limite de uso atingido",
@@ -5611,6 +5613,7 @@ export const pt: TranslationStructure = {
           sendDiscardedFailed: "Falha ao enviar a mensagem descartada",
           reorderFailed: "Falha ao reordenar mensagens pendentes",
           retryDeliveryFailed: "Falha ao tentar novamente a entrega pendente",
+          actionConflict: "Esta mensagem pendente mudou enquanto a ação era aplicada. Reveja o estado atual e tente novamente.",
           retrySendFailed: 'Falha ao reenviar a mensagem',
           markHandledFailed: "Falha ao marcar a entrega pendente como tratada",
           clearTerminalComposerFailed: "Falha ao limpar o compositor do terminal",

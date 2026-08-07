@@ -4848,6 +4848,8 @@ export const zhHans: TranslationStructure = {
       awaitingReply: "正在等待回复",
       replyNotLoaded: "回复尚未加载",
       loadingBody: "正在构建此会话的时间线",
+      railScrollUpA11y: "向上滚动导航",
+      railScrollDownA11y: "向下滚动导航",
     },
     usageLimitRecovery: {
       title: "已达到使用限制",
@@ -5306,6 +5308,7 @@ export const zhHans: TranslationStructure = {
           sendDiscardedFailed: "发送已丢弃消息失败",
           reorderFailed: "重新排序待发送消息失败",
           retryDeliveryFailed: "重试待投递消息失败",
+          actionConflict: "应用操作时，这条待处理消息的状态已发生变化。请检查其当前状态后重试。",
           retrySendFailed: '重试发送消息失败',
           markHandledFailed: "将待投递消息标记为已处理失败",
           clearTerminalComposerFailed: "清空终端输入框失败",

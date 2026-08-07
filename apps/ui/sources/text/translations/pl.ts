@@ -5047,6 +5047,8 @@ export const pl: TranslationStructure = {
       awaitingReply: "Czekam na odpowiedź",
       replyNotLoaded: "Odpowiedź jeszcze niewczytana",
       loadingBody: "Tworzenie osi czasu tej sesji",
+      railScrollUpA11y: "Przewiń nawigację w górę",
+      railScrollDownA11y: "Przewiń nawigację w dół",
     },
     usageLimitRecovery: {
       title: "Osiągnięto limit użycia",
@@ -5512,6 +5514,7 @@ export const pl: TranslationStructure = {
           sendDiscardedFailed: "Nie udało się wysłać odrzuconej wiadomości",
           reorderFailed: "Nie udało się zmienić kolejności oczekujących wiadomości",
           retryDeliveryFailed: "Nie udało się ponowić oczekującego dostarczenia",
+          actionConflict: "Stan tej oczekującej wiadomości zmienił się podczas wykonywania działania. Sprawdź jej bieżący stan i spróbuj ponownie.",
           retrySendFailed: 'Nie udało się ponownie wysłać wiadomości',
           markHandledFailed: "Nie udało się oznaczyć oczekującego dostarczenia jako obsłużonego",
           clearTerminalComposerFailed: "Nie udało się wyczyścić pola terminala",

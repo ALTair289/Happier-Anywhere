@@ -5501,6 +5501,8 @@ export const ru: TranslationStructure = {
       awaitingReply: "Ожидание ответа",
       replyNotLoaded: "Ответ ещё не загружен",
       loadingBody: "Формируем хронологию этой сессии",
+      railScrollUpA11y: "Прокрутить навигацию вверх",
+      railScrollDownA11y: "Прокрутить навигацию вниз",
     },
     usageLimitRecovery: {
       title: "Достигнут лимит использования",
@@ -5966,6 +5968,7 @@ export const ru: TranslationStructure = {
           sendDiscardedFailed: "Не удалось отправить отброшенное сообщение",
           reorderFailed: "Не удалось изменить порядок отложенных сообщений",
           retryDeliveryFailed: "Не удалось повторить отложенную доставку",
+          actionConflict: "Состояние ожидающего сообщения изменилось во время выполнения действия. Проверьте его текущее состояние и повторите попытку.",
           retrySendFailed: 'Не удалось повторно отправить сообщение',
           markHandledFailed: "Не удалось отметить отложенную доставку как обработанную",
           clearTerminalComposerFailed: "Не удалось очистить поле ввода терминала",

@@ -4683,6 +4683,8 @@ export const en = {
             awaitingReply: 'Waiting for the reply',
             replyNotLoaded: 'Reply not loaded yet',
             loadingBody: 'Building the timeline for this session',
+            railScrollUpA11y: 'Scroll navigation up',
+            railScrollDownA11y: 'Scroll navigation down',
         },
         usageLimitRecovery: {
             title: 'Usage limit reached',
@@ -5138,6 +5140,7 @@ export const en = {
                 reorderFailed: 'Failed to reorder pending messages',
                 retrySendFailed: 'Failed to retry sending the message',
                 retryDeliveryFailed: 'Failed to retry pending delivery',
+                actionConflict: 'This pending message changed while the action was being applied. Review its current status and try again.',
                 markHandledFailed: 'Failed to mark pending delivery handled',
                 clearTerminalComposerFailed: 'Failed to clear the terminal composer',
                 clearTerminalComposerUnsupported: 'This session does not support clearing the terminal composer from Happier.',

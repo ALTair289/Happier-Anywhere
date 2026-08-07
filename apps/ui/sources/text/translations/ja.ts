@@ -5295,6 +5295,8 @@ localTailscale: {
       awaitingReply: "応答を待っています",
       replyNotLoaded: "応答はまだ読み込まれていません",
       loadingBody: "このセッションのタイムラインを作成中",
+      railScrollUpA11y: "ナビゲーションを上にスクロール",
+      railScrollDownA11y: "ナビゲーションを下にスクロール",
     },
     usageLimitRecovery: {
       title: "使用制限に達しました",
@@ -5761,6 +5763,7 @@ localTailscale: {
           sendDiscardedFailed: "破棄されたメッセージの送信に失敗しました",
           reorderFailed: "保留中メッセージの並び替えに失敗しました",
           retryDeliveryFailed: "保留中の配信の再試行に失敗しました",
+          actionConflict: "操作の適用中に保留中のメッセージの状態が変わりました。現在の状態を確認して、もう一度お試しください。",
           retrySendFailed: 'メッセージの再送信に失敗しました',
           markHandledFailed: "保留中の配信を処理済みにできませんでした",
           clearTerminalComposerFailed: "ターミナルの入力欄を消去できませんでした",

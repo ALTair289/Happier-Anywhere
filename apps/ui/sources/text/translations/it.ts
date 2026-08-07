@@ -5368,6 +5368,8 @@ export const it: TranslationStructure = {
       awaitingReply: "In attesa della risposta",
       replyNotLoaded: "Risposta non ancora caricata",
       loadingBody: "Creazione della cronologia di questa sessione",
+      railScrollUpA11y: "Scorri la navigazione verso l’alto",
+      railScrollDownA11y: "Scorri la navigazione verso il basso",
     },
     usageLimitRecovery: {
       title: "Limite di utilizzo raggiunto",
@@ -5833,6 +5835,7 @@ export const it: TranslationStructure = {
           sendDiscardedFailed: "Impossibile inviare il messaggio scartato",
           reorderFailed: "Impossibile riordinare i messaggi in sospeso",
           retryDeliveryFailed: "Impossibile riprovare la consegna in sospeso",
+          actionConflict: "Questo messaggio in sospeso è cambiato durante l’applicazione dell’azione. Controlla lo stato attuale e riprova.",
           retrySendFailed: 'Impossibile inviare di nuovo il messaggio',
           markHandledFailed: "Impossibile segnare la consegna in sospeso come gestita",
           clearTerminalComposerFailed: "Impossibile cancellare il compositore del terminale",

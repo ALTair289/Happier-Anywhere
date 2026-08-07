@@ -5026,6 +5026,8 @@ export const es: TranslationStructure = {
       awaitingReply: "Esperando la respuesta",
       replyNotLoaded: "Respuesta aún no cargada",
       loadingBody: "Creando la cronología de esta sesión",
+      railScrollUpA11y: "Desplazar la navegación hacia arriba",
+      railScrollDownA11y: "Desplazar la navegación hacia abajo",
     },
     usageLimitRecovery: {
       title: "Límite de uso alcanzado",
@@ -5490,6 +5492,7 @@ export const es: TranslationStructure = {
           sendDiscardedFailed: "No se pudo enviar el mensaje descartado",
           reorderFailed: "No se pudo reordenar los mensajes pendientes",
           retryDeliveryFailed: "No se pudo reintentar la entrega pendiente",
+          actionConflict: "Este mensaje pendiente cambió mientras se aplicaba la acción. Revisa su estado actual y vuelve a intentarlo.",
           retrySendFailed: 'No se pudo reintentar el envío del mensaje',
           markHandledFailed: "No se pudo marcar la entrega pendiente como gestionada",
           clearTerminalComposerFailed: "No se pudo borrar el compositor del terminal",
