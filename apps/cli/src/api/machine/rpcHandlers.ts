@@ -327,8 +327,9 @@ export function registerMachineRpcHandlers(params: Readonly<{
     return await getDaemonSessionRunnerStatus(parsed.data);
   });
 
-  // Register spawn session handler
-  rpcHandlerManager.registerHandler(RPC_METHODS.SPAWN_HAPPY_SESSION, async (params: any) => {
+  // Both public spawn RPCs delegate to this single nonce/custody owner. Their
+  // response projections intentionally differ below for released-client compatibility.
+  const handleSpawnHappySession = async (params: any): Promise<SpawnSessionResult> => {
     const {
       directory,
       spawnNonce,
@@ -592,7 +593,13 @@ export function registerMachineRpcHandlers(params: Readonly<{
 
     switch (result.type) {
       case 'success':
-        logger.debug(`[API MACHINE] Spawned session ${result.sessionId}`);
+        if (result.sessionId) {
+          logger.debug(`[API MACHINE] Spawned session ${result.sessionId}`);
+        } else {
+          logger.debug('[API MACHINE] Spawn accepted; session identity pending', {
+            spawnNonce: result.spawnNonce,
+          });
+        }
         return result;
 
       case 'requestToApproveDirectoryCreation':
@@ -602,6 +609,26 @@ export function registerMachineRpcHandlers(params: Readonly<{
       case 'error':
         return result;
     }
+  };
+
+  rpcHandlerManager.registerHandler(
+    RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
+    handleSpawnHappySession,
+  );
+  rpcHandlerManager.registerHandler(RPC_METHODS.SPAWN_HAPPY_SESSION, async (params: any) => {
+    const result = await handleSpawnHappySession(params);
+    if (result.type !== 'success' || result.sessionId) {
+      return result;
+    }
+    const settled = await awaitSpawnedSessionId({
+      result,
+      resolveSpawnSessionByNonce,
+    });
+    if (settled.type === 'success') {
+      logger.debug(`[API MACHINE] Spawned session ${settled.sessionId}`);
+      return { type: 'success' as const, sessionId: settled.sessionId };
+    }
+    return settled;
   });
 
   rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_SPAWN_SESSION_RESOLVE, async (params: unknown) => {

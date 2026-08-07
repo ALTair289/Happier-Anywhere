@@ -251,6 +251,9 @@ vi.mock('./rpc/RpcHandlerManager', () => ({
         async invokeLocal() {
             return { ok: true };
         }
+        hasHandler() {
+            return false;
+        }
         async waitForIdle() {}
     },
 }));

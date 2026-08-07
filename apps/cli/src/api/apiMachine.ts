@@ -24,6 +24,7 @@ import { createConnectedServicesProjectionRetryScheduler } from './connectedServ
 import { isConnectedServiceGenerationReconciliationNotAcknowledgeableError } from '@/daemon/connectedServices/accountGroups/generation/reconcileConnectedServiceAuthGroupGenerations';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { SOCKET_RPC_EVENTS } from '@happier-dev/protocol/socketRpc';
+import { RPC_METHODS } from '@happier-dev/protocol/rpc';
 import {
     type DirectSessionTranscriptDeltaEphemeral,
     type MachineTransferReceiveEnvelope,
@@ -106,6 +107,14 @@ export type ConnectedServicesProjectionChangeNotification = Readonly<{
 type RpcLifecycleRegistration = Readonly<{
     dispose: () => Promise<void>;
 }>;
+
+const REQUIRED_MACHINE_CONTROL_RPC_METHODS = Object.freeze([
+    RPC_METHODS.SPAWN_HAPPY_SESSION,
+    RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
+    RPC_METHODS.DAEMON_SPAWN_SESSION_RESOLVE,
+    RPC_METHODS.STOP_SESSION,
+]);
+const MACHINE_CONTROL_RPC_REGISTRATION_TIMEOUT_MS = 10_000;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -674,21 +683,49 @@ export class ApiMachineClient {
                     this.hasConnectedOnce = true;
                     takeoverOnNextConnect = false;
 
-                    if (this.socket) {
-                        this.rpcHandlerManager.onSocketConnect(this.socket);
+                    const socket = this.socket;
+                    const transportGeneration = this.activeTransportGeneration;
+                    let controlReady = false;
+                    if (socket) {
+                        this.rpcHandlerManager.onSocketConnect(socket);
+                        const unregisteredCoreHandlers = REQUIRED_MACHINE_CONTROL_RPC_METHODS.filter(
+                            (method) => !this.rpcHandlerManager.hasHandler(method),
+                        );
+                        if (unregisteredCoreHandlers.length > 0) {
+                            logger.warn('[API MACHINE] Required machine-control handlers are not installed; daemon remains offline', {
+                                missingMethods: unregisteredCoreHandlers,
+                            });
+                        } else {
+                            const readiness = await this.rpcHandlerManager.waitForRegisteredHandlers(
+                                REQUIRED_MACHINE_CONTROL_RPC_METHODS,
+                                { timeoutMs: MACHINE_CONTROL_RPC_REGISTRATION_TIMEOUT_MS },
+                            );
+                            controlReady = readiness.status === 'ready'
+                                && this.socket === socket
+                                && this.activeTransportGeneration === transportGeneration
+                                && socket.connected === true;
+                            if (!controlReady) {
+                                logger.warn('[API MACHINE] Machine-control registration did not become ready; daemon remains offline', {
+                                    status: readiness.status,
+                                    missingMethods: readiness.status === 'ready' ? [] : readiness.missingMethods,
+                                });
+                            }
+                        }
                     }
 
-                    void this.updateDaemonState((state) => ({
-                        ...state,
-                        status: 'running',
-                        pid: process.pid,
-                        httpPort: this.machine.daemonState?.httpPort,
-                        startedAt: Date.now()
-                    })).catch((error) => {
-                        logger.warn('[API MACHINE] Failed to update daemon state on connect', {
-                            message: error instanceof Error ? error.message : String(error),
+                    if (controlReady) {
+                        void this.updateDaemonState((state) => ({
+                            ...state,
+                            status: 'running',
+                            pid: process.pid,
+                            httpPort: this.machine.daemonState?.httpPort,
+                            startedAt: Date.now()
+                        })).catch((error) => {
+                            logger.warn('[API MACHINE] Failed to update daemon state after machine-control readiness', {
+                                message: error instanceof Error ? error.message : String(error),
+                            });
                         });
-                    });
+                    }
 
                     this.startChangesSyncWithRetry({ reason: isReconnect ? 'reconnect' : 'connect' });
                     this.startKeepAlive();

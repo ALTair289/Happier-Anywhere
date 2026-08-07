@@ -25,6 +25,20 @@ import {
 } from '@happier-dev/protocol/rpc';
 import { isPublicRpcHandlerError, toSocketRpcTargetFailureV1 } from '@happier-dev/protocol/rpcErrors';
 
+export type RpcHandlerRegistrationReadiness =
+    | Readonly<{ status: 'ready' }>
+    | Readonly<{
+        status: 'timeout' | 'disconnected';
+        missingMethods: readonly string[];
+    }>;
+
+type RegistrationReadinessWaiter = Readonly<{
+    requiredMethods: readonly string[];
+    requiredPrefixedMethods: ReadonlySet<string>;
+    resolve: (result: RpcHandlerRegistrationReadiness) => void;
+    timeout: ReturnType<typeof setTimeout>;
+}>;
+
 export class RpcHandlerManager {
     private handlers: RpcHandlerMap = new Map();
     private readonly scopePrefix: string;
@@ -36,6 +50,8 @@ export class RpcHandlerManager {
     private readonly authorizeRequest: RpcHandlerConfig['authorizeRequest'];
     private readonly projectTransportAcknowledgement: RpcHandlerConfig['projectTransportAcknowledgement'];
     private socket: Socket | null = null;
+    private acknowledgedRegistrationMethods = new Set<string>();
+    private registrationReadinessWaiters = new Set<RegistrationReadinessWaiter>();
     private inFlightRequestCount = 0;
     private idleResolvers = new Set<() => void>();
 
@@ -70,6 +86,7 @@ export class RpcHandlerManager {
         this.handlers.set(prefixedMethod, handler);
 
         if (this.socket) {
+            this.acknowledgedRegistrationMethods.delete(prefixedMethod);
             this.socket.emit(SOCKET_RPC_EVENTS.REGISTER, { method: prefixedMethod });
         }
     }
@@ -173,7 +190,11 @@ export class RpcHandlerManager {
     }
 
     onSocketConnect(socket: Socket): void {
+        if (this.socket && this.socket !== socket) {
+            this.settleRegistrationReadinessWaiters('disconnected');
+        }
         this.socket = socket;
+        this.acknowledgedRegistrationMethods.clear();
         socket.on(SOCKET_RPC_EVENTS.ERROR, (error: unknown) => {
             if (this.socket !== socket) {
                 return;
@@ -187,6 +208,19 @@ export class RpcHandlerManager {
             this.logger('[RPC] [ERROR] Handler registration rejected', { error });
             this.onRegistrationError?.(error);
         });
+        socket.on(SOCKET_RPC_EVENTS.REGISTERED, (data: unknown) => {
+            if (this.socket !== socket) {
+                return;
+            }
+            const method = data && typeof data === 'object' && !Array.isArray(data)
+                ? (data as Record<string, unknown>).method
+                : null;
+            if (typeof method !== 'string' || !this.handlers.has(method)) {
+                return;
+            }
+            this.acknowledgedRegistrationMethods.add(method);
+            this.settleReadyRegistrationWaiters();
+        });
         for (const [prefixedMethod] of this.handlers) {
             socket.emit(SOCKET_RPC_EVENTS.REGISTER, { method: prefixedMethod });
         }
@@ -194,6 +228,44 @@ export class RpcHandlerManager {
 
     onSocketDisconnect(): void {
         this.socket = null;
+        this.acknowledgedRegistrationMethods.clear();
+        this.settleRegistrationReadinessWaiters('disconnected');
+    }
+
+    async waitForRegisteredHandlers(
+        methods: readonly string[],
+        options: Readonly<{ timeoutMs: number }>,
+    ): Promise<RpcHandlerRegistrationReadiness> {
+        const requiredMethods = Array.from(new Set(methods.map((method) => method.trim()).filter(Boolean)));
+        const requiredPrefixedMethods = new Set(requiredMethods.map((method) => this.getPrefixedMethod(method)));
+        if (this.areRegistrationMethodsAcknowledged(requiredPrefixedMethods)) {
+            return { status: 'ready' };
+        }
+        if (!this.socket) {
+            return {
+                status: 'disconnected',
+                missingMethods: this.readMissingRegistrationMethods(requiredMethods),
+            };
+        }
+
+        return await new Promise<RpcHandlerRegistrationReadiness>((resolve) => {
+            let waiter!: RegistrationReadinessWaiter;
+            const timeout = setTimeout(() => {
+                this.registrationReadinessWaiters.delete(waiter);
+                resolve({
+                    status: 'timeout',
+                    missingMethods: this.readMissingRegistrationMethods(requiredMethods),
+                });
+            }, Math.max(0, options.timeoutMs));
+            waiter = {
+                requiredMethods,
+                requiredPrefixedMethods,
+                resolve,
+                timeout,
+            };
+            this.registrationReadinessWaiters.add(waiter);
+            this.settleReadyRegistrationWaiters();
+        });
     }
 
     /**
@@ -230,6 +302,7 @@ export class RpcHandlerManager {
      */
     clearHandlers(): void {
         this.handlers.clear();
+        this.acknowledgedRegistrationMethods.clear();
         this.logger('Cleared all RPC handlers');
     }
 
@@ -239,6 +312,43 @@ export class RpcHandlerManager {
      */
     private getPrefixedMethod(method: string): string {
         return `${this.scopePrefix}:${method}`;
+    }
+
+    private areRegistrationMethodsAcknowledged(methods: ReadonlySet<string>): boolean {
+        for (const method of methods) {
+            if (!this.acknowledgedRegistrationMethods.has(method)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private readMissingRegistrationMethods(methods: readonly string[]): readonly string[] {
+        return methods.filter((method) => (
+            !this.acknowledgedRegistrationMethods.has(this.getPrefixedMethod(method))
+        ));
+    }
+
+    private settleReadyRegistrationWaiters(): void {
+        for (const waiter of Array.from(this.registrationReadinessWaiters)) {
+            if (!this.areRegistrationMethodsAcknowledged(waiter.requiredPrefixedMethods)) {
+                continue;
+            }
+            this.registrationReadinessWaiters.delete(waiter);
+            clearTimeout(waiter.timeout);
+            waiter.resolve({ status: 'ready' });
+        }
+    }
+
+    private settleRegistrationReadinessWaiters(status: 'disconnected'): void {
+        for (const waiter of Array.from(this.registrationReadinessWaiters)) {
+            this.registrationReadinessWaiters.delete(waiter);
+            clearTimeout(waiter.timeout);
+            waiter.resolve({
+                status,
+                missingMethods: this.readMissingRegistrationMethods(waiter.requiredMethods),
+            });
+        }
     }
 
     private encodeTransportResponse(

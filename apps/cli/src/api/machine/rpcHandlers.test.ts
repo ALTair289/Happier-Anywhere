@@ -890,7 +890,7 @@ describe('registerMachineRpcHandlers', () => {
     });
   });
 
-  it('preserves async spawn acceptance when the daemon session id is still pending', async () => {
+  it('preserves async spawn acceptance on the provider-safe RPC when the daemon session id is still pending', async () => {
     const registered = new Map<string, (params: any) => Promise<any>>();
     const rpcHandlerManager = {
       registerHandler: (method: string, handler: (params: any) => Promise<any>) => {
@@ -912,7 +912,7 @@ describe('registerMachineRpcHandlers', () => {
       },
     });
 
-    const handler = registered.get(RPC_METHODS.SPAWN_HAPPY_SESSION);
+    const handler = registered.get(RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE);
     expect(handler).toBeDefined();
 
     await expect(handler!({
@@ -923,6 +923,46 @@ describe('registerMachineRpcHandlers', () => {
       spawnNonce: 'spawn-nonce-pending-ack',
       sessionIdStatus: 'pending',
     });
+  });
+
+  it('resolves accepted spawn identity before returning success on the released legacy RPC', async () => {
+    const registered = new Map<string, (params: any) => Promise<any>>();
+    const rpcHandlerManager = {
+      registerHandler: (method: string, handler: (params: any) => Promise<any>) => {
+        registered.set(method, handler);
+      },
+    } as any;
+    const spawnSession = vi.fn(async () => ({
+      type: 'success' as const,
+      spawnNonce: 'spawn-nonce-legacy-pending',
+      sessionIdStatus: 'pending' as const,
+    }));
+    const resolveSpawnSessionByNonce = vi.fn(async () => ({
+      status: 'success' as const,
+      sessionId: 'session-from-legacy-contract',
+    }));
+    registerMachineRpcHandlers({
+      rpcHandlerManager,
+      handlers: {
+        spawnSession,
+        resolveSpawnSessionByNonce,
+        stopSession: async () => true,
+        requestShutdown: () => {},
+      },
+    });
+
+    const handler = registered.get(RPC_METHODS.SPAWN_HAPPY_SESSION);
+    expect(handler).toBeDefined();
+
+    await expect(handler!({
+      directory: '/tmp',
+      spawnNonce: 'spawn-nonce-legacy-pending',
+    })).resolves.toEqual({
+      type: 'success',
+      sessionId: 'session-from-legacy-contract',
+    });
+    expect(resolveSpawnSessionByNonce).toHaveBeenCalledWith('spawn-nonce-legacy-pending');
+    expect(spawnSession).toHaveBeenCalledTimes(1);
   });
 
   it('preserves structured connected-service error details from daemon spawn envelopes', async () => {

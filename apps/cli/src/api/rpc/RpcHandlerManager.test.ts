@@ -74,6 +74,100 @@ describe('RpcHandlerManager registration receipts', () => {
       requirement: { v: 1 },
     });
   });
+
+  it('reports ready only after every required handler is acknowledged on the active socket', async () => {
+    const rpc = new RpcHandlerManager({
+      scopePrefix: 'machine-1',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'dataKey',
+      logger: () => {},
+    });
+    rpc.registerHandler('core.spawn', async () => ({ ok: true }));
+    rpc.registerHandler('core.stop', async () => ({ ok: true }));
+    rpc.registerHandler('optional.status', async () => ({ ok: true }));
+    const boundary = createSocketEventBoundary();
+
+    rpc.onSocketConnect(boundary.socket);
+    const readiness = rpc.waitForRegisteredHandlers(
+      ['core.spawn', 'core.stop'],
+      { timeoutMs: 1_000 },
+    );
+    boundary.trigger(SOCKET_RPC_EVENTS.REGISTERED, { method: 'machine-1:optional.status' });
+    boundary.trigger(SOCKET_RPC_EVENTS.REGISTERED, { method: 'machine-1:core.spawn' });
+
+    let settled = false;
+    void readiness.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    boundary.trigger(SOCKET_RPC_EVENTS.REGISTERED, { method: 'machine-1:core.stop' });
+    await expect(readiness).resolves.toEqual({ status: 'ready' });
+  });
+
+  it('disconnects old waiters and ignores stale acknowledgements after reconnect', async () => {
+    const rpc = new RpcHandlerManager({
+      scopePrefix: 'machine-1',
+      encryptionKey: new Uint8Array(32),
+      encryptionVariant: 'dataKey',
+      logger: () => {},
+    });
+    rpc.registerHandler('core.spawn', async () => ({ ok: true }));
+    const first = createSocketEventBoundary();
+    const second = createSocketEventBoundary();
+
+    rpc.onSocketConnect(first.socket);
+    const firstReadiness = rpc.waitForRegisteredHandlers(['core.spawn'], { timeoutMs: 1_000 });
+    rpc.onSocketConnect(second.socket);
+    const secondReadiness = rpc.waitForRegisteredHandlers(['core.spawn'], { timeoutMs: 1_000 });
+
+    first.trigger(SOCKET_RPC_EVENTS.REGISTERED, { method: 'machine-1:core.spawn' });
+    await expect(firstReadiness).resolves.toEqual({
+      status: 'disconnected',
+      missingMethods: ['core.spawn'],
+    });
+
+    let secondSettled = false;
+    void secondReadiness.then(() => {
+      secondSettled = true;
+    });
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+
+    second.trigger(SOCKET_RPC_EVENTS.REGISTERED, { method: 'machine-1:core.spawn' });
+    await expect(secondReadiness).resolves.toEqual({ status: 'ready' });
+  });
+
+  it('returns the exact missing handlers when the readiness deadline expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const rpc = new RpcHandlerManager({
+        scopePrefix: 'machine-1',
+        encryptionKey: new Uint8Array(32),
+        encryptionVariant: 'dataKey',
+        logger: () => {},
+      });
+      rpc.registerHandler('core.spawn', async () => ({ ok: true }));
+      rpc.registerHandler('core.stop', async () => ({ ok: true }));
+      const boundary = createSocketEventBoundary();
+      rpc.onSocketConnect(boundary.socket);
+
+      const readiness = rpc.waitForRegisteredHandlers(
+        ['core.spawn', 'core.stop'],
+        { timeoutMs: 50 },
+      );
+      boundary.trigger(SOCKET_RPC_EVENTS.REGISTERED, { method: 'machine-1:core.spawn' });
+      await vi.advanceTimersByTimeAsync(50);
+
+      await expect(readiness).resolves.toEqual({
+        status: 'timeout',
+        missingMethods: ['core.stop'],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('RpcHandlerManager.invokeLocal', () => {
