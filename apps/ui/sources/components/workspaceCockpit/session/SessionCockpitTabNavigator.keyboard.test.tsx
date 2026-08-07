@@ -12,7 +12,6 @@ const navigatorState = vi.hoisted(() => ({
     },
     localSettingReads: [] as string[],
     persistedSurfaces: [] as Array<Readonly<{ sessionId: string; surface: string }>>,
-    screenOptionsByName: {} as Record<string, Record<string, unknown> | null>,
     surfaceSwitchers: [] as Array<(surface: 'chat' | 'browse' | 'git' | 'navigation' | 'tabs' | 'terminal') => void>,
 }));
 
@@ -80,7 +79,6 @@ vi.mock('@react-navigation/bottom-tabs', () => ({
             name: string;
             options?: Record<string, unknown>;
         }) => {
-            navigatorState.screenOptionsByName[name] = options ?? null;
             return React.createElement('BottomTabScreen', { name, options }, typeof children === 'function'
                 ? children({ navigation: { navigate: () => {} } })
                 : children);
@@ -135,7 +133,6 @@ describe('SessionCockpitTabNavigator keyboard behavior', () => {
         navigatorState.registeredChrome = null;
         navigatorState.localSettingReads = [];
         navigatorState.persistedSurfaces = [];
-        navigatorState.screenOptionsByName = {};
         navigatorState.surfaceSwitchers = [];
         navigationFocusState.setFocused(true);
     });
@@ -195,24 +192,7 @@ describe('SessionCockpitTabNavigator keyboard behavior', () => {
         expect(navigatorState.persistedSurfaces).toEqual([{ sessionId: 's1', surface: 'navigation' }]);
     });
 
-    it('eagerly mounts the chat host when transcript navigation is the initial cockpit surface', async () => {
-        const { SessionCockpitTabNavigator } = await import('./SessionCockpitTabNavigator');
-
-        await renderScreen(
-            <SessionCockpitTabNavigator
-                initialSurface="navigation"
-                scopeId="session:s1"
-                sessionId="s1"
-                terminalTabAvailable
-            />,
-        );
-
-        expect(navigatorState.screenOptionsByName.chat).toEqual(expect.objectContaining({
-            lazy: false,
-        }));
-    });
-
-    it('keeps an inactive eager chat scene mounted while excluding its descendants, then restores activity on focus', async () => {
+    it('keeps an inactive chat scene mounted while excluding its descendants, then restores activity on focus', async () => {
         const { Platform } = await import('react-native');
         const originalPlatform = Platform.OS;
         Object.defineProperty(Platform, 'OS', { configurable: true, value: 'web' });

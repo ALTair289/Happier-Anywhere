@@ -30,9 +30,6 @@ const Tab = createBottomTabNavigator<SessionCockpitTabParamList>();
 const SESSION_COCKPIT_SURFACES_WITH_TERMINAL: readonly SessionMobileSurface[] = ['chat', 'browse', 'git', 'navigation', 'tabs', 'terminal'];
 const SESSION_COCKPIT_SURFACES_WITHOUT_TERMINAL: readonly SessionMobileSurface[] = ['chat', 'browse', 'git', 'navigation', 'tabs'];
 const DISABLED_NAVIGATION_LINKING = { enabled: false, prefixes: [] };
-const SESSION_COCKPIT_CHAT_PRELOAD_SCREEN_OPTIONS = {
-    lazy: false,
-} as const;
 const SESSION_COCKPIT_TAB_SCREEN_OPTIONS = {
     headerShown: false,
     animation: 'none',
@@ -82,13 +79,7 @@ export const SessionCockpitTabNavigator = React.memo((props: SessionCockpitTabNa
                     tabBar={renderHiddenTabBar}
                 >
                     {surfaces.map((surface) => (
-                        <Tab.Screen
-                            key={surface}
-                            name={surface}
-                            options={surface === 'chat' && initialSurface === 'navigation'
-                                ? SESSION_COCKPIT_CHAT_PRELOAD_SCREEN_OPTIONS
-                                : undefined}
-                        >
+                        <Tab.Screen key={surface} name={surface}>
                             {({ navigation }) => (
                                 <SessionCockpitSceneActivityBoundary surface={surface}>
                                     <SessionCockpitSurfaceNavigationProvider
