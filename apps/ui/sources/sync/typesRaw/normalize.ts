@@ -567,7 +567,7 @@ export function normalizeRawMessage(
             }
 
             // Progress records are transport-level status updates and are not rendered in transcript.
-            if (raw.content.data.type === 'progress') {
+            if (raw.content.data.type === 'progress' || raw.content.data.type === 'tool_progress') {
                 return null;
             }
 
