@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 const workflowsDir = join(repoRoot, '.github', 'workflows');
+const reviewedSetupNodeUse = 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020';
 
 test('workflows use Node 22 policy and do not pin Node 20', async () => {
   const files = (await readdir(workflowsDir)).filter((name) => name.endsWith('.yml'));
@@ -25,7 +26,10 @@ test('workflows that run pipeline scripts set up Node 22', async () => {
   for (const file of files) {
     const raw = await readFile(join(workflowsDir, file), 'utf8');
     if (!raw.includes('node scripts/pipeline/')) continue;
-    assert.match(raw, /actions\/setup-node@v4/, `${file} must include actions/setup-node@v4 when running pipeline scripts`);
+    assert.ok(
+      raw.includes(reviewedSetupNodeUse),
+      `${file} must include the reviewed actions/setup-node v4 action when running pipeline scripts`,
+    );
     const hasDirect22 = /node-version:\s*22(\.x)?\b/.test(raw);
     const usesEnvNodeVersion = /node-version:\s*\$\{\{\s*env\.NODE_VERSION\s*\}\}/.test(raw) && /NODE_VERSION:\s*"?22\.x"?/.test(raw);
     assert.ok(hasDirect22 || usesEnvNodeVersion, `${file} must use node-version 22.x when running pipeline scripts`);

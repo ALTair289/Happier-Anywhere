@@ -11,6 +11,8 @@ test('tests workflow defaults installer smoke to the dev lane on non-main branch
   const raw = await readFile(join(repoRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
 
   assert.match(raw, /installers_channel:/, 'tests.yml should expose installers_channel input');
+  assert.match(raw, /installers_source:/, 'tests.yml should expose an exact installer source input');
+  assert.match(raw, /installers_ref:/, 'tests.yml should expose an exact installer ref input');
   assert.match(raw, /node scripts\/pipeline\/run\.mjs release-validate/, 'tests.yml should delegate installer smoke to release-validate');
   assert.match(raw, /--suite installers-smoke/, 'tests.yml should run the installer smoke suite');
   assert.match(raw, /INSTALLERS_SOURCE:/, 'tests.yml should route installer source selection through env');
@@ -24,16 +26,8 @@ test('tests workflow defaults installer smoke to the dev lane on non-main branch
     /INSTALLERS_CHANNEL:\s*\$\{\{\s*\(github\.event_name == 'workflow_dispatch' \|\| github\.event_name == 'workflow_call'\)\s*&&\s*inputs\.installers_channel\s*\|\|\s*\(\(github\.event_name == 'push' && github\.ref_name == 'main'\) \|\| \(github\.event_name == 'pull_request' && github\.base_ref == 'main'\)\)\s*&&\s*'stable'\s*\|\|\s*'dev'\s*\}\}/,
     'tests.yml should default installer smoke to dev outside the main production lane',
   );
-  assert.match(
-    raw,
-    /INSTALLERS_SOURCE:\s*\$\{\{\s*\(\(github\.event_name == 'workflow_dispatch' \|\| github\.event_name == 'workflow_call'\) \|\| \(\(github\.event_name == 'push' && github\.ref_name == 'main'\) \|\| \(github\.event_name == 'pull_request' && github\.base_ref == 'main'\)\)\)\s*&&\s*'published-channel'\s*\|\|\s*'local-build'\s*\}\}/,
-    'tests.yml should validate non-production branch installs from local-build assets while preserving published-channel callers',
-  );
-  assert.match(
-    raw,
-    /INSTALLERS_REF:\s*\$\{\{\s*\(github\.event_name == 'workflow_dispatch' \|\| github\.event_name == 'workflow_call'\)\s*&&\s*inputs\.installers_channel\s*\|\|\s*\(\(github\.event_name == 'push' && github\.ref_name == 'main'\) \|\| \(github\.event_name == 'pull_request' && github\.base_ref == 'main'\)\)\s*&&\s*'stable'\s*\|\|\s*'\.'\s*\}\}/,
-    'tests.yml should use the repo local-build ref outside published installer lanes',
-  );
+  assert.match(raw, /inputs\.installers_source/);
+  assert.match(raw, /inputs\.installers_ref != '' && inputs\.installers_ref/);
   assert.doesNotMatch(raw, /cli-preview/, 'tests.yml should not own rolling release tag names directly');
   assert.doesNotMatch(raw, /install-preview\.(sh|ps1)/, 'tests.yml should not own installer filename selection directly');
 });
