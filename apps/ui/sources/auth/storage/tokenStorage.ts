@@ -189,11 +189,14 @@ async function getServerScopedKeys(
     const serverId = resolvedServerId ?? (activeServerUrl && activeServerUrl === normalizedUrl ? activeServerId : null);
 
     if (!serverId) {
-        const hashScope = await getServerHashScopeForNormalizedUrl(normalizedUrl);
-        const legacyHashScope =
+        // Both digests reach the same platform crypto boundary and neither depends on the other;
+        // chaining them put a second avoidable round trip on the cold boot credential read.
+        const [hashScope, legacyHashScope] = await Promise.all([
+            getServerHashScopeForNormalizedUrl(normalizedUrl),
             legacyNormalizedUrlForHash
-                ? await getServerHashScopeForNormalizedUrl(legacyNormalizedUrlForHash)
-                : null;
+                ? getServerHashScopeForNormalizedUrl(legacyNormalizedUrlForHash)
+                : Promise.resolve(null),
+        ]);
         return {
             primary: makeScopedKey(baseKey, hashScope),
             legacy: legacyHashScope && legacyHashScope !== hashScope ? [makeScopedKey(baseKey, legacyHashScope)] : [],
@@ -613,6 +616,35 @@ async function removeCredentialByKey(key: string): Promise<boolean> {
     }
 }
 
+/**
+ * Single owner for "read the credentials that belong to this scope layout".
+ *
+ * The primary scope answers on every steady-state launch, so it stays a single read. Legacy scopes
+ * only exist to migrate a device that was written by an older scope rule, and on native each probe
+ * is a keychain round trip — probing them one at a time put N sequential native reads on the cold
+ * boot gate. They are independent reads, so they run together and the declared scope order still
+ * decides the winner.
+ */
+async function readCredentialsForScopedKeys(keys: ScopedStorageKeys): Promise<AuthCredentials | null> {
+    const primaryParsed = parseCredentialsRaw(await readCredentialRawByKey(keys.primary));
+    if (primaryParsed) return primaryParsed;
+    if (keys.legacy.length === 0) return null;
+
+    const legacyRaws = await Promise.all(keys.legacy.map((legacyKey) => readCredentialRawByKey(legacyKey)));
+    for (const [index, legacyKey] of keys.legacy.entries()) {
+        const legacyRaw = legacyRaws[index] ?? null;
+        const legacyParsed = parseCredentialsRaw(legacyRaw);
+        if (!legacyParsed || !legacyRaw) continue;
+
+        const migrated = await writeCredentialRawByKey(keys.primary, legacyRaw);
+        if (migrated) {
+            await removeCredentialByKey(legacyKey);
+        }
+        return legacyParsed;
+    }
+    return null;
+}
+
 type CredentialCleanupTarget = Readonly<{
     serverUrl: string;
     serverId?: string | null;
@@ -784,46 +816,14 @@ export const TokenStorage = {
     },
 
     async getCredentials(): Promise<AuthCredentials | null> {
-        const keys = await getAuthKeys();
-        const primaryRaw = await readCredentialRawByKey(keys.primary);
-        const primaryParsed = parseCredentialsRaw(primaryRaw);
-        if (primaryParsed) return primaryParsed;
-
-        for (const legacyKey of keys.legacy) {
-            const legacyRaw = await readCredentialRawByKey(legacyKey);
-            const legacyParsed = parseCredentialsRaw(legacyRaw);
-            if (!legacyParsed || !legacyRaw) continue;
-
-            const migrated = await writeCredentialRawByKey(keys.primary, legacyRaw);
-            if (migrated) {
-                await removeCredentialByKey(legacyKey);
-            }
-            return legacyParsed;
-        }
-        return null;
+        return await readCredentialsForScopedKeys(await getAuthKeys());
     },
 
     async getCredentialsForServerUrl(
         serverUrl: string,
         options: ServerCredentialLookupOptions = {},
     ): Promise<AuthCredentials | null> {
-        const keys = await getServerScopedKeys(AUTH_KEY, serverUrl, options);
-        const primaryRaw = await readCredentialRawByKey(keys.primary);
-        const primaryParsed = parseCredentialsRaw(primaryRaw);
-        if (primaryParsed) return primaryParsed;
-
-        for (const legacyKey of keys.legacy) {
-            const legacyRaw = await readCredentialRawByKey(legacyKey);
-            const legacyParsed = parseCredentialsRaw(legacyRaw);
-            if (!legacyParsed || !legacyRaw) continue;
-
-            const migrated = await writeCredentialRawByKey(keys.primary, legacyRaw);
-            if (migrated) {
-                await removeCredentialByKey(legacyKey);
-            }
-            return legacyParsed;
-        }
-        return null;
+        return await readCredentialsForScopedKeys(await getAuthKeys(serverUrl, options));
     },
 
     async setCredentials(credentials: AuthCredentials): Promise<boolean> {
