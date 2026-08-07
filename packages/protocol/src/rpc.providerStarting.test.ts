@@ -5,6 +5,7 @@ import { RPC_METHODS, resolveSocketRpcProviderStartingMethod } from "./rpc";
 describe("resolveSocketRpcProviderStartingMethod", () => {
   it.each([
     RPC_METHODS.SPAWN_HAPPY_SESSION,
+    RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
     RPC_METHODS.SESSION_CONTINUE_WITH_REPLAY,
     RPC_METHODS.SESSION_FORK,
     RPC_METHODS.DAEMON_SESSION_CONNECTED_SERVICE_AUTH_SWITCH,

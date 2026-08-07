@@ -244,6 +244,27 @@ describe('session work-state RPC contracts', () => {
         expect(SessionConnectedServiceAuthApplyGenerationRequestV1Schema.parse({
             serviceId: 'openai-codex',
             reason: 'diagnostic',
+            applicationSettled: true,
+            authGeneration: {
+                kind: 'current_auth_group_available',
+                groupId: 'group-1',
+                generation: 7,
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+            },
+        })).toEqual({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
+            applicationSettled: true,
+            authGeneration: {
+                kind: 'current_auth_group_available',
+                groupId: 'group-1',
+                generation: 7,
+                credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+            },
+        });
+        expect(SessionConnectedServiceAuthApplyGenerationRequestV1Schema.parse({
+            serviceId: 'openai-codex',
+            reason: 'diagnostic',
             authGeneration: {
                 kind: 'current_auth_group_unavailable',
                 groupId: 'group-1',
