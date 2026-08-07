@@ -5,6 +5,7 @@ import {
     planSessionListRenderableMerge,
     planSessionListRenderablePatches,
     planSessionListRenderableReplacement,
+    resolveSessionListRenderableRemovalWindow,
 } from './sessionListRenderableStoreUpdate';
 
 function makeRenderable(
@@ -360,5 +361,74 @@ describe('sessionListRenderableStoreUpdate', () => {
         expect(plan.listViewRowRefreshSessionIds).toEqual([]);
         expect(plan.nextRenderables.s1.pendingBlockedCount).toBe(1);
         expect(plan.nextRenderables.s1.hasPendingUserActionRequests).toBe(true);
+    });
+
+    describe('window-scoped replacement removal', () => {
+        const pagedIn = makeRenderable('s_paged_in', { meaningfulActivityAt: 100, createdAt: 100 });
+        const archivedInWindow = makeRenderable('s_archived', { meaningfulActivityAt: 900, createdAt: 900 });
+        const head = makeRenderable('s_head', { meaningfulActivityAt: 1_000, createdAt: 1_000 });
+
+        it('keeps rows the user paged in below the range the response covers', () => {
+            const plan = planSessionListRenderableReplacement({
+                previousRenderables: {
+                    s_head: head,
+                    s_archived: archivedInWindow,
+                    s_paged_in: pagedIn,
+                },
+                incomingRenderables: [head, archivedInWindow],
+                removalWindow: resolveSessionListRenderableRemovalWindow([head, archivedInWindow]),
+                isSessionListViewDataUninitialized: false,
+            });
+
+            expect(plan.nextRenderables.s_paged_in).toBe(pagedIn);
+            expect(plan.removedSessionIds).toEqual([]);
+        });
+
+        it('still evicts a row the response omits from inside the range it covers', () => {
+            const plan = planSessionListRenderableReplacement({
+                previousRenderables: {
+                    s_head: head,
+                    s_archived: archivedInWindow,
+                    s_paged_in: pagedIn,
+                },
+                // `s_archived` was archived, so the refreshed first page omits it even
+                // though its activity time sits inside the covered range.
+                incomingRenderables: [head, pagedIn],
+                removalWindow: resolveSessionListRenderableRemovalWindow([head, pagedIn]),
+                isSessionListViewDataUninitialized: false,
+            });
+
+            expect(plan.removedSessionIds).toEqual(['s_archived']);
+            expect(plan.nextRenderables.s_archived).toBeUndefined();
+            expect(plan.nextRenderables.s_paged_in).toBeDefined();
+        });
+
+        it('sweeps every omitted row when the response covers the whole list', () => {
+            const plan = planSessionListRenderableReplacement({
+                previousRenderables: {
+                    s_head: head,
+                    s_archived: archivedInWindow,
+                    s_paged_in: pagedIn,
+                },
+                incomingRenderables: [head],
+                removalWindow: null,
+                isSessionListViewDataUninitialized: false,
+            });
+
+            expect([...plan.removedSessionIds].sort()).toEqual(['s_archived', 's_paged_in']);
+        });
+
+        it('evicts rows sharing the oldest covered activity time, as an unwindowed replacement would', () => {
+            const tied = makeRenderable('a_row', { meaningfulActivityAt: 500, createdAt: 500 });
+            const lastCovered = makeRenderable('z_row', { meaningfulActivityAt: 500, createdAt: 500 });
+            const plan = planSessionListRenderableReplacement({
+                previousRenderables: { a_row: tied, z_row: lastCovered },
+                incomingRenderables: [lastCovered],
+                removalWindow: resolveSessionListRenderableRemovalWindow([lastCovered]),
+                isSessionListViewDataUninitialized: false,
+            });
+
+            expect(plan.removedSessionIds).toEqual(['a_row']);
+        });
     });
 });

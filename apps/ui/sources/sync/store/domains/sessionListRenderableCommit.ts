@@ -27,6 +27,7 @@ import {
     planSessionListRenderableMerge,
     planSessionListRenderablePatches,
     planSessionListRenderableReplacement,
+    resolveSessionListRenderableRemovalWindow,
     type SessionListRenderablePatch,
     type SessionListRenderableStoreUpdatePlan,
 } from './sessionListRenderableStoreUpdate';
@@ -183,6 +184,9 @@ export function planSessionListRenderableReplacementCommit(input: Readonly<{
     return planSessionListRenderableReplacement({
         previousRenderables: input.state.sessionListRenderables ?? {},
         incomingRenderables: input.incomingRenderables,
+        // A replacement response replaces the range it covers, not the whole store: rows
+        // the user paged in below that range survive the refresh.
+        removalWindow: resolveSessionListRenderableRemovalWindow(input.incomingRenderables),
         isSessionListViewDataUninitialized: input.state.sessionListViewData === null,
         rebuildOnAttentionPromotionFieldsChange:
             shouldRebuildOnSessionPlacementFieldsChange(input.state.settings),

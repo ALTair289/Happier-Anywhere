@@ -17,6 +17,57 @@ export type SessionListRenderablePatch = Readonly<{
     patch: SessionListRenderablePatchFields;
 }>;
 
+/**
+ * Inclusive floor, on the server list ordering key (`meaningfulActivityAt desc, id
+ * desc`), of the range a session-list response actually covers.
+ *
+ * A replacement response is only authoritative about the range it covers: inside it,
+ * an omitted row is genuinely gone (archived, or deleted while the client was away);
+ * below it, an omitted row is simply a row the page did not reach — typically one the
+ * user paged in. Evicting those was deleting the user's paged-in list on every
+ * foreground refresh and forcing a full view-data rebuild plus warm-cache rewrite.
+ *
+ * `null` means the response covers the whole list, so every omitted row is evicted.
+ */
+export type SessionListRenderableRemovalWindow = Readonly<{
+    meaningfulActivityAt: number;
+}>;
+
+function resolveRenderableOrderingActivityAt(renderable: SessionListRenderableSession): number {
+    return typeof renderable.meaningfulActivityAt === 'number'
+        ? renderable.meaningfulActivityAt
+        : renderable.createdAt;
+}
+
+/**
+ * Derives the covered range from the response itself. The session-list response is
+ * emitted in server order — supplementary rows (active, pinned, attention) first, then
+ * the ordered page — so its last row is the oldest row the ordered page reached.
+ *
+ * A supplementary row landing last only raises the floor, which retains more rows than
+ * strictly necessary; that fails safe, because archive and delete both have their own
+ * explicit signals (`archivedAt` on the row, `deleteSession` from the changes stream).
+ */
+export function resolveSessionListRenderableRemovalWindow(
+    incomingRenderables: ReadonlyArray<SessionListRenderableSession>,
+): SessionListRenderableRemovalWindow | null {
+    const oldestCoveredRow = incomingRenderables[incomingRenderables.length - 1];
+    if (!oldestCoveredRow) return null;
+    return { meaningfulActivityAt: resolveRenderableOrderingActivityAt(oldestCoveredRow) };
+}
+
+/**
+ * The floor itself stays inside the window: rows sharing the oldest covered activity
+ * time are evicted exactly as an unwindowed replacement would evict them, so this
+ * change only ever spares rows the page provably did not reach.
+ */
+function isRenderableInsideRemovalWindow(
+    renderable: SessionListRenderableSession,
+    window: SessionListRenderableRemovalWindow,
+): boolean {
+    return resolveRenderableOrderingActivityAt(renderable) >= window.meaningfulActivityAt;
+}
+
 export type SessionListRenderableStoreUpdatePlan = Readonly<{
     nextRenderables: Record<string, SessionListRenderableSession>;
     noop: boolean;
@@ -159,7 +210,7 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
     previousRenderables: Record<string, SessionListRenderableSession>;
     incomingRenderables: ReadonlyArray<SessionListRenderableSession>;
     isSessionListViewDataUninitialized: boolean;
-    removeOmittedPreviousRenderables: boolean;
+    shouldRemoveOmittedPreviousRenderable: ((previous: SessionListRenderableSession) => boolean) | null;
     rebuildOnAttentionPromotionFieldsChange?: boolean;
     didListViewFieldsChange?: DidListViewFieldsChange;
     didListViewRowFieldsChange?: DidListViewRowFieldsChange;
@@ -168,9 +219,7 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
     const previousIds = Object.keys(previousRenderables);
     const incomingIds = new Set<string>();
     let nextRenderables = previousRenderables;
-    let didAnyRenderableChange = input.removeOmittedPreviousRenderables
-        ? previousIds.length !== input.incomingRenderables.length
-        : false;
+    let didAnyRenderableChange = false;
     let changedCount = 0;
     let removedCount = 0;
     const changedSessionIds: string[] = [];
@@ -240,18 +289,20 @@ function planSessionListRenderableIncomingRows(input: Readonly<{
         }
     }
 
-    if (input.removeOmittedPreviousRenderables) {
+    const shouldRemoveOmittedPreviousRenderable = input.shouldRemoveOmittedPreviousRenderable;
+    if (shouldRemoveOmittedPreviousRenderable) {
         for (const sessionId of previousIds) {
-            if (!incomingIds.has(sessionId)) {
-                if (nextRenderables === previousRenderables) {
-                    nextRenderables = { ...previousRenderables };
-                }
-                delete nextRenderables[sessionId];
-                removedCount += 1;
-                removedSessionIds.push(sessionId);
-                didImmediateWarmCacheRelevantRenderableChange = true;
-                needsSessionListViewDataRebuild = true;
+            if (incomingIds.has(sessionId)) continue;
+            if (!shouldRemoveOmittedPreviousRenderable(previousRenderables[sessionId])) continue;
+            if (nextRenderables === previousRenderables) {
+                nextRenderables = { ...previousRenderables };
             }
+            delete nextRenderables[sessionId];
+            removedCount += 1;
+            removedSessionIds.push(sessionId);
+            didAnyRenderableChange = true;
+            didImmediateWarmCacheRelevantRenderableChange = true;
+            needsSessionListViewDataRebuild = true;
         }
     }
 
@@ -280,13 +331,17 @@ export function planSessionListRenderableReplacement(input: Readonly<{
     previousRenderables: Record<string, SessionListRenderableSession>;
     incomingRenderables: ReadonlyArray<SessionListRenderableSession>;
     isSessionListViewDataUninitialized: boolean;
+    removalWindow?: SessionListRenderableRemovalWindow | null;
     rebuildOnAttentionPromotionFieldsChange?: boolean;
     didListViewFieldsChange?: DidListViewFieldsChange;
     didListViewRowFieldsChange?: DidListViewRowFieldsChange;
 }>): SessionListRenderableStoreUpdatePlan {
+    const removalWindow = input.removalWindow ?? null;
     return planSessionListRenderableIncomingRows({
         ...input,
-        removeOmittedPreviousRenderables: true,
+        shouldRemoveOmittedPreviousRenderable: removalWindow
+            ? (previous) => isRenderableInsideRemovalWindow(previous, removalWindow)
+            : () => true,
     });
 }
 
@@ -300,7 +355,7 @@ export function planSessionListRenderableMerge(input: Readonly<{
 }>): SessionListRenderableStoreUpdatePlan {
     return planSessionListRenderableIncomingRows({
         ...input,
-        removeOmittedPreviousRenderables: false,
+        shouldRemoveOmittedPreviousRenderable: null,
     });
 }
 
