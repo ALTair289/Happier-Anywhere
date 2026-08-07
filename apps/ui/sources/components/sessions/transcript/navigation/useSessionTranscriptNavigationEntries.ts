@@ -98,7 +98,12 @@ export function useSessionTranscriptNavigationEntriesFromMessages(params: Readon
         () => resolveTranscriptNavigationRemoteHistoryBeforeSeq(transcriptNavigationLoadedMessages),
         [transcriptNavigationLoadedMessages],
     );
-    const remoteHistoryEnabled = !forkedTranscriptEnabled && transcriptNavigationRemoteBeforeSeq !== null;
+    // A missing cursor is not a reason to fetch nothing: it is the newest page, which is exactly
+    // what a surface with no transcript loaded needs. Gating enablement on it also detached this
+    // consumer from the shared history record, so it could not even read rows another consumer
+    // had already downloaded. A forked transcript is the only genuine exclusion — its rows come
+    // from the fork snapshot, not the session's own seq range.
+    const remoteHistoryEnabled = !forkedTranscriptEnabled;
     const transcriptNavigationRemoteHistory = useUserMessageHistoryRemoteEntries({
         enabled: remoteHistoryEnabled,
         initialBeforeSeq: transcriptNavigationRemoteBeforeSeq,
