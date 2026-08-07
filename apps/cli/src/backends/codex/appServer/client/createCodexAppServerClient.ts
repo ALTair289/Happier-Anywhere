@@ -212,21 +212,73 @@ function toMessageKey(id: number | string | null | undefined): string | null {
     return `${typeof id}:${String(id)}`;
 }
 
-function readJsonRpcIdFromLineStartSample(sample: string): number | string | null {
-    const match = /"id"\s*:\s*(-?\d+|"((?:\\.|[^"\\])*)")/.exec(sample);
-    if (!match) return null;
-    const raw = match[1];
-    if (!raw) return null;
-    if (raw.startsWith('"')) {
-        try {
-            const parsed = JSON.parse(raw) as unknown;
-            return typeof parsed === 'string' ? parsed : null;
-        } catch {
-            return null;
+function readJsonRpcResponseIdFromLineStartSample(sample: string): number | string | null {
+    let objectDepth = 0;
+    let arrayDepth = 0;
+    let responseId: number | string | null = null;
+    let hasResponsePayload = false;
+    let hasMethod = false;
+    const readStringEnd = (start: number): number => {
+        let escaped = false;
+        for (let index = start + 1; index < sample.length; index += 1) {
+            const char = sample[index];
+            if (escaped) {
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                return index;
+            }
         }
+        return -1;
+    };
+    for (let index = 0; index < sample.length; index += 1) {
+        const char = sample[index];
+        if (char === '"') {
+            const end = readStringEnd(index);
+            if (end < 0) break;
+            if (objectDepth === 1 && arrayDepth === 0) {
+                let cursor = end + 1;
+                while (/\s/.test(sample[cursor] ?? '')) cursor += 1;
+                if (sample[cursor] === ':') {
+                    let key: unknown;
+                    try {
+                        key = JSON.parse(sample.slice(index, end + 1));
+                    } catch {
+                        return null;
+                    }
+                    if (key === 'method') {
+                        hasMethod = true;
+                    } else if (key === 'result' || key === 'error') {
+                        hasResponsePayload = true;
+                    } else if (key === 'id') {
+                        cursor += 1;
+                        while (/\s/.test(sample[cursor] ?? '')) cursor += 1;
+                        if (sample[cursor] === '"') {
+                            const valueEnd = readStringEnd(cursor);
+                            if (valueEnd < 0) return null;
+                            try {
+                                const value: unknown = JSON.parse(sample.slice(cursor, valueEnd + 1));
+                                responseId = typeof value === 'string' ? value : null;
+                            } catch {
+                                return null;
+                            }
+                        } else {
+                            const numberMatch = /^-?\d+/.exec(sample.slice(cursor));
+                            if (!numberMatch) return null;
+                            const value = Number(numberMatch[0]);
+                            responseId = Number.isSafeInteger(value) ? value : null;
+                        }
+                    }
+                }
+            }
+            index = end;
+        } else if (char === '{') objectDepth += 1;
+        else if (char === '}') objectDepth -= 1;
+        else if (char === '[') arrayDepth += 1;
+        else if (char === ']') arrayDepth -= 1;
     }
-    const parsed = Number.parseInt(raw, 10);
-    return Number.isSafeInteger(parsed) ? parsed : null;
+    return hasResponsePayload && !hasMethod ? responseId : null;
 }
 
 function createDisposedError(): Error {
@@ -344,6 +396,7 @@ export async function createCodexAppServerClient(params: Readonly<{
     const requestHandlers = new Map<string, JsonRpcRequestHandler>();
     const notificationHandlers = new Map<string, Set<JsonRpcNotificationHandler>>();
     const exitHandlers = new Set<CodexAppServerExitHandler>();
+    let reportedExitFailure: Error | null = null;
     let writeChain = Promise.resolve();
     let nextId = 0;
     let disposing = false;
@@ -427,10 +480,31 @@ export async function createCodexAppServerClient(params: Readonly<{
         }
     };
 
-    const failWith = (error: unknown): void => {
+    const reportExit = (failure: Error): void => {
+        if (reportedExitFailure || disposing) return;
+        reportedExitFailure = failure;
+        for (const handler of [...exitHandlers]) {
+            void Promise.resolve(handler(failure)).catch(() => undefined);
+        }
+    };
+
+    const failWith = (error: unknown, options?: Readonly<{ terminateChild?: boolean }>): void => {
         const failure = error instanceof Error ? error : new Error(String(error));
         failWaiters(state, failure);
-        failPendingRequests(failure);
+        const fatalFailure = state.fatalError ?? failure;
+        failPendingRequests(fatalFailure);
+        reportExit(fatalFailure);
+        if (options?.terminateChild === false || disposing) return;
+        try {
+            child.stdin?.end();
+        } catch {
+            // ignore
+        }
+        try {
+            child.kill();
+        } catch {
+            // ignore
+        }
     };
 
     const handleIncomingMessage = (message: JsonRpcMessage): void => {
@@ -487,17 +561,22 @@ export async function createCodexAppServerClient(params: Readonly<{
         pending.resolve(message.result);
     };
 
-    const handleOversizedJsonLine = (sample: string, maxBufferedChars: number): void => {
-        const error = new CodexAppServerJsonLineTooLargeError(maxBufferedChars);
-        const requestKey = toMessageKey(readJsonRpcIdFromLineStartSample(sample));
+    const rejectCorrelatedJsonLine = (sample: string, error: Error): boolean => {
+        const requestKey = toMessageKey(readJsonRpcResponseIdFromLineStartSample(sample));
         if (requestKey) {
             const pending = pendingRequests.get(requestKey);
             if (pending) {
                 pendingRequests.delete(requestKey);
                 pending.reject(error);
-                return;
+                return true;
             }
         }
+        return false;
+    };
+
+    const handleOversizedJsonLine = (sample: string, maxBufferedChars: number): void => {
+        const error = new CodexAppServerJsonLineTooLargeError(maxBufferedChars);
+        if (rejectCorrelatedJsonLine(sample, error)) return;
         failWith(error);
     };
 
@@ -507,7 +586,9 @@ export async function createCodexAppServerClient(params: Readonly<{
             try {
                 handleIncomingMessage(JSON.parse(rawLine) as JsonRpcMessage);
             } catch (error) {
-                failWith(new Error(`Invalid Codex app-server JSON output: ${error instanceof Error ? error.message : String(error)}`));
+                const failure = new Error(`Invalid Codex app-server JSON output: ${error instanceof Error ? error.message : String(error)}`);
+                if (rejectCorrelatedJsonLine(rawLine, failure)) return;
+                failWith(failure);
             }
         },
         {
@@ -542,10 +623,7 @@ export async function createCodexAppServerClient(params: Readonly<{
             ? `\n${sanitizeCodexAppServerRpcDiagnosticString(stderrBuffer.trim())}`
             : '';
         const failure = new Error(`Codex app-server exited before completing the request (code=${code ?? 'null'} signal=${signal ?? 'null'})${suffix}`);
-        failWith(failure);
-        for (const handler of [...exitHandlers]) {
-            void Promise.resolve(handler(failure)).catch(() => undefined);
-        }
+        failWith(failure, { terminateChild: false });
     });
 
     const request = async (
@@ -655,6 +733,10 @@ export async function createCodexAppServerClient(params: Readonly<{
     };
 
     const onExit = (handler: CodexAppServerExitHandler): (() => void) => {
+        if (reportedExitFailure) {
+            void Promise.resolve(handler(reportedExitFailure)).catch(() => undefined);
+            return () => undefined;
+        }
         exitHandlers.add(handler);
         return () => {
             exitHandlers.delete(handler);

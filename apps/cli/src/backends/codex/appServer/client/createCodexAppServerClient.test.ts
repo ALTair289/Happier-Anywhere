@@ -479,6 +479,114 @@ describe('createCodexAppServerClient', () => {
         });
     });
 
+    it('rejects only the matching request when a newline-complete response is malformed', async () => {
+        await withTempDir('happier-codex-app-server-client-correlated-invalid-json-', async (root) => {
+            const pidFile = join(root, 'pid.txt');
+            const fakeAppServer = await writeFakeCodexAppServerScript({
+                dir: root,
+                bodyLines: [
+                    `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid), 'utf8');`,
+                    'for await (const line of rl) {',
+                    '  if (!line.trim()) continue;',
+                    '  const msg = JSON.parse(line);',
+                    '  if (msg.method === "initialize") {',
+                    '    process.stdout.write(JSON.stringify({ id: msg.id, result: { serverInfo: { name: "fake", version: "0.0.0" } } }) + "\\n");',
+                    '    continue;',
+                    '  }',
+                    '  if (msg.method === "initialized") continue;',
+                    '  if (msg.method === "state/read") {',
+                    '    process.stdout.write(`{"id":${msg.id},"result":{"payload":"unterminated}\\n`);',
+                    '    continue;',
+                    '  }',
+                    '  if (msg.method === "state/after") {',
+                    '    process.stdout.write(JSON.stringify({ id: msg.id, result: { alive: true } }) + "\\n");',
+                    '  }',
+                    '}',
+                ],
+                importLines: ['import { writeFileSync } from "node:fs";'],
+            });
+
+            const client = await createCodexAppServerClient({
+                processEnv: createCodexAppServerProcessEnv(fakeAppServer),
+            });
+            let exitCount = 0;
+            client.onExit(() => {
+                exitCount += 1;
+            });
+
+            try {
+                await expect(client.request('state/read')).rejects.toThrow(/Invalid Codex app-server JSON output/);
+                await expect(client.request('state/after')).resolves.toEqual({ alive: true });
+                expect(exitCount).toBe(0);
+
+                const pid = Number.parseInt((await readFile(pidFile, 'utf8')).trim(), 10);
+                expect(() => process.kill(pid, 0)).not.toThrow();
+            } finally {
+                await client.dispose();
+            }
+        });
+    });
+
+    it('closes the app-server runtime when stdout contains an uncorrelated invalid JSON-RPC frame', async () => {
+        await withTempDir('happier-codex-app-server-client-invalid-json-', async (root) => {
+            const pidFile = join(root, 'pid.txt');
+            const fakeAppServer = await writeFakeCodexAppServerScript({
+                dir: root,
+                bodyLines: [
+                    `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid), 'utf8');`,
+                    'for await (const line of rl) {',
+                    '  if (!line.trim()) continue;',
+                    '  const msg = JSON.parse(line);',
+                    '  if (msg.method === "initialize") {',
+                    '    process.stdout.write(JSON.stringify({ id: msg.id, result: { serverInfo: { name: "fake", version: "0.0.0" } } }) + "\\n");',
+                    '    continue;',
+                    '  }',
+                  '  if (msg.method === "initialized") continue;',
+                  '  if (msg.method === "state/read") {',
+                    '    process.stdout.write(`{"id":${msg.id},"method":"host/request","params":{"payload":"unterminated}\\n`);',
+                    '    continue;',
+                  '  }',
+                    '}',
+                ],
+                importLines: ['import { writeFileSync } from "node:fs";'],
+            });
+
+            const client = await createCodexAppServerClient({
+                processEnv: createCodexAppServerProcessEnv(fakeAppServer),
+            });
+            const exitFailure = new Promise<Error>((resolve) => {
+                client.onExit(resolve);
+            });
+
+            try {
+                await expect(client.request('state/read')).rejects.toThrow(/Invalid Codex app-server JSON output/);
+                await expect(Promise.race([
+                    exitFailure,
+                    new Promise<never>((_resolve, reject) => {
+                        setTimeout(() => reject(new Error('app-server exit was not reported')), 500);
+                    }),
+                ])).resolves.toMatchObject({
+                    message: expect.stringMatching(/Invalid Codex app-server JSON output/),
+                });
+
+                const pid = Number.parseInt((await readFile(pidFile, 'utf8')).trim(), 10);
+                await waitForCondition(() => {
+                    try {
+                        process.kill(pid, 0);
+                        return false;
+                    } catch {
+                        return true;
+                    }
+                }, {
+                    timeoutMs: 1_000,
+                    label: 'malformed-frame app-server process exit',
+                });
+            } finally {
+                await client.dispose();
+            }
+        });
+    });
+
     it('strips inherited runtime-only and RPC-log env from the app-server child process while keeping parent-side logging', async () => {
         await withTempDir('happier-codex-app-server-client-sanitize-env-', async (root) => {
             const requestLogPath = join(root, 'rpc.jsonl');
