@@ -14,18 +14,29 @@ import { zhHant } from './translations/zh-Hant';
 
 export { DEFAULT_LANGUAGE, SUPPORTED_LANGUAGE_CODES, SUPPORTED_LANGUAGES, getLanguageEnglishName, getLanguageNativeName, type SupportedLanguage };
 
-const TRANSLATIONS_BY_LANGUAGE = {
-    en,
-    ru,
-    pl,
-    es,
-    it,
-    pt,
-    ca,
-    'zh-Hans': zhHans,
-    'zh-Hant': zhHant,
-    ja,
-} satisfies Record<SupportedLanguage, TranslationStructure>;
+/**
+ * Locale trees are ~0.5 MB of source each and only one of them is ever the active language, yet
+ * every one of them used to be materialized before the app could paint.
+ *
+ * Metro runs with `inlineRequires` enabled (`apps/ui/metro.config.js`), which moves an imported
+ * binding's `require` to the place the binding is referenced — but a module-scope `{ en, ru, ... }`
+ * map is itself such a reference, so importing `t()` evaluated all ten locale modules at import
+ * time. Referencing each tree from inside a thunk defers its `require` to the first lookup for that
+ * language, which in practice means the active language and the English fallback. Where inline
+ * requires are not applied (vitest), the thunks are ordinary closures and behaviour is unchanged.
+ */
+const TRANSLATION_TREE_BY_LANGUAGE = {
+    en: () => en,
+    ru: () => ru,
+    pl: () => pl,
+    es: () => es,
+    it: () => it,
+    pt: () => pt,
+    ca: () => ca,
+    'zh-Hans': () => zhHans,
+    'zh-Hant': () => zhHant,
+    ja: () => ja,
+} satisfies Record<SupportedLanguage, () => TranslationStructure>;
 
 type TranslationFunction = (params: never) => string;
 type TranslationLeaf = string | TranslationFunction;
@@ -108,7 +119,8 @@ function resolveActiveLanguage(): SupportedLanguage {
 }
 
 function getTranslationTree(language: SupportedLanguage): Translations {
-    return TRANSLATIONS_BY_LANGUAGE[language] ?? en;
+    const loadTranslationTree = TRANSLATION_TREE_BY_LANGUAGE[language];
+    return loadTranslationTree ? loadTranslationTree() : en;
 }
 
 function getValueAtPath(root: TranslationNode, key: string): unknown {
@@ -142,32 +154,12 @@ function resolveCallableTranslation(key: TranslationKey): TranslationFunction | 
     return isTranslationFunction(value) ? value : null;
 }
 
-function collectTranslationKeys(node: TranslationNode, prefix = '', out: string[] = []): string[] {
-    for (const [key, value] of Object.entries(node)) {
-        const nextKey = prefix ? `${prefix}.${key}` : key;
-        if (isTranslationFunction(value) || typeof value === 'string') {
-            out.push(nextKey);
-            continue;
-        }
-        if (value && typeof value === 'object' && !Array.isArray(value)) {
-            collectTranslationKeys(value as TranslationNode, nextKey, out);
-        }
-    }
-    return out;
-}
-
-const ALL_TRANSLATION_KEYS = collectTranslationKeys(en as TranslationNode) as TranslationKey[];
-
 export function hasTranslation(key: string): boolean {
     return resolveRawTranslationValue(key) !== undefined;
 }
 
 export function getTranslationValue(key: string): unknown {
     return resolveRawTranslationValue(key);
-}
-
-export function getAllTranslationKeys(): TranslationKey[] {
-    return [...ALL_TRANSLATION_KEYS];
 }
 
 export function setPreferredLanguageFromSettings(value: unknown): void {

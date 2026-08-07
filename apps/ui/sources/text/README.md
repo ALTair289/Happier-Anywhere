@@ -108,7 +108,6 @@ This keeps the canonical translation object (`translations/en.ts`) separate from
 Main module with the `t` function and utilities:
 - `t()` - Main translation function with strict typing
 - `hasTranslation()` - Check if a key exists
-- `getAllTranslationKeys()` - Get all available keys (development)
 - `getTranslationValue()` - Get raw value (debugging)
 
 ## Key Benefits
