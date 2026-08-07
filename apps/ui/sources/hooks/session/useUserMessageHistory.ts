@@ -5,6 +5,7 @@ import type { FeaturesResponse } from '@happier-dev/protocol';
 import {
     SESSION_MESSAGE_HISTORY_REMOTE_ROLES_QUERY,
     USER_MESSAGE_HISTORY_REMOTE_PAGE_SIZE,
+    type FetchUserMessageHistoryPageResult,
     type SessionMessageHistoryRemoteRow,
 } from '@/sync/engine/sessions/fetchUserMessageHistoryPage';
 import type { Message } from '@/sync/domains/messages/messageTypes';
@@ -102,8 +103,16 @@ type RemoteHistoryStoreRecord = {
     state: RemoteHistoryState;
 };
 
+/**
+ * A cursor the current scope cannot read stays retryable, and the navigation continuation
+ * re-drives it on every transcript store change. Without a floor that turns each store mutation
+ * into a request; with one, recovery still happens on its own within a session.
+ */
+export const USER_MESSAGE_HISTORY_REMOTE_RETRY_COOLDOWN_MS = 30_000;
+
 const remoteHistoryRecordsByKey = new Map<string, RemoteHistoryStoreRecord>();
 const remoteHistoryInFlightCursorKeys = new Set<string>();
+const remoteHistoryRetryFloorMsByCursorKey = new Map<string, number>();
 const remoteHistoryListeners = new Set<() => void>();
 
 function normalizeRemoteHistoryBeforeSeq(value: unknown): number | null {
@@ -200,13 +209,28 @@ function requestRemoteHistoryPage(params: Readonly<{
     const beforeSeq = record.state.nextBeforeSeq;
     const cursorKey = `${params.cacheKey}:cursor:${remoteHistoryCursorKey(beforeSeq)}`;
     if (remoteHistoryInFlightCursorKeys.has(cursorKey)) return;
+    const retryFloorMs = remoteHistoryRetryFloorMsByCursorKey.get(cursorKey);
+    if (retryFloorMs !== undefined && Date.now() < retryFloorMs) return;
 
     const cacheKey = params.cacheKey;
     remoteHistoryInFlightCursorKeys.add(cursorKey);
     void sync.fetchUserMessageHistoryPage(params.sessionId, {
         limit: USER_MESSAGE_HISTORY_REMOTE_PAGE_SIZE,
         ...(beforeSeq !== null ? { beforeSeq } : {}),
-    }).then((result) => {
+    // A rejected call (unresolvable server scope, transport throw) is the same transport failure
+    // the page fetcher already reports as `error`, and gets the same retry floor; letting the
+    // rejection escape only produced an unhandled rejection.
+    }).catch((): FetchUserMessageHistoryPageResult => ({ status: 'error' })).then((result) => {
+        if (result.status === 'error') {
+            // The record is left untouched so the cursor stays retryable; only its cadence is capped.
+            remoteHistoryRetryFloorMsByCursorKey.set(
+                cursorKey,
+                Date.now() + USER_MESSAGE_HISTORY_REMOTE_RETRY_COOLDOWN_MS,
+            );
+            return;
+        }
+        remoteHistoryRetryFloorMsByCursorKey.delete(cursorKey);
+
         if (result.status === 'loaded') {
             updateRemoteHistoryState(cacheKey, (previous) => ({
                 rows: mergeRemoteHistoryRows(previous.rows, result.rows),
@@ -243,6 +267,7 @@ function requestRemoteHistoryPage(params: Readonly<{
 export function resetUserMessageHistoryRemoteEntriesForTests(): void {
     remoteHistoryRecordsByKey.clear();
     remoteHistoryInFlightCursorKeys.clear();
+    remoteHistoryRetryFloorMsByCursorKey.clear();
     emitRemoteHistoryChange();
 }
 

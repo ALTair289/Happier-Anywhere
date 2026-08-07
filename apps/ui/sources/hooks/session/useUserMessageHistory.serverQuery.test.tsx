@@ -7,6 +7,7 @@ import { storage } from '@/sync/domains/state/storageStore';
 import { fetchUserMessageHistoryPage } from '@/sync/engine/sessions/fetchUserMessageHistoryPage';
 
 import {
+    USER_MESSAGE_HISTORY_REMOTE_RETRY_COOLDOWN_MS,
     resetUserMessageHistoryRemoteEntriesForTests,
     useUserMessageHistory,
     useUserMessageHistoryRemoteEntries,
@@ -52,6 +53,7 @@ describe('useUserMessageHistory server role query', () => {
     });
 
     afterEach(() => {
+        vi.useRealTimers();
         vi.clearAllMocks();
         resetUserMessageHistoryRemoteEntriesForTests();
         roleQuerySupportedState.supported = true;
@@ -406,7 +408,9 @@ describe('useUserMessageHistory server role query', () => {
         await hook.unmount();
     });
 
-    it('allows retrying the same remote history cursor after a transient error', async () => {
+    it('throttles a failing remote history cursor until the retry cooldown elapses, then retries it', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
         fetchUserMessageHistoryPageMock
             .mockResolvedValueOnce({ status: 'error' })
             .mockResolvedValueOnce({
@@ -430,6 +434,16 @@ describe('useUserMessageHistory server role query', () => {
         });
         expect(hook.getCurrent().rows).toEqual([]);
 
+        // The navigation continuation re-drives this cursor on every transcript store change, so a
+        // cursor the current scope cannot read must not turn each store mutation into a request.
+        await act(async () => {
+            hook.getCurrent().requestNextPage();
+            hook.getCurrent().requestNextPage();
+            await flushHookEffects();
+        });
+        expect(fetchUserMessageHistoryPageMock).toHaveBeenCalledTimes(1);
+
+        vi.setSystemTime(Date.now() + USER_MESSAGE_HISTORY_REMOTE_RETRY_COOLDOWN_MS);
         await act(async () => {
             hook.getCurrent().requestNextPage();
             await flushHookEffects();
@@ -437,6 +451,45 @@ describe('useUserMessageHistory server role query', () => {
 
         expect(fetchUserMessageHistoryPageMock).toHaveBeenCalledTimes(2);
         expect(hook.getCurrent().rows.map((entry) => entry.text)).toEqual(['retried prompt']);
+        await hook.unmount();
+    });
+
+    it('treats a rejected history request as a retryable transport failure', async () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+        fetchUserMessageHistoryPageMock
+            .mockRejectedValueOnce(new Error('unresolvable server scope'))
+            .mockResolvedValueOnce({
+                status: 'loaded',
+                rows: [{ messageId: 'm4', routeMessageId: 'server:m4', seq: 4, createdAt: 40, role: 'user' as const, text: 'recovered prompt' }],
+                hasMore: false,
+                nextBeforeSeq: null,
+            });
+
+        const hook = await renderHook(() =>
+            useUserMessageHistoryRemoteEntries({
+                enabled: true,
+                initialBeforeSeq: null,
+                sessionId: 's1',
+            }),
+        );
+
+        await act(async () => {
+            hook.getCurrent().requestNextPage();
+            await flushHookEffects();
+        });
+        // A throw is the same transport failure the page fetcher reports as `error`: the cursor
+        // stays retryable and the record is never latched off.
+        expect(hook.getCurrent().hasMore).toBe(true);
+        expect(hook.getCurrent().pagesLoaded).toBe(0);
+
+        vi.setSystemTime(Date.now() + USER_MESSAGE_HISTORY_REMOTE_RETRY_COOLDOWN_MS);
+        await act(async () => {
+            hook.getCurrent().requestNextPage();
+            await flushHookEffects();
+        });
+
+        expect(hook.getCurrent().rows.map((entry) => entry.text)).toEqual(['recovered prompt']);
         await hook.unmount();
     });
 
