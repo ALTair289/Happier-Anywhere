@@ -13,7 +13,8 @@ test('install.ps1 retries transient GitHub installer downloads and release metad
   const trimmed = raw.replace(/^\uFEFF?/, '').trimStart();
 
   assert.match(trimmed, /function Invoke-InstallerWebRequestWithRetry\b/i);
-  assert.match(trimmed, /\$retryableStatusCodes\s*=\s*@\(502,\s*503,\s*504\)/i);
+  assert.match(trimmed, /\$retryableStatusCodes\s*=\s*@\(404,\s*502,\s*503,\s*504\)/i);
+  assert.match(trimmed, /\$params\s*=\s*@\{\s*Uri\s*=\s*\$Uri;\s*UseBasicParsing\s*=\s*\$true\s*\}/i);
   assert.match(trimmed, /Copy-OrDownloadInstallerAsset[\s\S]*Invoke-InstallerWebRequestWithRetry -Uri \$Source -Headers \$GitHubHeaders -OutFile \$DestinationPath/i);
   assert.match(trimmed, /Invoke-InstallerWebRequestWithRetry -Uri \$MinisignPubKeyUrl -OutFile \$TargetPath/i);
   assert.match(trimmed, /\$release\s*=\s*Invoke-InstallerRestMethodWithRetry -Uri "https:\/\/api\.github\.com\/repos\/\$Repo\/releases\/tags\/\$tag" -Headers \$GitHubHeaders/i);

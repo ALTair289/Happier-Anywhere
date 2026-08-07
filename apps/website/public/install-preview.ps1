@@ -1269,7 +1269,7 @@ function Test-InstallerTransientWebException {
     [Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord
   )
 
-  $retryableStatusCodes = @(502, 503, 504)
+  $retryableStatusCodes = @(404, 502, 503, 504)
   $exception = $ErrorRecord.Exception
   $statusCode = $null
   if ($exception -and $exception.Response -and $exception.Response.StatusCode) {
@@ -1304,7 +1304,7 @@ function Invoke-InstallerWebRequestWithRetry {
   $retryDelaysMs = @(250, 1000)
   for ($attempt = 0; $attempt -le $retryDelaysMs.Length; $attempt += 1) {
     try {
-      $params = @{ Uri = $Uri }
+      $params = @{ Uri = $Uri; UseBasicParsing = $true }
       if ($Headers) {
         $params.Headers = $Headers
       }
