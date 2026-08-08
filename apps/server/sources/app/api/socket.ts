@@ -29,6 +29,8 @@ import { readMachineTransferFeatureEnv } from "@/app/features/catalog/readFeatur
 import { readSessionScopedSocketBinding, resolveSessionScopedSocketBinding } from "./socket/sessionScopedBinding";
 import { createMachineSocketOwnershipRegistry } from "./socket/machineSocketOwnershipRegistry";
 import { createSessionPublisherPresence } from "@/app/presence/sessionPublisherPresence";
+import { publishMachinePresenceSnapshot } from "@/app/presence/publishMachinePresenceSnapshot";
+import { describeLoggableError } from "@/utils/logging/describeLoggableError";
 import { registerSessionRuntimeActivitySnapshotSocketEvent } from "@/app/session/runtimeActivity/socketEvents";
 import { publishSessionPublisherLifecycleUpdate } from "@/app/session/runtimeActivity/publishPublisherLifecycleUpdate";
 import { readHappierSocketData } from "./socket/socketData";
@@ -324,6 +326,19 @@ export function startSocket(app: Fastify) {
                 userId,
                 payload: machineActivity,
                 recipientFilter: { type: 'user-scoped-only' }
+            });
+        }
+
+        if (connection.connectionType === 'user-scoped') {
+            // Machine liveness is push-only, so a client resuming from the background has missed
+            // every `machine-activity` emitted while it was away. Settle it from persisted presence
+            // instead of leaving the client to wait for the next 20s keep-alive or to pull
+            // `/v1/machines` on the foreground-boot critical path.
+            void publishMachinePresenceSnapshot({ accountId: userId, socket }).catch((error) => {
+                log(
+                    { module: 'websocket', level: 'warn', userId, error: describeLoggableError(error) },
+                    'Failed to publish machine presence snapshot on connect',
+                );
             });
         }
 

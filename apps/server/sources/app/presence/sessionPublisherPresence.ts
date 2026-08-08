@@ -5,8 +5,10 @@ import type {
     SessionRuntimeIssueV1,
 } from "@happier-dev/protocol";
 
+import { readAccountChangeCursors } from "@/app/changes/readAccountChangeCursors";
 import type { SessionParticipantCursor } from "@/app/session/changeTracking/markSessionParticipantsChanged";
 import { markSessionParticipantsChanged } from "@/app/session/changeTracking/markSessionParticipantsChanged";
+import { authorizeSessionScopedMachineBinding } from "@/app/api/socket/sessionRelayAuthCache";
 import { hasCurrentSessionScopedMachineAccessInTx } from "@/app/api/socket/sessionScopedBinding";
 import {
     parseSessionRuntimeActivitySnapshot,
@@ -19,6 +21,7 @@ import {
     writeSessionRuntimeActivityObserverLossInTx,
     writeSessionRuntimeActivityProjectionInTx,
 } from "@/app/session/runtimeActivity/writeProjection";
+import { db } from "@/storage/db";
 import { inTx } from "@/storage/inTx";
 import { blockInheritedProviderDeliveryClaims } from "@/app/session/pending/providerDeliveryClaimStaleness";
 import { applyLatestSessionTurnEndInTx } from "@/app/session/sessionWriteService";
@@ -406,11 +409,65 @@ export function createSessionPublisherPresence(options: Readonly<{ now?: () => D
         return result;
     };
 
+    /**
+     * Extend the liveness of a still-current publisher with one conditional `UPDATE`, outside any
+     * transaction, or report that the steady state no longer holds so the caller falls back to the
+     * authoritative transactional path.
+     *
+     * The CAS `where` *is* the proof: only the socket holding this registration knows the exact
+     * `publisherGeneration` + fence pair, and requiring `active: true` restricts the fast path to a
+     * session that is already reachable — so nothing observable changes and no participant needs a
+     * durable change cursor. Everything else (reactivation, archive, supersession, deletion) is a
+     * real transition and is resolved by the transactional path below.
+     */
+    const extendLivePublisherFence = async (
+        registration: Registration,
+        committedFence: Date,
+    ): Promise<boolean> => {
+        const { count } = await db.session.updateMany({
+            where: {
+                id: registration.binding.sessionId,
+                active: true,
+                archivedAt: null,
+                lastActiveAt: registration.committedFence,
+                publisherGeneration: registration.publisherGeneration,
+                publisherGenerationLastActiveAt: registration.committedFence,
+            },
+            data: {
+                lastActiveAt: committedFence,
+                publisherGenerationLastActiveAt: committedFence,
+            },
+        });
+        return count > 0;
+    };
+
     const touchPublisher = async (params: Readonly<{ socket: object }>): Promise<TouchPublisherResult> => {
         return await serialize(params.socket, async (): Promise<TouchPublisherResult> => {
             if (closeResults.has(params.socket)) return { status: "superseded" };
             const registration = registrations.get(params.socket);
             if (!registration) return { status: "unregistered" };
+
+            const participantUserIds = await authorizeSessionScopedMachineBinding(registration.binding);
+            if (participantUserIds === null) return { status: "rejected", reason: "unauthorized" };
+            const fastFence = new Date(Math.max(now().getTime(), registration.committedFence.getTime() + 1));
+            if (await extendLivePublisherFence(registration, fastFence)) {
+                const cursors = await readAccountChangeCursors({ accountIds: participantUserIds });
+                registrations.set(params.socket, {
+                    binding: registration.binding,
+                    committedFence: new Date(fastFence.getTime()),
+                    publisherGeneration: registration.publisherGeneration,
+                });
+                return {
+                    status: "touched",
+                    committedFence: fastFence,
+                    activeAt: fastFence,
+                    participantCursors: participantUserIds.flatMap((accountId) => {
+                        const cursor = cursors.get(accountId);
+                        return typeof cursor === "number" ? [{ accountId, cursor }] : [];
+                    }),
+                };
+            }
+
             const result = await inTx(async (tx): Promise<TouchPublisherResult> => {
                 const session = await tx.session.findUnique({
                     where: { id: registration.binding.sessionId },

@@ -615,6 +615,84 @@ describe('Runtime Activity snapshot socket event on SQLite', () => {
         })).resolves.toEqual(recovered);
     });
 
+    it('backs off released alive persistence after repeated failures instead of retrying every heartbeat', async () => {
+        process.env.HAPPIER_DB_TX_MAX_RETRIES = '0';
+        process.env.HAPPIER_DB_TX_MAX_WAIT_MS = '200';
+        // The holder transaction must outlive both failing attempts; an expiring holder would free
+        // the connection and let a heartbeat persist for the wrong reason.
+        process.env.HAPPIER_DB_TX_TIMEOUT_MS = '30000';
+
+        const seeded = await seed();
+        const handlers = new Map<string, Handler>();
+        const socket = { on: vi.fn((event: string, handler: Handler) => { handlers.set(event, handler); }) };
+        let heartbeatClockMs = Date.parse('2026-07-13T12:00:00.000Z');
+        registerSessionRuntimeActivitySnapshotSocketEvent({
+            socket,
+            presence: createSessionPublisherPresence(),
+            binding: { accountId: seeded.ownerId, machineId: seeded.machineId, sessionId: seeded.sessionId },
+            publish: vi.fn(async () => {}),
+            nowMs: () => heartbeatClockMs,
+        });
+        const alive = handlers.get('session-alive');
+        if (!alive) throw new Error('expected released alive handler');
+        const heartbeat = async () => await alive({
+            sid: seeded.sessionId,
+            time: Date.now(),
+            thinking: false,
+            mode: 'remote',
+        });
+        const initial = await db.session.findUniqueOrThrow({
+            where: { id: seeded.sessionId },
+            select: { active: true, lastActiveAt: true },
+        });
+
+        let resolveHolderEntered!: () => void;
+        const holderEntered = new Promise<void>((resolve) => { resolveHolderEntered = resolve; });
+        let releaseHolder!: () => void;
+        const holderRelease = new Promise<void>((resolve) => { releaseHolder = resolve; });
+        const holderReleased = new Error('release acquisition holder');
+        const holder = inTx(async () => {
+            resolveHolderEntered();
+            await holderRelease;
+            throw holderReleased;
+        });
+        await holderEntered;
+
+        try {
+            // A first failure still retries on the very next heartbeat: a one-off transient error
+            // must recover immediately.
+            await heartbeat();
+            await heartbeat();
+            await expect(db.session.findUniqueOrThrow({
+                where: { id: seeded.sessionId },
+                select: { active: true, lastActiveAt: true },
+            })).resolves.toEqual(initial);
+        } finally {
+            releaseHolder();
+            await expect(holder).rejects.toBe(holderReleased);
+        }
+
+        // Repeated failures must arm a backoff. Retrying on every 2s heartbeat multiplies write
+        // pressure by 6-30x exactly while the database is saturated, which is what caused the
+        // saturation to persist instead of draining. The database is healthy again here, so a
+        // heartbeat inside the backoff window must be skipped by the throttle, not by the failure.
+        await heartbeat();
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: seeded.sessionId },
+            select: { active: true, lastActiveAt: true },
+        })).resolves.toEqual(initial);
+
+        // ...and the backoff must be bounded: once it elapses the publisher recovers.
+        heartbeatClockMs += 60_000;
+        await heartbeat();
+        const recovered = await db.session.findUniqueOrThrow({
+            where: { id: seeded.sessionId },
+            select: { active: true, lastActiveAt: true },
+        });
+        expect(recovered.active).toBe(true);
+        expect(recovered.lastActiveAt.getTime()).toBeGreaterThan(initial.lastActiveAt.getTime());
+    });
+
     it('does not let concurrent released alive sockets exhaust the single SQLite transaction connection', async () => {
         process.env.HAPPIER_DB_TX_MAX_RETRIES = '0';
         process.env.HAPPIER_DB_TX_MAX_WAIT_MS = '1000';

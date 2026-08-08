@@ -9,10 +9,11 @@ import {
 } from "./sessionScopedBinding";
 
 /**
- * TTL cache for session relay publish authorization.
+ * TTL cache for session-scoped machine socket authorization.
  *
  * High-rate ephemeral relays (`transcript-stream-segment{,-delta}`, `execution-run-updated`) arrive
- * at up to 25Hz per session. The facts they must verify (machine access key exists, sender owns the
+ * at up to 25Hz per session, and the publisher liveness heartbeat (`session-alive`) arrives every
+ * 2-15s per session. The facts they must verify (machine access key exists, sender owns the
  * session with edit access, participant fan-out list) were already proven at socket handshake and
  * change rarely, so re-proving them with 3 DB round-trips per event is pure overhead.
  *
@@ -72,7 +73,26 @@ export async function authorizeSessionRelayPublish(params: Readonly<{
         return null;
     }
 
-    const cacheKey = createRelayAuthCacheKey(params.userId, binding.sessionId, binding.machineId);
+    return await authorizeSessionScopedMachineBinding({
+        accountId: params.userId,
+        machineId: binding.machineId,
+        sessionId: binding.sessionId,
+    });
+}
+
+/**
+ * Authorize an already-bound session-scoped machine binding and resolve its participant fan-out
+ * list. Returns `null` when the binding is no longer authorized.
+ *
+ * This is the DB-backed half of `authorizeSessionRelayPublish`, shared with the publisher liveness
+ * heartbeat, which proves the same binding from an in-memory registration rather than from a socket.
+ */
+export async function authorizeSessionScopedMachineBinding(params: Readonly<{
+    accountId: string;
+    machineId: string;
+    sessionId: string;
+}>): Promise<readonly string[] | null> {
+    const cacheKey = createRelayAuthCacheKey(params.accountId, params.sessionId, params.machineId);
     const nowMs = Date.now();
     const cached = relayAuthCache.get(cacheKey);
     if (cached && cached.validUntil > nowMs) {
@@ -81,27 +101,27 @@ export async function authorizeSessionRelayPublish(params: Readonly<{
     pruneExpiredRelayAuthEntries(nowMs);
 
     if (!await hasCurrentSessionScopedMachineAccess({
-        accountId: params.userId,
-        machineId: binding.machineId,
-        sessionId: binding.sessionId,
+        accountId: params.accountId,
+        machineId: params.machineId,
+        sessionId: params.sessionId,
     })) {
         return null;
     }
 
-    const access = await checkSessionAccess(params.userId, binding.sessionId);
+    const access = await checkSessionAccess(params.accountId, params.sessionId);
     if (!access || !requireAccessLevel(access, "edit") || !access.isOwner) {
         return null;
     }
 
-    const participantUserIds = await getSessionParticipantUserIds({ sessionId: binding.sessionId });
+    const participantUserIds = await getSessionParticipantUserIds({ sessionId: params.sessionId });
     if (participantUserIds.length === 0) {
         return null;
     }
 
     relayAuthCache.set(cacheKey, {
         validUntil: nowMs + SESSION_RELAY_AUTH_CACHE_TTL_MS,
-        sessionId: binding.sessionId,
-        machineId: binding.machineId,
+        sessionId: params.sessionId,
+        machineId: params.machineId,
         participantUserIds,
     });
     return participantUserIds;

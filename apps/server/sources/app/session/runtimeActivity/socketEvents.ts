@@ -16,6 +16,7 @@ import {
 
 import type { SessionParticipantCursor } from '@/app/session/changeTracking/markSessionParticipantsChanged';
 import type { createSessionPublisherPresence } from '@/app/presence/sessionPublisherPresence';
+import { describeLoggableError } from '@/utils/logging/describeLoggableError';
 import { warn } from '@/utils/logging/log';
 
 type RuntimeActivitySnapshotEventSocket = Readonly<{
@@ -26,6 +27,23 @@ type RuntimeActivitySnapshotPresence = ReturnType<typeof createSessionPublisherP
 
 const releasedAliveOperationTails = new WeakMap<object, Promise<void>>();
 const RELEASED_ALIVE_PERSISTENCE_INTERVAL_MS = 60_000;
+/**
+ * Backoff after an attempt that did not persist. The first unproductive attempt retries on the very
+ * next heartbeat so a one-off transient failure recovers immediately; consecutive ones back off
+ * exponentially up to the normal persistence interval.
+ *
+ * Arming only on success let a saturated database be answered with *more* write attempts: released
+ * heartbeats arrive every 2s while thinking and every 15s idle, so a failing session retried 6-30x
+ * more often than a healthy one, exactly while the contended resource was exhausted. A permanently
+ * unproductive attempt (a superseded socket) behaved the same way.
+ */
+const RELEASED_ALIVE_RETRY_BACKOFF_BASE_MS = 1_000;
+
+function resolveReleasedAliveRetryBackoffMs(consecutiveUnproductiveAttempts: number): number {
+    if (consecutiveUnproductiveAttempts <= 1) return 0;
+    const exponential = RELEASED_ALIVE_RETRY_BACKOFF_BASE_MS * 2 ** (consecutiveUnproductiveAttempts - 2);
+    return Math.min(RELEASED_ALIVE_PERSISTENCE_INTERVAL_MS, exponential);
+}
 
 async function serializeReleasedAliveOperation<T>(
     presence: RuntimeActivitySnapshotPresence,
@@ -55,7 +73,10 @@ export function registerSessionRuntimeActivitySnapshotSocketEvent(params: Readon
     presence: RuntimeActivitySnapshotPresence;
     binding: Readonly<{ accountId: string; machineId: string; sessionId: string }>;
     publish: PublishRuntimeActivitySnapshotProjection;
+    /** Clock for the released-heartbeat persistence window (mirrors `createSessionPublisherPresence`). */
+    nowMs?: () => number;
 }>): void {
+    const nowMs = params.nowMs ?? (() => Date.now());
     const publishParticipants = async (published: Readonly<{
         participantCursors: readonly SessionParticipantCursor[];
         projection?: SessionRuntimeActivityProjection;
@@ -117,7 +138,20 @@ export function registerSessionRuntimeActivitySnapshotSocketEvent(params: Readon
         }
     };
     let legacyAliveInFlight = false;
-    let lastLegacyAlivePersistedAtMs: number | null = null;
+    let nextLegacyAliveAttemptAtMs: number | null = null;
+    let consecutiveUnproductiveLegacyAliveAttempts = 0;
+
+    /** Arm the next allowed attempt from the outcome of the one that just settled. */
+    const armLegacyAliveAttemptWindow = (persisted: boolean): void => {
+        if (persisted) {
+            consecutiveUnproductiveLegacyAliveAttempts = 0;
+            nextLegacyAliveAttemptAtMs = nowMs() + RELEASED_ALIVE_PERSISTENCE_INTERVAL_MS;
+            return;
+        }
+        consecutiveUnproductiveLegacyAliveAttempts += 1;
+        nextLegacyAliveAttemptAtMs = nowMs()
+            + resolveReleasedAliveRetryBackoffMs(consecutiveUnproductiveLegacyAliveAttempts);
+    };
 
     params.socket.on(SESSION_RUNTIME_ACTIVITY_SNAPSHOT_EVENT, async (value, acknowledge) => {
         const request = SessionRuntimeActivitySnapshotRequestSchema.safeParse(value);
@@ -202,12 +236,7 @@ export function registerSessionRuntimeActivitySnapshotSocketEvent(params: Readon
         const alive = SessionPublisherLegacyAliveSchema.safeParse(value);
         if (!alive.success || alive.data.sid !== params.binding.sessionId) return;
         if (legacyAliveInFlight) return;
-        const nowMs = Date.now();
-        if (
-            lastLegacyAlivePersistedAtMs !== null
-            && nowMs >= lastLegacyAlivePersistedAtMs
-            && nowMs - lastLegacyAlivePersistedAtMs < RELEASED_ALIVE_PERSISTENCE_INTERVAL_MS
-        ) return;
+        if (nextLegacyAliveAttemptAtMs !== null && nowMs() < nextLegacyAliveAttemptAtMs) return;
         legacyAliveInFlight = true;
         try {
             const persisted = await serializeReleasedAliveOperation(params.presence, async () => {
@@ -224,15 +253,14 @@ export function registerSessionRuntimeActivitySnapshotSocketEvent(params: Readon
                 if (registered.status !== 'registered') return { status: 'unchanged' as const };
                 return { status: 'registered' as const, registered };
             });
+            armLegacyAliveAttemptWindow(persisted.status !== 'unchanged');
             if (persisted.status === 'touched') {
-                lastLegacyAlivePersistedAtMs = Date.now();
                 await publishParticipants({
                     participantCursors: persisted.touched.participantCursors,
                     active: true,
                     activeAt: persisted.touched.activeAt,
                 });
             } else if (persisted.status === 'registered') {
-                lastLegacyAlivePersistedAtMs = Date.now();
                 await publishTransitionOnce('registration', {
                     participantCursors: persisted.registered.participantCursors,
                     active: true,
@@ -243,8 +271,13 @@ export function registerSessionRuntimeActivitySnapshotSocketEvent(params: Readon
                 });
             }
         } catch (error) {
-            warn({ module: 'session-publisher-presence', error }, 'Failed to adapt released session-alive event');
-            // Released heartbeat events have no acknowledgement channel; the next heartbeat retries.
+            armLegacyAliveAttemptWindow(false);
+            warn(
+                { module: 'session-publisher-presence', error: describeLoggableError(error) },
+                'Failed to adapt released session-alive event',
+            );
+            // Released heartbeat events have no acknowledgement channel; the next heartbeat retries
+            // once the backoff armed above elapses.
         } finally {
             legacyAliveInFlight = false;
         }
@@ -267,7 +300,10 @@ export function registerSessionRuntimeActivitySnapshotSocketEvent(params: Readon
                 ...(result.turnProjection ?? {}),
             });
         } catch (error) {
-            warn({ module: 'session-publisher-presence', error }, 'Failed to adapt released session-end event');
+            warn(
+                { module: 'session-publisher-presence', error: describeLoggableError(error) },
+                'Failed to adapt released session-end event',
+            );
             // Released end events have no required acknowledgement; timeout remains authoritative.
         }
     });

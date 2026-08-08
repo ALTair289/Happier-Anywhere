@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { clearSessionRelayAuthorizationCache } from "@/app/api/socket/sessionRelayAuthCache";
 import { db } from "@/storage/db";
 import { createLightSqliteHarness, type LightSqliteHarness } from "@/testkit/lightSqliteHarness";
 
@@ -19,7 +20,10 @@ describe("session publisher presence on SQLite", () => {
             initFiles: false,
         });
     });
-    beforeEach(() => harness.resetEnv());
+    beforeEach(() => {
+        harness.resetEnv();
+        clearSessionRelayAuthorizationCache();
+    });
     afterAll(async () => await harness.close());
 
     async function seed() {
@@ -770,6 +774,53 @@ describe("session publisher presence on SQLite", () => {
             lastActiveAt: successor.committedFence,
             runtimeActivityState: "idle",
             runtimeActivityRevision: 3n,
+        });
+    });
+
+    it("extends a live publisher without consuming account change cursors", async () => {
+        const seeded = await seed();
+        let now = new Date(seeded.fence.getTime() + 10);
+        const presence = createSessionPublisherPresence({ now: () => now });
+        const socket = {};
+        const registered = await presence.registerPublisher({
+            socket,
+            binding: seeded.binding,
+            completeActivitySnapshot: { state: "active", activeCount: 1 },
+        });
+        if (registered.status !== "registered") throw new Error("expected registration");
+
+        const readChangeState = async () => ({
+            accounts: await db.account.findMany({
+                where: { id: { in: seeded.participantIds } },
+                select: { id: true, seq: true },
+                orderBy: { id: "asc" },
+            }),
+            changes: await db.accountChange.findMany({
+                where: { kind: "session", entityId: seeded.binding.sessionId },
+                select: { accountId: true, cursor: true, changedAt: true },
+                orderBy: { accountId: "asc" },
+            }),
+        });
+        const beforeTouch = await readChangeState();
+
+        now = new Date(registered.committedFence.getTime() + 10);
+        const touched = await presence.touchPublisher({ socket });
+        if (touched.status !== "touched") throw new Error("expected touch");
+
+        // A steady-state liveness tick is not a content change: it must not allocate an account
+        // cursor or rewrite the coalesced change row. Publishing it through `Account.seq` made every
+        // heartbeat a write to a row shared by every session of the account, and forced every client
+        // to treat a liveness tick as a session refresh.
+        await expect(readChangeState()).resolves.toEqual(beforeTouch);
+        // The live push fanout must still reach every participant.
+        expect(touched.participantCursors.map(({ accountId }) => accountId).sort()).toEqual(seeded.participantIds);
+        await expect(db.session.findUniqueOrThrow({
+            where: { id: seeded.binding.sessionId },
+            select: { active: true, lastActiveAt: true, publisherGenerationLastActiveAt: true },
+        })).resolves.toEqual({
+            active: true,
+            lastActiveAt: touched.committedFence,
+            publisherGenerationLastActiveAt: touched.committedFence,
         });
     });
 
