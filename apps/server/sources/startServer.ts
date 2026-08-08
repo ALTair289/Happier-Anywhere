@@ -44,6 +44,7 @@ import {
 } from '@/config/backends';
 import http from 'node:http';
 import { stat } from 'node:fs/promises';
+import { writeStartupReceiptFromEnvironment } from '@/app/runtime/startupReceipt';
 import { Server as SocketIOServer } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-streams-adapter';
 import { getRedisClient } from '@/storage/redis/redis';
@@ -350,6 +351,7 @@ export async function startServer(flavor: ServerFlavor): Promise<void> {
     // Ready
     //
 
+    await writeStartupReceiptFromEnvironment(process.env);
     log('Ready');
     await awaitShutdown();
     log('Shutting down...');
