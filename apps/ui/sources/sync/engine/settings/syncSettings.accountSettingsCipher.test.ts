@@ -1092,4 +1092,57 @@ describe('syncSettings account settings ciphertext', () => {
         const migratedSecret = ((opened?.value as any)?.secrets?.[0]?.encryptedValue?.encryptedValue);
         expect(decryptSecretStringV1(migratedSecret, canonicalSettingsKey)).toBe('sk-legacy');
     });
+
+    it('issues the account-settings GET without waiting for the encryption-mode response', async () => {
+        const encryptionStub = {
+            getContentPrivateKey: () => TEST_MACHINE_KEY,
+            decryptRaw: vi.fn(async () => null),
+            encryptRaw: vi.fn(async () => {
+                throw new Error('encryptRaw should not be used for account settings');
+            }),
+        } as unknown as Encryption;
+
+        let releaseEncryptionMode: () => void = () => {};
+        const encryptionModeGate = new Promise<void>((resolve) => {
+            releaseEncryptionMode = resolve;
+        });
+
+        mocks.serverFetch.mockImplementation(async (path: string) => {
+            if (path === '/v1/account/encryption') {
+                await encryptionModeGate;
+                return new Response(JSON.stringify({ mode: 'e2ee', updatedAt: Date.now() }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                });
+            }
+            if (path === '/v2/account/settings') {
+                return new Response(JSON.stringify({ content: null, version: 12 }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                });
+            }
+            throw new Error(`Unexpected path ${path}`);
+        });
+
+        const syncPromise = syncSettings({
+            credentials,
+            encryption: encryptionStub,
+            pendingSettings: {},
+            clearPendingSettings: vi.fn(),
+        });
+
+        // The settings read must already be in flight while the encryption-mode read is still open:
+        // the mode decides how the fetched document is opened, never which document is read.
+        await vi.waitFor(() => {
+            expect(mocks.serverFetch.mock.calls.map((call) => call[0])).toContain('/v2/account/settings');
+        });
+
+        releaseEncryptionMode();
+        await syncPromise;
+
+        expect(mocks.serverFetch.mock.calls.map((call) => [call[0], call[1]?.method ?? 'GET'])).toEqual([
+            ['/v1/account/encryption', 'GET'],
+            ['/v2/account/settings', 'GET'],
+        ]);
+    });
 });

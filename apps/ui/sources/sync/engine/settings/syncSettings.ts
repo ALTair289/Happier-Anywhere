@@ -88,7 +88,22 @@ export async function syncSettings(params: SyncSettingsParams): Promise<void> {
         stripLocalOnlyAccountSettings(pendingSettings) as Record<string, unknown>,
     ) as Partial<Settings>;
 
-    const encryptionMode = await fetchAccountEncryptionMode(credentials);
+    // `/v1/account/encryption` and the account-settings GET are independent reads. The mode decides
+    // how the fetched document is *opened* and written — `openSettingsContent` branches on the
+    // envelope's own `t`, not on the mode — so nothing about the read depends on it. Awaiting the
+    // mode before issuing the GET cost a measured 124 ms on every account-change foreground; both
+    // requests are now in flight together, with the mode still awaited before anything opens.
+    const encryptionModeResult = fetchAccountEncryptionMode(credentials);
+    let pendingSettingsV2Fetch: Promise<{ content: AccountSettingsStoredContentEnvelope | null; version: number }> | null =
+        fetchSettingsV2();
+    // The first baseline read consumes it; keep the rejection observed until then.
+    pendingSettingsV2Fetch.catch(() => undefined);
+    function consumeSettingsV2Fetch(): Promise<{ content: AccountSettingsStoredContentEnvelope | null; version: number }> {
+        const prefetched = pendingSettingsV2Fetch;
+        pendingSettingsV2Fetch = null;
+        return prefetched ?? fetchSettingsV2();
+    }
+    const encryptionMode = await encryptionModeResult;
     const accountMode = encryptionMode.mode === 'plain' ? 'plain' : 'e2ee';
 
     function isSettingsScopeActive(): boolean {
@@ -307,7 +322,7 @@ export async function syncSettings(params: SyncSettingsParams): Promise<void> {
 
     async function fetchAccountSettingsBaseline(options?: { requireReadable?: boolean }): Promise<AccountSettingsServerBaseline> {
         try {
-            const fetched = await fetchSettingsV2();
+            const fetched = await consumeSettingsV2Fetch();
             const raw = await openSettingsContent(fetched.content, options);
             const migrated = migrateRawServerIdentityKeys(raw);
             return {
