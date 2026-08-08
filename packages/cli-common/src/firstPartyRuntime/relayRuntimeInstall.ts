@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
@@ -14,7 +15,9 @@ import {
 } from '../service/index.js';
 
 import { checkRelayRuntimeHealth, resolveRelayRuntimeDefaults } from './relayRuntime.js';
+import { removeRuntimePayloadPath } from './copyRuntimePayloadTree.js';
 import { resolveNonCollidingRelayPort } from './resolveNonCollidingRelayPort.js';
+import { computeUiDeploymentDigest, resolveUiDeploymentIdentity } from './uiDeploymentIdentity.js';
 import {
     mergeSelfHostServerEnvText,
     parseEnvText,
@@ -30,6 +33,10 @@ const RELAY_RUNTIME_PERSISTENT_ROOT_ENTRIES = new Set([
 ]);
 const DEFAULT_RELAY_RUNTIME_INSTALL_HEALTHCHECK_TIMEOUT_MS = 120_000;
 const MAX_RELAY_RUNTIME_INSTALL_HEALTHCHECK_TIMEOUT_MS = 600_000;
+const RELAY_RUNTIME_STARTUP_RECEIPT_WAIT_MS = 10_000;
+const RELAY_RUNTIME_STARTUP_RECEIPT_POLL_MS = 100;
+const SERVER_STARTUP_RECEIPT_PATH_ENV = 'HAPPIER_SERVER_STARTUP_RECEIPT_PATH';
+const SERVER_STARTUP_RECEIPT_NONCE_ENV = 'HAPPIER_SERVER_STARTUP_RECEIPT_NONCE';
 
 type LegacyRelayRuntimeInstallRootMigration = Readonly<{
     platform: NodeJS.Platform;
@@ -320,6 +327,36 @@ async function writeJsonFile(path: string, value: unknown): Promise<void> {
     await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
+function isProcessAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (error) {
+        return Boolean(error && typeof error === 'object' && (error as { code?: unknown }).code === 'EPERM');
+    }
+}
+
+async function waitForRelayRuntimeStartupReceipt(params: Readonly<{
+    path: string;
+    nonce: string;
+}>): Promise<Readonly<{ nonce: string; pid: number }>> {
+    const deadline = Date.now() + RELAY_RUNTIME_STARTUP_RECEIPT_WAIT_MS;
+    while (Date.now() <= deadline) {
+        const receipt = await readFile(params.path, 'utf8')
+            .then(tryParseJsonObject)
+            .catch(() => null);
+        const nonce = typeof receipt?.nonce === 'string' ? receipt.nonce : '';
+        const pid = typeof receipt?.pid === 'number' && Number.isSafeInteger(receipt.pid)
+            ? receipt.pid
+            : 0;
+        if (nonce === params.nonce && pid > 0 && isProcessAlive(pid)) {
+            return { nonce, pid };
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, RELAY_RUNTIME_STARTUP_RECEIPT_POLL_MS));
+    }
+    throw new Error('[relay-runtime] relay runtime startup attestation did not arrive');
+}
+
 async function probePortOpen(params: Readonly<{ host: string; port: number; timeoutMs: number }>): Promise<boolean> {
     return await new Promise((resolve) => {
         const socket = createConnection({
@@ -424,7 +461,7 @@ async function copyNamedRootEntries(params: Readonly<{
     for (const entryName of params.entryNames) {
         const sourcePath = join(params.sourceDir, entryName);
         const destPath = join(params.destDir, entryName);
-        await rm(destPath, { recursive: true, force: true });
+        await removeRuntimePayloadPath(destPath);
 
         const info = await stat(sourcePath).catch(() => null);
         if (!info) continue;
@@ -449,7 +486,7 @@ async function clearNamedRootEntries(params: Readonly<{
     entryNames: readonly string[];
 }>): Promise<void> {
     for (const entryName of params.entryNames) {
-        await rm(join(params.rootDir, entryName), { recursive: true, force: true });
+        await removeRuntimePayloadPath(join(params.rootDir, entryName));
     }
 }
 
@@ -694,6 +731,8 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
     const migrationsDir = join(defaults.dataDir, 'migrations', 'sqlite');
     const stdoutPath = join(defaults.logDir, 'server.out.log');
     const stderrPath = join(defaults.logDir, 'server.err.log');
+    const startupReceiptPath = join(defaults.dataDir, 'startup-receipt.json');
+    const startupReceiptNonce = randomUUID();
     const backend: ServiceBackend = resolveServiceBackend({
         platform,
         mode,
@@ -725,6 +764,7 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
     let payloadEntryNames = desiredPayloadEntryNames;
     let legacyRootMigration: LegacyRelayRuntimeInstallRootMigration | null = null;
     let previousInstallState: Awaited<ReturnType<typeof backupRelayRuntimeInstallState>> | null = null;
+    let candidateServiceActivationAttempted = false;
 
     try {
         legacyRootMigration = await migrateLegacyUnsuffixedRelayRuntimeInstallRootIfNeeded({
@@ -805,6 +845,14 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
         const uiDir = platform === 'win32'
             ? win32Path.join(defaults.installRoot, 'ui-web', 'current')
             : join(defaults.installRoot, 'ui-web', 'current');
+        const uiIndexPath = join(uiDir, 'index.html');
+        const uiDeployment = existsSync(uiIndexPath)
+            ? resolveUiDeploymentIdentity({
+                digest: await computeUiDeploymentDigest(uiDir),
+                previousStateText: previousInstallState.previousStateText,
+                generateId: randomUUID,
+            })
+            : null;
 
         // Upstream callers (relayHostEngine.installLocal) inject the resolved
         // PORT into params.env when they pick a non-default port to avoid
@@ -835,6 +883,7 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
             filesDir,
             dbDir,
             uiDir,
+            uiDeploymentId: uiDeployment?.deploymentId,
             serverBinDir: dirname(installServerBinaryPath),
             arch,
             platform,
@@ -847,11 +896,16 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
         await writeFile(configEnvPath, envText, 'utf8');
         const env = parseEnvText(envText);
 
+        await rm(startupReceiptPath, { force: true });
         const serviceSpec = buildRelayRuntimeServiceSpec({
             serviceName,
             installRoot: defaults.installRoot,
             serverBinaryPath: installServerBinaryPath,
-            env,
+            env: {
+                ...env,
+                [SERVER_STARTUP_RECEIPT_PATH_ENV]: startupReceiptPath,
+                [SERVER_STARTUP_RECEIPT_NONCE_ENV]: startupReceiptNonce,
+            },
             stdoutPath,
             stderrPath,
         });
@@ -868,6 +922,7 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
             definitionContents: definition.contents,
             persistent: true,
         });
+        candidateServiceActivationAttempted = params.runServiceCommands !== false;
         await applyServicePlan(plan, {
             runCommands: params.runServiceCommands !== false,
         });
@@ -877,9 +932,11 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
             mode,
             version: typeof params.version === 'string' && params.version.trim() ? params.version.trim() : null,
             updatedAt: new Date().toISOString(),
+            ...(uiDeployment ? {
+                uiDeploymentDigest: uiDeployment.digest,
+                uiDeploymentId: uiDeployment.deploymentId,
+            } : {}),
         };
-        await writeJsonFile(statePath, state);
-
         const baseUrl = resolveConfiguredSelfHostBaseUrl({
             fallbackBaseUrl: `http://${defaults.serverHost}:${defaults.serverPort}`,
             envText,
@@ -896,13 +953,43 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
             if (!result.reachable) {
                 throw new Error(`[relay-runtime] relay runtime did not become healthy (${result.url})`);
             }
+            await waitForRelayRuntimeStartupReceipt({
+                path: startupReceiptPath,
+                nonce: startupReceiptNonce,
+            });
         }
+
+        await writeJsonFile(statePath, state);
 
         return {
             baseUrl,
             version: state.version,
         };
     } catch (error) {
+        await rm(startupReceiptPath, { force: true }).catch(() => undefined);
+        if (candidateServiceActivationAttempted) {
+            const candidateStopSpec = buildRelayRuntimeServiceSpec({
+                serviceName,
+                installRoot: defaults.installRoot,
+                serverBinaryPath: installServerBinaryPath,
+                env: {},
+                stdoutPath,
+                stderrPath,
+            });
+            const candidateStopDefinition = buildServiceDefinition({
+                backend,
+                homeDir,
+                spec: candidateStopSpec,
+            });
+            const candidateStopPlan = planServiceAction({
+                backend,
+                action: 'stop',
+                label: candidateStopSpec.label,
+                definitionPath: candidateStopDefinition.path,
+                persistent: true,
+            });
+            await applyServicePlan(candidateStopPlan, { runCommands: true });
+        }
         if (previousInstallState) {
             await restoreRelayRuntimeInstallState({
                 platform,
@@ -947,6 +1034,25 @@ export async function installOrUpdateRelayRuntimeLocal(params: Readonly<{
                 await applyServicePlan(restorePlan, {
                     runCommands: params.runServiceCommands !== false,
                 });
+                if (params.runServiceCommands !== false && params.skipHealthCheck !== true) {
+                    const rollbackBaseUrl = resolveConfiguredSelfHostBaseUrl({
+                        fallbackBaseUrl: `http://${defaults.serverHost}:${defaults.serverPort}`,
+                        envText: previousInstallState.previousEnvText ?? '',
+                    });
+                    const rollbackBaseUrlObject = new URL(rollbackBaseUrl);
+                    const rollbackHealth = await checkRelayRuntimeHealth({
+                        host: rollbackBaseUrlObject.hostname,
+                        port: Number.parseInt(rollbackBaseUrlObject.port, 10),
+                        timeoutMs: resolveRelayRuntimeInstallHealthcheckTimeoutMs(),
+                        probePortOpen: async ({ host, port, timeoutMs }) => await probePortOpen({ host, port, timeoutMs }),
+                        fetchJson: async ({ url, timeoutMs }) => await fetchJson({ url, timeoutMs }),
+                    });
+                    if (!rollbackHealth.reachable) {
+                        throw new Error(`[relay-runtime] previous relay runtime did not become healthy after rollback (${rollbackHealth.url})`, {
+                            cause: error,
+                        });
+                    }
+                }
             } else if (params.runServiceCommands !== false) {
                 const rollbackSpec = buildRelayRuntimeServiceSpec({
                     serviceName,

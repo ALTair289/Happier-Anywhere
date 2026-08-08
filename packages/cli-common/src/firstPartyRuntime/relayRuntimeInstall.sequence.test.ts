@@ -13,6 +13,9 @@ const serviceSnapshots = vi.hoisted(() => [] as Array<{
     generated: string;
     prismaEngine: string;
 }>);
+const serviceSpecs = vi.hoisted(() => [] as Array<{
+    env: Readonly<Record<string, string>>;
+}>);
 const checkRelayRuntimeHealthMock = vi.hoisted(() => vi.fn(async (_params: Readonly<{ timeoutMs: number }>) => ({
     reachable: true,
     url: 'http://127.0.0.1:4010',
@@ -24,10 +27,13 @@ vi.mock('../service/index.js', async (importOriginal) => {
     return {
         ...actual,
         resolveServiceBackend: vi.fn(() => 'systemd-user'),
-        buildServiceDefinition: vi.fn(() => ({
-            path: '/tmp/happier-relay-runtime.service',
-            contents: '[Service]\n',
-        })),
+        buildServiceDefinition: vi.fn((params: { spec?: { env?: Record<string, string> } }) => {
+            serviceSpecs.push({ env: { ...(params.spec?.env ?? {}) } });
+            return {
+                path: '/tmp/happier-relay-runtime.service',
+                contents: '[Service]\n',
+            };
+        }),
         planServiceAction: vi.fn((params: { action: string }) => ({
             __action: params.action,
             writes: [],
@@ -52,9 +58,25 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
     beforeEach(async () => {
         serviceActions.length = 0;
         serviceSnapshots.length = 0;
+        serviceSpecs.length = 0;
         const serviceModule = await import('../service/index.js');
         vi.mocked(serviceModule.applyServicePlan).mockImplementation(async (plan) => {
             serviceActions.push(String((plan as { __action?: string }).__action ?? 'unknown'));
+        });
+        checkRelayRuntimeHealthMock.mockImplementation(async () => {
+            const activationSpec = [...serviceSpecs].reverse().find((spec) => (
+                spec.env.HAPPIER_SERVER_STARTUP_RECEIPT_PATH
+                && spec.env.HAPPIER_SERVER_STARTUP_RECEIPT_NONCE
+            ));
+            if (activationSpec) {
+                const receiptPath = activationSpec.env.HAPPIER_SERVER_STARTUP_RECEIPT_PATH;
+                await mkdir(dirname(receiptPath), { recursive: true });
+                await writeFile(receiptPath, JSON.stringify({
+                    nonce: activationSpec.env.HAPPIER_SERVER_STARTUP_RECEIPT_NONCE,
+                    pid: process.pid,
+                }), 'utf8');
+            }
+            return { reachable: true, url: 'http://127.0.0.1:4010' };
         });
     });
 
@@ -65,6 +87,66 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
             reachable: true,
             url: 'http://127.0.0.1:4010',
         });
+    });
+
+    it('commits install state only after candidate health and private startup attestation', async () => {
+        const homeDir = await mkdtemp(join(tmpdir(), 'happier-cli-common-relay-runtime-commit-order-'));
+        try {
+            const payloadRoot = join(homeDir, 'payload');
+            await mkdir(payloadRoot, { recursive: true });
+            await mkdir(join(payloadRoot, 'ui-web', 'current'), { recursive: true });
+            await writeFile(join(payloadRoot, 'ui-web', 'current', 'index.html'), '<script src="/assets/index-a.js"></script>\n', 'utf8');
+            const serverBinaryPath = join(payloadRoot, 'happier-server');
+            await writeFile(serverBinaryPath, '#!/bin/sh\necho new-runtime\n', 'utf8');
+            const defaults = resolveRelayRuntimeDefaults({
+                platform: 'linux',
+                mode: 'user',
+                channel: 'preview',
+                homeDir,
+            });
+            const statePath = join(defaults.installRoot, 'self-host-state.json');
+            await mkdir(defaults.installRoot, { recursive: true });
+            await writeFile(statePath, JSON.stringify({ version: '0.1.2' }), 'utf8');
+            checkRelayRuntimeHealthMock.mockImplementationOnce(async () => {
+                await expect(readFile(statePath, 'utf8')).resolves.toContain('0.1.2');
+                const activationSpec = [...serviceSpecs].reverse().find((spec) => (
+                    spec.env.HAPPIER_SERVER_STARTUP_RECEIPT_PATH
+                    && spec.env.HAPPIER_SERVER_STARTUP_RECEIPT_NONCE
+                ));
+                expect(activationSpec).toBeDefined();
+                if (activationSpec) {
+                    await mkdir(dirname(activationSpec.env.HAPPIER_SERVER_STARTUP_RECEIPT_PATH), { recursive: true });
+                    await writeFile(
+                        activationSpec.env.HAPPIER_SERVER_STARTUP_RECEIPT_PATH,
+                        JSON.stringify({
+                            nonce: activationSpec.env.HAPPIER_SERVER_STARTUP_RECEIPT_NONCE,
+                            pid: process.pid,
+                        }),
+                        'utf8',
+                    );
+                }
+                return { reachable: true, url: 'http://127.0.0.1:4010' };
+            });
+
+            await installOrUpdateRelayRuntimeLocal({
+                serverBinaryPath,
+                channel: 'preview',
+                mode: 'user',
+                platform: 'linux',
+                arch: 'arm64',
+                homeDir,
+                version: '0.2.0',
+                runServiceCommands: true,
+            });
+
+            const committedState = JSON.parse(await readFile(statePath, 'utf8')) as Record<string, unknown>;
+            expect(committedState.version).toBe('0.2.0');
+            expect(committedState.uiDeploymentDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+            expect(committedState.uiDeploymentId).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+            expect(serviceSpecs.at(-1)?.env.HAPPIER_SERVER_UI_DEPLOYMENT_ID).toBe(committedState.uiDeploymentId);
+        } finally {
+            await rm(homeDir, { recursive: true, force: true });
+        }
     });
 
     it('stops the existing relay service before replacing the persistent runtime payload', async () => {
@@ -157,7 +239,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
                 runServiceCommands: true,
             })).rejects.toThrow(/did not become healthy/);
 
-            expect(serviceActions).toEqual(['stop', 'install', 'uninstall']);
+            expect(serviceActions).toEqual(['stop', 'install', 'stop', 'uninstall']);
         } finally {
             await rm(homeDir, { recursive: true, force: true });
         }
@@ -223,7 +305,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
                 runServiceCommands: true,
             })).rejects.toThrow(/did not become healthy/);
 
-            expect(serviceActions).toEqual(['stop', 'install', 'uninstall']);
+            expect(serviceActions).toEqual(['stop', 'install', 'stop', 'uninstall']);
         } finally {
             await rm('/tmp/happier-relay-runtime.service', { force: true }).catch(() => undefined);
             await rm(homeDir, { recursive: true, force: true });
@@ -271,7 +353,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
                 runServiceCommands: true,
             })).rejects.toThrow(/did not become healthy/);
 
-            expect(serviceActions).toEqual(['stop', 'install', 'uninstall']);
+            expect(serviceActions).toEqual(['stop', 'install', 'stop', 'uninstall']);
         } finally {
             await rm(serviceDefinitionPath, { force: true }).catch(() => undefined);
             await rm(homeDir, { recursive: true, force: true });
@@ -335,7 +417,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
                 },
             })).rejects.toThrow(/install failed/);
 
-            expect(serviceActions).toEqual(['stop', 'install', 'uninstall']);
+            expect(serviceActions).toEqual(['stop', 'install', 'stop', 'uninstall']);
             await expect(readFile(installServerBinaryPath, 'utf8')).resolves.toBe('#!/bin/sh\necho old-runtime\n');
             await expect(readFile(configEnvPath, 'utf8')).resolves.toBe('PORT=4010\nCUSTOM_FLAG=old\n');
             await expect(readFile(join(migrationsDestDir, '20231212000000_existing', 'migration.sql'), 'utf8')).resolves.toBe('-- existing\n');
@@ -400,7 +482,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
                 skipHealthCheck: true,
             })).rejects.toThrow(/install failed/);
 
-            expect(serviceActions).toEqual(['stop', 'install', 'install']);
+            expect(serviceActions).toEqual(['stop', 'install', 'stop', 'install']);
             await expect(readFile(installServerBinaryPath, 'utf8')).resolves.toBe('#!/bin/sh\necho old-runtime\n');
             await expect(readFile(configEnvPath, 'utf8')).resolves.toBe('PORT=4010\nCUSTOM_FLAG=old\n');
         } finally {
@@ -449,7 +531,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
                 skipHealthCheck: true,
             })).rejects.toThrow(/install failed/);
 
-            expect(serviceActions).toEqual(['stop', 'install', 'uninstall']);
+            expect(serviceActions).toEqual(['stop', 'install', 'stop', 'uninstall']);
             await expect(readFile(installedShimPath, 'utf8')).rejects.toMatchObject({
                 code: 'ENOENT',
             });
@@ -577,7 +659,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
                 skipHealthCheck: true,
             })).rejects.toThrow(/install failed/);
 
-            expect(serviceActions).toEqual(['stop', 'install', 'uninstall']);
+            expect(serviceActions).toEqual(['stop', 'install', 'stop', 'uninstall']);
             await expect(readFile(installServerBinaryPath, 'utf8')).rejects.toMatchObject({
                 code: 'ENOENT',
             });
@@ -630,7 +712,7 @@ describe('installOrUpdateRelayRuntimeLocal sequencing', () => {
                 runServiceCommands: true,
             })).rejects.toThrow(/did not become healthy/);
 
-            expect(serviceActions).toEqual(['stop', 'install', 'uninstall']);
+            expect(serviceActions).toEqual(['stop', 'install', 'stop', 'uninstall']);
             await expect(lstat(shimPath)).rejects.toMatchObject({ code: 'ENOENT' });
             await expect(readFile(installServerBinaryPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
         } finally {

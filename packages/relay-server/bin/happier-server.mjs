@@ -5,10 +5,10 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 
 import { resolveServerReleaseAssets, resolveUiWebReleaseAssets } from '../src/releaseAssets.mjs';
+import { extractReleaseArchiveIntoCache } from '../src/archiveCache.mjs';
 import { resolveRunnerCacheRoot, resolveServerRunnerTarget } from '../src/target.mjs';
 import { parseRunnerInvocation } from '../src/runnerConfig.mjs';
 import { downloadVerifiedReleaseAssetBundle } from '@happier-dev/release-runtime/verifiedDownload';
-import { planArchiveExtraction } from '@happier-dev/release-runtime/extractPlan';
 import { fetchGitHubReleaseByTag } from '@happier-dev/release-runtime/github';
 
 const OWNER = 'happier-dev';
@@ -80,18 +80,10 @@ async function main() {
         userAgent: 'happier-server-runner',
       });
 
-      const plan = planArchiveExtraction({
+      await extractReleaseArchiveIntoCache({
         archiveName: downloaded.archiveName,
         archivePath: downloaded.archivePath,
-        destDir: cacheDir,
-        os: target.os,
-      });
-
-      // Extract archive into cache (archive root contains the artifactStem folder).
-      const extract = spawn(plan.command.cmd, plan.command.args, { stdio: 'inherit' });
-      await new Promise((resolve, reject) => {
-        extract.on('error', reject);
-        extract.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`${plan.command.cmd} exited with ${code}`))));
+        cacheDir,
       });
     }
 
@@ -100,7 +92,7 @@ async function main() {
     }
 
     const childEnv = { ...process.env };
-    if (withUiWeb && !String(process.env.HAPPIER_SERVER_UI_DIR ?? '').trim()) {
+    if (withUiWeb && !String(process.env.HAPPIER_SERVER_UI_DIR ?? '').trim() && uiWebTag) {
       const uiRelease = await fetchGitHubReleaseByTag({
         githubRepo,
         tag: uiWebTag,
@@ -127,17 +119,10 @@ async function main() {
           userAgent: 'happier-server-runner',
         });
 
-        const uiPlan = planArchiveExtraction({
+        await extractReleaseArchiveIntoCache({
           archiveName: uiDownloaded.archiveName,
           archivePath: uiDownloaded.archivePath,
-          destDir: uiCacheDir,
-          os: target.os,
-        });
-
-        const extractUi = spawn(uiPlan.command.cmd, uiPlan.command.args, { stdio: 'inherit' });
-        await new Promise((resolve, reject) => {
-          extractUi.on('error', reject);
-          extractUi.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`${uiPlan.command.cmd} exited with ${code}`))));
+          cacheDir: uiCacheDir,
         });
       }
 
@@ -146,6 +131,13 @@ async function main() {
       }
 
       childEnv.HAPPIER_SERVER_UI_DIR = uiDir;
+    } else if (withUiWeb && !String(process.env.HAPPIER_SERVER_UI_DIR ?? '').trim()) {
+      const embeddedUiDir = join(serverDir, 'ui-web', 'current');
+      const embeddedUiIndex = join(embeddedUiDir, 'index.html');
+      if (!(await pathExists(embeddedUiIndex))) {
+        fail(`Embedded ui web bundle not found at ${embeddedUiIndex}`);
+      }
+      childEnv.HAPPIER_SERVER_UI_DIR = embeddedUiDir;
     }
 
     const child = spawn(serverBin, positionals, { stdio: 'inherit', env: childEnv });

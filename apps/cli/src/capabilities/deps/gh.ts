@@ -3,10 +3,10 @@ import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFi
 import { basename, delimiter as pathDelimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+import { extractReleasePayloadRootFromArchive } from '@happier-dev/cli-common/firstPartyRuntime';
 import { downloadGitHubReleaseAsset } from '@happier-dev/cli-common/providers';
-import { resolveWindowsCommandOnPath, runCommandStreaming } from '@happier-dev/cli-common/process';
+import { resolveWindowsCommandOnPath } from '@happier-dev/cli-common/process';
 import { fetchGitHubLatestRelease } from '@happier-dev/release-runtime/github';
-import { planArchiveExtraction } from '@happier-dev/release-runtime';
 
 import { configuration } from '@/configuration';
 import { readRuntimeInstallableLastCheckAtMs } from '@/installables/runtime/runtimeInstallableUpdateState';
@@ -153,17 +153,10 @@ async function extractArchiveIntoDirectory(params: Readonly<{
   archiveName: string;
   extractDir: string;
 }>): Promise<void> {
-  await mkdir(params.extractDir, { recursive: true });
-  const extractionPlan = planArchiveExtraction({
+  await extractReleasePayloadRootFromArchive({
     archiveName: params.archiveName,
     archivePath: params.archivePath,
-    destDir: params.extractDir,
-    os: process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'darwin' : 'linux',
-  });
-  await runCommandStreaming({
-    cmd: extractionPlan.command.cmd,
-    args: extractionPlan.command.args,
-    context: 'github-cli extract',
+    extractDir: params.extractDir,
   });
 }
 

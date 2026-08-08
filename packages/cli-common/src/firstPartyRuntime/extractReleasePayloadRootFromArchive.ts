@@ -1,27 +1,17 @@
-import { lstat, mkdir, readdir } from 'node:fs/promises';
+import { lstat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { planArchiveExtraction } from '@happier-dev/release-runtime';
-import { runCommandStreaming } from '../process/runCommandStreaming.js';
+import { extractArchivePayloadToDirectory } from '@happier-dev/release-runtime/archiveExtraction';
 
 export async function extractReleasePayloadRootFromArchive(params: Readonly<{
   archivePath: string;
   archiveName: string;
   extractDir: string;
 }>): Promise<string> {
-  await mkdir(params.extractDir, { recursive: true });
-
-  const extractionPlan = planArchiveExtraction({
+  await extractArchivePayloadToDirectory({
     archiveName: params.archiveName,
     archivePath: params.archivePath,
-    destDir: params.extractDir,
-    os: process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'darwin' : 'linux',
-  });
-
-  await runCommandStreaming({
-    cmd: extractionPlan.command.cmd,
-    args: extractionPlan.command.args,
-    context: 'first-party-runtime extract',
+    extractDir: params.extractDir,
   });
 
   const entries = (await readdir(params.extractDir)).filter((entry) => !entry.startsWith('.'));

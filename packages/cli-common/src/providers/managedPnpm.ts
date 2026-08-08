@@ -3,10 +3,10 @@ import { chmod, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises
 import type { FileHandle } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
 
-import { fetchGitHubLatestRelease, planArchiveExtraction } from '@happier-dev/release-runtime';
+import { fetchGitHubLatestRelease } from '@happier-dev/release-runtime';
+import { extractArchivePayloadToDirectory } from '@happier-dev/release-runtime/archiveExtraction';
 
 import { resolveWindowsCommandOnPath } from '../process/index.js';
-import { runCommandStreaming } from '../process/runCommandStreaming.js';
 import { createManagedToolScratchDir } from './createManagedToolScratchDir.js';
 import { downloadGitHubReleaseAsset } from './downloadGitHubReleaseAsset.js';
 import { resolvePnpmReleaseAsset, PNPM_GITHUB_REPO } from './pnpmRelease.js';
@@ -176,16 +176,10 @@ async function extractManagedPnpmArchive(params: Readonly<{
 }>): Promise<void> {
   const binDir = dirname(params.outputPath);
   await mkdir(binDir, { recursive: true });
-  const extractionPlan = planArchiveExtraction({
+  await extractArchivePayloadToDirectory({
     archiveName: params.archiveName,
     archivePath: params.archivePath,
-    destDir: binDir,
-    os: process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'darwin' : 'linux',
-  });
-  await runCommandStreaming({
-    cmd: extractionPlan.command.cmd,
-    args: extractionPlan.command.args,
-    context: 'managed pnpm extract',
+    extractDir: binDir,
   });
 
   const outputStat = await stat(params.outputPath).catch(() => null);
@@ -221,8 +215,8 @@ async function installManagedPnpm(
       installDir: managedPnpmInstallDir(processEnv),
       prefix: 'bootstrap',
     });
+    const nextDir = join(managedPnpmInstallDir(processEnv), 'next');
     try {
-      const nextDir = join(managedPnpmInstallDir(processEnv), 'next');
       const nextBinPath = join(nextDir, 'bin', resolveManagedPnpmBinaryName());
       const downloadPath = join(scratchDir, asset.name);
 
@@ -254,6 +248,7 @@ async function installManagedPnpm(
       await rename(nextDir, join(managedPnpmInstallDir(processEnv), 'current'));
       return managedPnpmBinPath(processEnv);
     } finally {
+      await rm(nextDir, { recursive: true, force: true }).catch(() => undefined);
       await rm(scratchDir, { recursive: true, force: true });
     }
   } finally {

@@ -4,12 +4,12 @@ import { tmpdir } from 'node:os';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const { runCommandStreamingMock } = vi.hoisted(() => ({
-    runCommandStreamingMock: vi.fn(async () => undefined),
+const { extractArchivePayloadToDirectoryMock } = vi.hoisted(() => ({
+    extractArchivePayloadToDirectoryMock: vi.fn(async () => undefined),
 }));
 
-vi.mock('../process/runCommandStreaming.js', () => ({
-    runCommandStreaming: runCommandStreamingMock,
+vi.mock('@happier-dev/release-runtime/archiveExtraction', () => ({
+    extractArchivePayloadToDirectory: extractArchivePayloadToDirectoryMock,
 }));
 
 import { extractGitHubReleaseAsset } from './extractGitHubReleaseAsset.js';
@@ -18,7 +18,7 @@ describe('extractGitHubReleaseAsset', () => {
     const tempDirs: string[] = [];
 
     afterEach(async () => {
-        runCommandStreamingMock.mockReset();
+        extractArchivePayloadToDirectoryMock.mockReset();
         await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
     });
 
@@ -26,7 +26,7 @@ describe('extractGitHubReleaseAsset', () => {
         const rootDir = await mkdtemp(join(tmpdir(), 'happier-extract-github-release-'));
         tempDirs.push(rootDir);
 
-        runCommandStreamingMock.mockImplementationOnce(async () => {
+        extractArchivePayloadToDirectoryMock.mockImplementationOnce(async () => {
             const extractDir = join(rootDir, 'extract');
             await mkdir(extractDir, { recursive: true });
             await writeFile(join(extractDir, 'codex-command-runner.exe'), 'runner', 'utf8');
@@ -50,7 +50,7 @@ describe('extractGitHubReleaseAsset', () => {
         const rootDir = await mkdtemp(join(tmpdir(), 'happier-extract-github-release-'));
         tempDirs.push(rootDir);
 
-        runCommandStreamingMock.mockImplementationOnce(async () => {
+        extractArchivePayloadToDirectoryMock.mockImplementationOnce(async () => {
             const extractDir = join(rootDir, 'extract');
             await mkdir(extractDir, { recursive: true });
             await writeFile(join(extractDir, 'alpha.exe'), 'alpha', 'utf8');

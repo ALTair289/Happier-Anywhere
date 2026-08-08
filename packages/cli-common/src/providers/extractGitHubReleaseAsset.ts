@@ -1,8 +1,7 @@
 import { chmod, mkdir, readdir, rename } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
-import { planArchiveExtraction } from '@happier-dev/release-runtime';
-import { runCommandStreaming } from '../process/runCommandStreaming.js';
+import { extractArchivePayloadToDirectory } from '@happier-dev/release-runtime/archiveExtraction';
 
 function stripArchiveExtension(archiveName: string): string {
   const normalized = archiveName.trim();
@@ -61,16 +60,10 @@ export async function extractGitHubReleaseAsset(params: Readonly<{
   await mkdir(params.extractDir, { recursive: true });
 
   if (archiveName.endsWith('.tar.gz') || archiveName.endsWith('.tar.xz') || archiveName.endsWith('.zip')) {
-    const extractionPlan = planArchiveExtraction({
+    await extractArchivePayloadToDirectory({
       archiveName: params.archiveName,
       archivePath: params.archivePath,
-      destDir: params.extractDir,
-      os: process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'darwin' : 'linux',
-    });
-    await runCommandStreaming({
-      cmd: extractionPlan.command.cmd,
-      args: extractionPlan.command.args,
-      context: 'github-release extract',
+      extractDir: params.extractDir,
     });
     await moveExtractedEntryIntoPlace({
       archiveName: params.archiveName,
