@@ -1067,7 +1067,12 @@ export async function runCodex(opts: {
                         pendingProviderAction,
                         prioritize: true,
                     });
-                } catch {
+                } catch (error) {
+                    logger.debug('[Codex] interrupt-and-send cancellation failed before provider input', {
+                        localIds,
+                        errorName: error instanceof Error ? error.name : typeof error,
+                        errorMessage: error instanceof Error ? error.message : formatErrorForUi(error),
+                    });
                     await blockProviderPromptDeliveryBeforeAcceptance({
                         localIds,
                         reason: 'provider_rejected_before_acceptance',

@@ -2311,6 +2311,65 @@ describe('runCodex CodexACP resume behavior', () => {
     }
   });
 
+  it('records a sanitized diagnostic when an exact interrupt-and-send cancellation fails before provider input', async () => {
+    resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
+      happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
+      mcpServers: {},
+    }));
+
+    const appServerRuntime = {
+      ...createDefaultCodexAppServerRuntimeMock(),
+      getSessionId: () => 'thread-app-server-interrupt-failure',
+      isTurnInFlight: () => true,
+      hasActiveProviderTurn: () => true,
+      cancel: vi.fn(async () => {
+        throw new Error('interrupt transport unavailable');
+      }),
+    };
+    createCodexAppServerRuntimeSpy.mockImplementationOnce(() => appServerRuntime);
+
+    sessionInputConsumerWaitForNextInputImpl = async () => {
+      if (!lastOnUserMessageHandler) {
+        throw new Error('missing-onUserMessage-handler');
+      }
+      lastSessionClient!.blockPendingMessageDelivery.mockResolvedValueOnce(true);
+      await lastOnUserMessageHandler({
+        content: { text: 'interrupt with this exact message' },
+        meta: {},
+        localId: 'local-interrupt-failure',
+      }, {
+        seq: 93,
+        pendingProviderAction: 'interrupt_and_send',
+        providerAcceptancePending: true,
+      });
+      return null;
+    };
+
+    const { runCodex } = await import('./runCodex');
+    await runCodex({
+      credentials: { token: 'test' } as Credentials,
+      startedBy: 'terminal',
+      startingMode: 'remote',
+      codexBackendMode: 'appServer',
+      permissionMode: 'default',
+      permissionModeUpdatedAt: 1,
+    } as any);
+
+    expect(lastSessionClient?.blockPendingMessageDelivery).toHaveBeenCalledWith({
+      localIds: ['local-interrupt-failure'],
+      reason: 'provider_rejected_before_acceptance',
+    });
+    const { logger } = await import('@/ui/logger');
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('interrupt-and-send'),
+      expect.objectContaining({
+        localIds: ['local-interrupt-failure'],
+        errorName: 'Error',
+        errorMessage: 'interrupt transport unavailable',
+      }),
+    );
+  });
+
   it('reports provider-owned work as active and unsteerable when steer capability disappears', async () => {
     resolveRunnerMcpServersSpy.mockImplementationOnce(async () => ({
       happierMcpServer: { url: 'http://127.0.0.1:0', stop: vi.fn() },
