@@ -1,7 +1,13 @@
 import type { SyncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 
 import type { NativeCryptoWorkerMode } from './nativeCryptoWorkerRouting';
-import { NATIVE_CRYPTO_WORKER_OPERATION, type NativeCryptoWorkerCapability, type NativeCryptoWorkerOperation } from './types';
+import {
+    NATIVE_CRYPTO_WORKER_FALLBACK_REASON,
+    NATIVE_CRYPTO_WORKER_OPERATION,
+    type NativeCryptoWorkerCapability,
+    type NativeCryptoWorkerFallbackReason,
+    type NativeCryptoWorkerOperation,
+} from './types';
 
 export type NativeCryptoWorkerBridgeSerializationFields = Readonly<{
     operation: NativeCryptoWorkerOperation;
@@ -22,6 +28,14 @@ export type NativeCryptoWorkerProbeFields = Readonly<{
     available: boolean;
     failureReason: number;
     warmupMs: number;
+}>;
+
+export type NativeCryptoWorkerFallbackFields = Readonly<{
+    operation: NativeCryptoWorkerOperation;
+    reason: NativeCryptoWorkerFallbackReason;
+    items: number;
+    payloadBytes: number;
+    failureReason: number;
 }>;
 
 export type NativeCryptoWorkerQueueDepthFields = Readonly<{
@@ -113,6 +127,32 @@ export function recordNativeCryptoWorkerCapability(
         supportsDecryptDataKeyEnvelopeV1: supportedOperations.has(NATIVE_CRYPTO_WORKER_OPERATION.decryptDataKeyEnvelopeV1) ? 1 : 0,
         supportsDecryptSecretboxJson: supportedOperations.has(NATIVE_CRYPTO_WORKER_OPERATION.decryptSecretboxJson) ? 1 : 0,
         supportsDecryptAesGcmJson: supportedOperations.has(NATIVE_CRYPTO_WORKER_OPERATION.decryptAesGcmJson) ? 1 : 0,
+    });
+}
+
+function encodeFallbackReason(reason: NativeCryptoWorkerFallbackReason): number {
+    switch (reason) {
+        case NATIVE_CRYPTO_WORKER_FALLBACK_REASON.probeFailed:
+            return 1;
+        case NATIVE_CRYPTO_WORKER_FALLBACK_REASON.unavailable:
+            return 2;
+        case NATIVE_CRYPTO_WORKER_FALLBACK_REASON.unsupportedOperation:
+            return 3;
+        case NATIVE_CRYPTO_WORKER_FALLBACK_REASON.nativeRunFailed:
+            return 4;
+    }
+}
+
+export function recordNativeCryptoWorkerFallback(
+    telemetry: SyncPerformanceTelemetry,
+    fields: NativeCryptoWorkerFallbackFields,
+): void {
+    telemetry.count('sync.crypto.worker.fallback', {
+        operation: encodeOperation(fields.operation),
+        reason: encodeFallbackReason(fields.reason),
+        items: fields.items,
+        payloadBytes: fields.payloadBytes,
+        failureReason: fields.failureReason,
     });
 }
 

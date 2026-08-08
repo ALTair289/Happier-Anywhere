@@ -4,13 +4,16 @@ import {
 } from '@/sync/runtime/syncPerformanceTelemetry';
 
 import {
+    NATIVE_CRYPTO_WORKER_FALLBACK_REASON,
     NATIVE_CRYPTO_WORKER_PROBE_FAILURE_REASON,
     NativeCryptoWorkerUnavailableError,
     type NativeCryptoWorkerBatchResult,
     type NativeCryptoWorkerCapability,
+    type NativeCryptoWorkerFallbackReason,
     type NativeCryptoWorkerOperation,
 } from './types';
 import { recordNativeCryptoWorkerStaleScopeDropForResume } from './nativeCryptoWorkerQueue';
+import { reportNativeCryptoWorkerFallback } from './nativeCryptoWorkerFallbackReport';
 import { recordNativeCryptoWorkerProbe } from './nativeCryptoWorkerTelemetry';
 
 export type NativeCryptoWorkerMode = 'off' | 'auto' | 'require';
@@ -62,6 +65,10 @@ function normalizeIntegerRange(value: unknown, fallback: number, min: number, ma
     return typeof value === 'number' && Number.isFinite(value)
         ? Math.min(max, Math.max(min, Math.trunc(value)))
         : fallback;
+}
+
+function normalizeBoolean(value: unknown, fallback: boolean): boolean {
+    return typeof value === 'boolean' ? value : fallback;
 }
 
 function normalizeRatio(value: unknown, fallback: number): number {
@@ -126,8 +133,8 @@ export function normalizeNativeCryptoWorkerRouting(input: NativeCryptoWorkerRout
         minBatchSize: normalizeIntegerRange(input.minBatchSize, DEFAULT_NATIVE_CRYPTO_WORKER_ROUTING.minBatchSize, 1, 512),
         minPayloadBytes: normalizeIntegerRange(input.minPayloadBytes, DEFAULT_NATIVE_CRYPTO_WORKER_ROUTING.minPayloadBytes, 0, 65_536),
         timeoutMs: normalizeIntegerRange(input.timeoutMs, DEFAULT_NATIVE_CRYPTO_WORKER_ROUTING.timeoutMs, 100, 60_000),
-        logFallbacks: input.logFallbacks === true,
-        telemetryEnabled: input.telemetryEnabled === true,
+        logFallbacks: normalizeBoolean(input.logFallbacks, DEFAULT_NATIVE_CRYPTO_WORKER_ROUTING.logFallbacks),
+        telemetryEnabled: normalizeBoolean(input.telemetryEnabled, DEFAULT_NATIVE_CRYPTO_WORKER_ROUTING.telemetryEnabled),
         streamingSampleRate: normalizeRatio(input.streamingSampleRate, DEFAULT_NATIVE_CRYPTO_WORKER_ROUTING.streamingSampleRate),
         capabilityStalenessMs: normalizeIntegerRange(input.capabilityStalenessMs, DEFAULT_NATIVE_CRYPTO_WORKER_ROUTING.capabilityStalenessMs, 1_000, 3_600_000),
     };
@@ -245,6 +252,24 @@ export async function runNativeCryptoWorkerBatch<T>(
         return runReference(options.referenceRun);
     }
 
+    const reportFallback = (
+        reason: NativeCryptoWorkerFallbackReason,
+        failureReason: number | null,
+        error?: unknown,
+    ): void => {
+        reportNativeCryptoWorkerFallback({
+            operation: options.operation,
+            reason,
+            itemCount: options.itemCount,
+            payloadBytes: options.payloadBytes,
+            failureReason,
+            error,
+            verbose: routing.logFallbacks,
+            telemetry: options.telemetry ?? syncPerformanceTelemetry,
+            telemetryEnabled: routing.telemetryEnabled,
+        });
+    };
+
     let capability: NativeCryptoWorkerCapability;
     try {
         capability = await runProbe(options, routing);
@@ -254,18 +279,24 @@ export async function runNativeCryptoWorkerBatch<T>(
         if (routing.mode === 'require') {
             throw error;
         }
+        reportFallback(NATIVE_CRYPTO_WORKER_FALLBACK_REASON.probeFailed, getNativeWorkerFailureReason(error), error);
         return runReference(options.referenceRun);
     }
     if (!capability.available) {
         if (routing.mode === 'require') {
             throw new NativeCryptoWorkerUnavailableError(capability.failureReason);
         }
+        reportFallback(NATIVE_CRYPTO_WORKER_FALLBACK_REASON.unavailable, capability.failureReason);
         return runReference(options.referenceRun);
     }
     if (!doesCapabilityExplicitlySupportOperation(capability, options.operation)) {
         if (routing.mode === 'require') {
             throw new NativeCryptoWorkerUnavailableError(NATIVE_CRYPTO_WORKER_PROBE_FAILURE_REASON.missing);
         }
+        reportFallback(
+            NATIVE_CRYPTO_WORKER_FALLBACK_REASON.unsupportedOperation,
+            NATIVE_CRYPTO_WORKER_PROBE_FAILURE_REASON.missing,
+        );
         return runReference(options.referenceRun);
     }
     if (isAbortSignalAborted(options.signal)) {
@@ -294,6 +325,7 @@ export async function runNativeCryptoWorkerBatch<T>(
         if (routing.mode === 'require') {
             throw error;
         }
+        reportFallback(NATIVE_CRYPTO_WORKER_FALLBACK_REASON.nativeRunFailed, getNativeWorkerFailureReason(error), error);
         return runReference(options.referenceRun);
     }
 }

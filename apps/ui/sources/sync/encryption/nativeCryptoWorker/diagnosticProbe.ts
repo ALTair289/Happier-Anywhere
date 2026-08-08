@@ -1,6 +1,10 @@
 import { encodeBase64 } from '@/encryption/base64';
 import { decodeHex } from '@/encryption/hex';
 import { createNativeCryptoWorker } from './nativeCryptoWorker';
+import {
+    readNativeCryptoWorkerFallbackDiagnostics,
+    type NativeCryptoWorkerFallbackDiagnostics,
+} from './nativeCryptoWorkerFallbackReport';
 import { UI_CRYPTO_GOLDEN_VECTORS } from './cryptoGoldenVectors';
 import {
     NATIVE_CRYPTO_WORKER_OPERATION,
@@ -50,6 +54,11 @@ export type NativeCryptoWorkerProbeReport = Readonly<{
         aesGcm: Readonly<{ validItems: number; nullItems: number }>;
         invalidItems: Readonly<{ nullItems: number; validItemsAfterInvalid: number }>;
         jsResponsiveness: Readonly<{ ticks: number; batchItems: number; elapsedMs: number }>;
+        /**
+         * Degradations this process has already suffered. The checks above probe a
+         * fresh worker; this answers "did the running app silently fall back to JS?".
+         */
+        runtimeFallbacks: NativeCryptoWorkerFallbackDiagnostics;
     }>;
 }>;
 
@@ -490,6 +499,7 @@ export async function runNativeCryptoWorkerProbe(
                 batchItems: jsResponsiveness.batchItems,
                 elapsedMs: jsResponsiveness.elapsedMs,
             },
+            runtimeFallbacks: readNativeCryptoWorkerFallbackDiagnostics(),
         },
     };
 }

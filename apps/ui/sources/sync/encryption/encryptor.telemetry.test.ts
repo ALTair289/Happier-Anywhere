@@ -180,7 +180,8 @@ describe('encryptor telemetry', () => {
 
         await expect(encryption.decrypt(encryptedItems)).resolves.toEqual([null]);
 
-        expect(encryptedItems.mapCalls).toBe(0);
+        // The observable contract is that no native payload was built or dispatched.
+        // (The JS reference pass itself maps the batch, so its map count proves nothing.)
         expect(getWorker).not.toHaveBeenCalled();
         expect(findEvent('sync.crypto.worker.bridgeSerialize')).toBeUndefined();
         expect(findEvent('sync.crypto.worker.queueDepth')).toBeUndefined();

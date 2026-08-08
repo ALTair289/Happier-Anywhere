@@ -9,6 +9,7 @@ import {
     normalizeAesBatchConcurrencyLimit,
 } from "./encryptor";
 import { encodeHex } from "@/encryption/hex";
+import { mapCryptoBatchWithYield } from "./cryptoBatchYield";
 import { EncryptionCache } from "./encryptionCache";
 import { SessionEncryption } from "./sessionEncryption";
 import { MachineEncryption } from "./machineEncryption";
@@ -542,7 +543,9 @@ export class Encryption {
             { items: encryptedValues.length },
             async () => {
                 const routing = normalizeNativeCryptoWorkerRouting(this.nativeCryptoWorkerRouting);
-                const referenceRun = async () => encryptedValues.map((value) => {
+                // Every item is an asymmetric envelope open; a cold start on a large
+                // account runs thousands of them, so the JS path must not hold the thread.
+                const referenceRun = async () => mapCryptoBatchWithYield(encryptedValues, (value) => {
                     try {
                         const encryptedKey = decodeBase64(value, 'base64');
                         const opened = openEncryptedDataKeyEnvelopeV1({

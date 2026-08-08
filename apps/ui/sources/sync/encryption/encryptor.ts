@@ -5,6 +5,7 @@ import { decodeUTF8, encodeUTF8 } from "@/encryption/text";
 import { decryptAESGCMString, encryptAESGCMString } from "@/encryption/aes";
 import { parseSerializedJsonValue, stringifySerializedJsonValue } from '@happier-dev/protocol';
 import { syncPerformanceTelemetry } from '../runtime/syncPerformanceTelemetry';
+import { mapCryptoBatchWithYield, yieldToEventLoop } from './cryptoBatchYield';
 import {
     decryptAesGcmJsonBase64BatchWithNativeWorker,
     decryptAesGcmJsonBatchWithNativeWorker,
@@ -72,10 +73,6 @@ export type AES256EncryptionOptions = Partial<AesStringCryptoAdapter> & Readonly
 
 export const DEFAULT_AES_BATCH_CONCURRENCY_LIMIT = 4;
 
-function yieldToEventLoop(): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
 export function normalizeAesBatchConcurrencyLimit(value: number | null | undefined): number {
     if (typeof value !== 'number' || !Number.isFinite(value)) {
         return DEFAULT_AES_BATCH_CONCURRENCY_LIMIT;
@@ -123,12 +120,8 @@ export class SecretBoxEncryption implements Encryptor, Decryptor {
         }
     }
 
-    private decryptReference(data: readonly Uint8Array[]): (any | null)[] {
-        const results: (any | null)[] = [];
-        for (const item of data) {
-            results.push(decryptSecretBox(item, this.secretKey));
-        }
-        return results;
+    private async decryptReference(data: readonly Uint8Array[]): Promise<(any | null)[]> {
+        return mapCryptoBatchWithYield(data, (item) => decryptSecretBox(item, this.secretKey));
     }
 
     async decrypt(data: Uint8Array[], options: DecryptOptions = {}): Promise<(any | null)[]> {
@@ -151,16 +144,14 @@ export class SecretBoxEncryption implements Encryptor, Decryptor {
         );
     }
 
-    private decryptBase64Reference(data: readonly string[]): (any | null)[] {
-        const results: (any | null)[] = [];
-        for (const item of data) {
+    private async decryptBase64Reference(data: readonly string[]): Promise<(any | null)[]> {
+        return mapCryptoBatchWithYield(data, (item) => {
             try {
-                results.push(decryptSecretBox(decodeBase64(item, 'base64'), this.secretKey));
+                return decryptSecretBox(decodeBase64(item, 'base64'), this.secretKey);
             } catch {
-                results.push(null);
+                return null;
             }
-        }
-        return results;
+        });
     }
 
     private async decryptBase64WithNativeWorker(data: readonly string[], options: DecryptOptions = {}): Promise<(any | null)[]> {

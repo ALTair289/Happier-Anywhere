@@ -9,7 +9,7 @@ describe('createNativeCryptoWorker web', () => {
 
         expect(await worker.probe()).toEqual({
             available: false,
-            failureReason: NATIVE_CRYPTO_WORKER_PROBE_FAILURE_REASON.missing,
+            failureReason: NATIVE_CRYPTO_WORKER_PROBE_FAILURE_REASON.unsupportedPlatform,
         });
     });
 });

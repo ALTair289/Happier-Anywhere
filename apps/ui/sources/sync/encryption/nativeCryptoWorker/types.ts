@@ -8,14 +8,36 @@ export type NativeCryptoWorkerOperation = typeof NATIVE_CRYPTO_WORKER_OPERATION[
 
 export const NATIVE_CRYPTO_WORKER_PROBE_FAILURE_REASON = {
     ok: 0,
+    /** The platform ships a native worker, but this build cannot use it. */
     missing: 1,
     echoFailed: 2,
     wrongVersion: 3,
     unknown: 4,
+    /**
+     * The platform has no native worker at all (web): the JS path is the intended
+     * implementation there, not a degradation. Kept distinct from `missing` so a
+     * native build whose worker module is absent stays loudly visible.
+     */
+    unsupportedPlatform: 5,
 } as const;
 
 export type NativeCryptoWorkerProbeFailureReason =
     typeof NATIVE_CRYPTO_WORKER_PROBE_FAILURE_REASON[keyof typeof NATIVE_CRYPTO_WORKER_PROBE_FAILURE_REASON];
+
+/**
+ * Why a batch degraded from the native worker to the JS reference path.
+ * Only genuine degradations are named here: routing that deliberately stays on
+ * JS (mode `off`, or a batch below the dispatch thresholds) is not a fallback.
+ */
+export const NATIVE_CRYPTO_WORKER_FALLBACK_REASON = {
+    probeFailed: 'probe_failed',
+    unavailable: 'unavailable',
+    unsupportedOperation: 'unsupported_operation',
+    nativeRunFailed: 'native_run_failed',
+} as const;
+
+export type NativeCryptoWorkerFallbackReason =
+    typeof NATIVE_CRYPTO_WORKER_FALLBACK_REASON[keyof typeof NATIVE_CRYPTO_WORKER_FALLBACK_REASON];
 
 export type CryptoWorkerScope = Readonly<{
     accountId: string;
