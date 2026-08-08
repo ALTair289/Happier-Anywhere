@@ -34,12 +34,14 @@ test("relay-server target is artifact based and keeps the self-host runtime cont
   assert.doesNotMatch(raw, /^FROM\s+server\s+AS\s+relay-server\s*$/m);
   assert.match(artifactSection, /fetch-verified-release-artifact/);
   assert.match(artifactSection, /HAPPIER_RELAY_SERVER_VERSION/);
-  assert.match(artifactSection, /HAPPIER_RELAY_UI_WEB_VERSION/);
+  assert.doesNotMatch(artifactSection, /HAPPIER_RELAY_UI_WEB_RELEASE_TAG/);
+  assert.doesNotMatch(artifactSection, /HAPPIER_RELAY_UI_WEB_VERSION/);
   assert.match(artifactSection, /happier-server/);
-  assert.match(artifactSection, /happier-ui-web/);
+  assert.doesNotMatch(artifactSection, /--product happier-ui-web/);
+  assert.doesNotMatch(artifactSection, /rm -rf \/opt\/happier\/server\/ui-web/);
 
   assert.match(runtimeSection, /COPY --from=relay-artifacts --chown=happier:happier \/opt\/happier\/server \/opt\/happier\/server/);
-  assert.match(runtimeSection, /COPY --from=relay-artifacts --chown=happier:happier \/opt\/happier\/ui-web \/opt\/happier\/ui-web/);
+  assert.doesNotMatch(runtimeSection, /COPY --from=relay-artifacts --chown=happier:happier \/opt\/happier\/ui-web/);
   assert.match(runtimeSection, /\bRUN useradd\b[\s\S]*\bmkdir -p \/data\b[\s\S]*\bchown -R happier:happier \/data \/opt\/happier\b/);
   assert.match(runtimeSection, /\bUSER happier\b/);
   assert.match(runtimeSection, /\bENV NODE_ENV=production\b/);
@@ -47,7 +49,7 @@ test("relay-server target is artifact based and keeps the self-host runtime cont
   assert.match(runtimeSection, /\bENV HAPPIER_SERVER_FLAVOR=light\b/);
   assert.match(runtimeSection, /\bENV HAPPIER_DB_PROVIDER=sqlite\b/);
   assert.match(runtimeSection, /\bENV HAPPIER_SERVER_LIGHT_DATA_DIR=\/data\b/);
-  assert.match(runtimeSection, /\bENV HAPPIER_SERVER_UI_DIR=\/opt\/happier\/ui-web\b/);
+  assert.match(runtimeSection, /\bENV HAPPIER_SERVER_UI_DIR=\/opt\/happier\/server\/ui-web\/current\b/);
   assert.match(runtimeSection, /\bENV HAPPIER_SERVER_UI_REQUIRED=1\b/);
   assert.match(runtimeSection, /\bENV HAPPIER_SQLITE_AUTO_MIGRATE=1\b/);
   assert.match(runtimeSection, /\bENV HAPPIER_SQLITE_MIGRATIONS_DIR=\/opt\/happier\/server\/prisma\/sqlite\/migrations\b/);

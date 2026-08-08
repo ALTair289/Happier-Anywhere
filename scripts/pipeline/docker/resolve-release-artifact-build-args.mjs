@@ -3,49 +3,26 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { resolveReleaseAssetBundle } from '@happier-dev/release-runtime/assets';
-import { fetchGitHubReleaseByTag as fetchGitHubReleaseByTagDefault } from '@happier-dev/release-runtime/github';
-
 import {
   normalizePublicReleaseChannel,
-  resolveRollingReleaseTagSuffix,
   resolveRollingVersionSuffix,
 } from '../release/lib/public-release-rings.mjs';
 import { versionedComponents } from '../release/component-registry.mjs';
-import { resolveGitHubRepoSlug } from '../github/resolve-github-repo-slug.mjs';
 
 const DEFAULT_RELEASE_BASE_URL = 'https://github.com/happier-dev/happier/releases/download';
 
 const ARTIFACT_SPECS = Object.freeze({
   server: Object.freeze({
     product: 'happier-server',
-    tagPrefix: 'server',
     versionTagPrefix: versionedComponents.server.baselineTagPrefix,
     versionEnv: 'HAPPIER_DOCKER_SERVER_VERSION',
     packageJsonPath: 'apps/server/package.json',
-    targets: Object.freeze([
-      Object.freeze({ os: 'linux', arch: 'x64' }),
-      Object.freeze({ os: 'linux', arch: 'arm64' }),
-    ]),
-  }),
-  uiWeb: Object.freeze({
-    product: 'happier-ui-web',
-    tagPrefix: 'ui-web',
-    versionTagPrefix: versionedComponents.app.baselineTagPrefix,
-    versionEnv: 'HAPPIER_DOCKER_UI_WEB_VERSION',
-    packageJsonPath: 'apps/ui/package.json',
-    targets: Object.freeze([Object.freeze({ os: 'web', arch: 'any' })]),
   }),
   cli: Object.freeze({
     product: 'happier',
-    tagPrefix: 'cli',
     versionTagPrefix: versionedComponents.cli.baselineTagPrefix,
     versionEnv: 'HAPPIER_DOCKER_CLI_VERSION',
     packageJsonPath: 'apps/cli/package.json',
-    targets: Object.freeze([
-      Object.freeze({ os: 'linux', arch: 'x64' }),
-      Object.freeze({ os: 'linux', arch: 'arm64' }),
-    ]),
   }),
 });
 
@@ -101,8 +78,6 @@ function resolveVersionReleaseTag(spec, version) {
  *   repoRoot: string;
  *   env: Record<string, string | undefined>;
  *   dryRun: boolean;
- *   githubRepo: string;
- *   fetchGitHubReleaseByTag: typeof fetchGitHubReleaseByTagDefault;
  * }}
  */
 async function resolveArtifactInput({
@@ -111,11 +86,7 @@ async function resolveArtifactInput({
   repoRoot,
   env,
   dryRun,
-  githubRepo,
-  fetchGitHubReleaseByTag,
 }) {
-  const tagSuffix = resolveRollingReleaseTagSuffix(channel);
-  const rollingReleaseTag = `${spec.tagPrefix}-${tagSuffix}`;
   const overrideVersion = String(env[spec.versionEnv] ?? '').trim();
   if (overrideVersion) {
     return { releaseTag: resolveVersionReleaseTag(spec, overrideVersion), version: overrideVersion };
@@ -129,34 +100,9 @@ async function resolveArtifactInput({
     return { releaseTag: resolveVersionReleaseTag(spec, version), version };
   }
 
-  const release = await fetchGitHubReleaseByTag({
-    githubRepo,
-    tag: rollingReleaseTag,
-    userAgent: 'happier-docker-publish',
-    githubToken: env.GH_TOKEN || env.GITHUB_TOKEN,
-  });
-
-  let resolvedVersion = '';
-  for (const target of spec.targets) {
-    const bundle = resolveReleaseAssetBundle({
-      assets: release?.assets,
-      product: spec.product,
-      os: target.os,
-      arch: target.arch,
-      preferZipOnWindows: false,
-    });
-    if (!resolvedVersion) {
-      resolvedVersion = bundle.version;
-    } else if (resolvedVersion !== bundle.version) {
-      throw new Error(
-        `[pipeline] ${spec.product} ${rollingReleaseTag} contains mismatched artifact versions: ${resolvedVersion} and ${bundle.version}`,
-      );
-    }
-  }
-  if (!resolvedVersion) {
-    throw new Error(`[pipeline] unable to resolve ${spec.product} version from ${rollingReleaseTag}`);
-  }
-  return { releaseTag: resolveVersionReleaseTag(spec, resolvedVersion), version: resolvedVersion };
+  throw new Error(
+    `[pipeline] Docker publication requires the exact verified ${spec.product} version in ${spec.versionEnv}`,
+  );
 }
 
 /**
@@ -165,7 +111,6 @@ async function resolveArtifactInput({
  *   repoRoot: string;
  *   dryRun: boolean;
  *   env?: Record<string, string | undefined>;
- *   fetchGitHubReleaseByTag?: typeof fetchGitHubReleaseByTagDefault;
  *   includeRelay?: boolean;
  *   includeDevBox?: boolean;
  * }}
@@ -178,30 +123,23 @@ export async function resolveDockerReleaseArtifactInputs(params) {
 
   const env = params.env ?? process.env;
   const repoRoot = path.resolve(params.repoRoot);
-  const githubRepo = String(env.GH_REPO ?? env.GITHUB_REPOSITORY ?? '').trim()
-    || resolveGitHubRepoSlug({ repoRoot, env })
-    || 'happier-dev/happier';
-  const fetchGitHubReleaseByTag = params.fetchGitHubReleaseByTag ?? fetchGitHubReleaseByTagDefault;
   const common = {
     channel,
     repoRoot,
     env,
     dryRun: params.dryRun,
-    githubRepo,
-    fetchGitHubReleaseByTag,
   };
   const includeRelay = params.includeRelay !== false;
   const includeDevBox = params.includeDevBox !== false;
 
-  const [server, uiWeb, cli] = await Promise.all([
+  const [server, cli] = await Promise.all([
     includeRelay ? resolveArtifactInput({ ...common, spec: ARTIFACT_SPECS.server }) : Promise.resolve(null),
-    includeRelay ? resolveArtifactInput({ ...common, spec: ARTIFACT_SPECS.uiWeb }) : Promise.resolve(null),
     includeDevBox ? resolveArtifactInput({ ...common, spec: ARTIFACT_SPECS.cli }) : Promise.resolve(null),
   ]);
 
   return {
     releaseBaseUrl: normalizeBaseUrl(env.HAPPIER_DOCKER_RELEASE_BASE_URL),
-    relay: { server, uiWeb },
+    relay: { server },
     devBox: { cli },
   };
 }
@@ -213,7 +151,7 @@ export async function resolveDockerReleaseArtifactInputs(params) {
 export function dockerReleaseArtifactInputsToBuildArgs(inputs, image) {
   const base = ['--build-arg', `HAPPIER_RELEASE_BASE_URL=${inputs.releaseBaseUrl}`];
   if (image === 'relay') {
-    if (!inputs.relay.server || !inputs.relay.uiWeb) {
+    if (!inputs.relay.server) {
       throw new Error('[pipeline] relay Docker artifact inputs were not resolved');
     }
     return [
@@ -222,10 +160,6 @@ export function dockerReleaseArtifactInputsToBuildArgs(inputs, image) {
       `HAPPIER_RELAY_SERVER_RELEASE_TAG=${inputs.relay.server.releaseTag}`,
       '--build-arg',
       `HAPPIER_RELAY_SERVER_VERSION=${inputs.relay.server.version}`,
-      '--build-arg',
-      `HAPPIER_RELAY_UI_WEB_RELEASE_TAG=${inputs.relay.uiWeb.releaseTag}`,
-      '--build-arg',
-      `HAPPIER_RELAY_UI_WEB_VERSION=${inputs.relay.uiWeb.version}`,
     ];
   }
   if (image === 'dev-box') {
