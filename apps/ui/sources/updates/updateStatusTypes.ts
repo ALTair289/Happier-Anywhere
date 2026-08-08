@@ -1,4 +1,4 @@
-export type AppUpdateStatusKind = 'native-store' | 'desktop' | 'ota' | 'release-notes' | 'changelog';
+export type AppUpdateStatusKind = 'native-store' | 'web-ui' | 'desktop' | 'ota' | 'release-notes' | 'changelog';
 
 export type DesktopUpdateStatus =
     | 'idle'
@@ -32,6 +32,7 @@ export type BuildAppUpdateStatusModelParams = Readonly<{
     nativeUpdateUrl: string | null;
     nativeUpdateRequired?: boolean;
     nativeMinimumAppVersion?: string | null;
+    webUi?: Readonly<{ updateAvailable: boolean }>;
     desktop: Readonly<{
         status: DesktopUpdateStatus;
         availableVersion: string | null;

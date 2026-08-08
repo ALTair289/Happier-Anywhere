@@ -53,6 +53,14 @@ export function buildAppUpdateStatusModel(params: BuildAppUpdateStatusModelParam
         };
     }
 
+    if (params.platformOs === 'web' && params.webUi?.updateAvailable) {
+        return {
+            visible: true, kind: 'web-ui', tone: 'success', iconName: 'arrow-clockwise',
+            label: params.t('updateBanner.updateAvailable'), message: params.t('updateBanner.pressToApply'),
+            actionLabel: params.t('updateBanner.pressToApply'), actionDisabled: false,
+        };
+    }
+
     if (
         params.desktop.status === 'available'
         || params.desktop.status === 'installing'

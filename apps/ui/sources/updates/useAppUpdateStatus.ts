@@ -13,6 +13,7 @@ import {
 import { tLoose } from '@/text';
 
 import { buildAppUpdateStatusModel } from './buildAppUpdateStatusModel';
+import { useWebUiDeploymentFreshness } from './useWebUiDeploymentFreshness';
 
 export function useAppUpdateStatus() {
     const router = useRouter();
@@ -23,6 +24,7 @@ export function useAppUpdateStatus() {
     const changelog = useChangelog();
     const releaseNotes = useReleaseNotesUnread();
     const releaseNotesLauncher = useReleaseNotesLauncher();
+    const webUi = useWebUiDeploymentFreshness();
 
     const model = React.useMemo(
         () => buildAppUpdateStatusModel({
@@ -30,6 +32,7 @@ export function useAppUpdateStatus() {
             nativeUpdateUrl,
             nativeUpdateRequired: nativeUpdateStatus?.required === true,
             nativeMinimumAppVersion: nativeUpdateStatus?.minimumAppVersion ?? null,
+            webUi: { updateAvailable: webUi.updateAvailable },
             desktop: {
                 status: desktop.status,
                 availableVersion: desktop.availableVersion,
@@ -56,6 +59,7 @@ export function useAppUpdateStatus() {
             nativeUpdateStatus?.minimumAppVersion,
             ota.isUpdatePending,
             releaseNotes.hasUnread,
+            webUi.updateAvailable,
         ],
     );
 
@@ -84,6 +88,11 @@ export function useAppUpdateStatus() {
             return;
         }
 
+        if (model.kind === 'web-ui') {
+            webUi.reload();
+            return;
+        }
+
         if (model.kind === 'ota') {
             await ota.reloadApp();
             return;
@@ -107,6 +116,7 @@ export function useAppUpdateStatus() {
         ota,
         releaseNotesLauncher,
         router,
+        webUi,
     ]);
 
     const dismiss = React.useCallback(() => {
