@@ -1287,13 +1287,17 @@ test('buildServerBinaryArtifactPayload stages sharp native runtime sidecars for 
       }),
       commandProbe: () => true,
       runCommand: () => {},
-      compileBinary: async ({ outfile, externals }) => {
-        compileCalls.push({ outfile, externals });
+      compileBinary: async ({ outfile, externals, buildRunnerEntrypoint }) => {
+        compileCalls.push({ outfile, externals, buildRunnerEntrypoint });
         writeFileSync(outfile, '#!/bin/sh\necho happier-server\n', 'utf8');
       },
     });
 
     assert.deepEqual(compileCalls[0]?.externals, ['redis']);
+    assert.equal(
+      compileCalls[0]?.buildRunnerEntrypoint,
+      join(repoRoot, 'packages', 'cli-common', 'scripts', 'buildServerBunBinary.mjs'),
+    );
     assert.equal(readFileSync(join(payloadDir, 'node_modules', 'sharp', 'lib', 'index.js'), 'utf8'), 'module.exports = require("@img/sharp-darwin-arm64");\n');
     assert.equal(readFileSync(join(payloadDir, 'node_modules', '@img', 'colour', 'index.js'), 'utf8'), 'module.exports = {};\n');
     assert.equal(readFileSync(join(payloadDir, 'node_modules', 'detect-libc', 'index.js'), 'utf8'), 'module.exports = {};\n');
@@ -1301,6 +1305,25 @@ test('buildServerBinaryArtifactPayload stages sharp native runtime sidecars for 
     assert.equal(readFileSync(join(payloadDir, 'node_modules', '@img', 'sharp-darwin-arm64', 'index.js'), 'utf8'), 'module.exports = {};\n');
     assert.equal(readFileSync(join(payloadDir, 'node_modules', '@img', 'sharp-libvips-darwin-arm64', 'index.js'), 'utf8'), 'module.exports = {};\n');
     assert.equal(existsSync(join(payloadDir, 'node_modules', '@img', 'sharp-linux-x64')), false);
+
+    rmSync(join(repoRoot, 'node_modules', '@img', 'sharp-libvips-darwin-arm64'), { recursive: true, force: true });
+    await assert.rejects(
+      artifacts.buildServerBinaryArtifactPayload({
+        repoRoot,
+        payloadDir: join(tempRoot, 'payload-missing-sharp'),
+        entrypoint: join(serverSourcesDir, 'main.light.ts'),
+        buildDbProviders: 'sqlite',
+        target: artifacts.resolveCurrentBinaryTarget({
+          availableTargets: artifacts.SERVER_BINARY_TARGETS,
+          platform: 'darwin',
+          arch: 'arm64',
+        }),
+        commandProbe: () => true,
+        runCommand: () => {},
+        compileBinary: async ({ outfile }) => writeFileSync(outfile, '#!/bin/sh\necho happier-server\n', 'utf8'),
+      }),
+      /missing runtime package @img\/sharp-libvips-darwin-arm64/u,
+    );
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }

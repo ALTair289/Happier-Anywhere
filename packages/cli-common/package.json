@@ -15,6 +15,12 @@
       "require": "./jsonOwnerBuildLockState.cjs",
       "default": "./jsonOwnerBuildLockState.cjs"
     },
+    "./cliDistBuildManifest": {
+      "types": "./cliDistBuildManifest.d.cts",
+      "import": "./cliDistBuildManifest.cjs",
+      "require": "./cliDistBuildManifest.cjs",
+      "default": "./cliDistBuildManifest.cjs"
+    },
     "./workspaceLockLease": {
       "types": "./workspaceLockLease.d.mts",
       "import": "./workspaceLockLease.mjs",

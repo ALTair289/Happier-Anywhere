@@ -5,6 +5,8 @@ import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import cliDistBuildManifest from '../../cliDistBuildManifest.cjs';
+
 const { renameMock, renameDelegate } = vi.hoisted(() => ({
     renameMock: vi.fn(),
     renameDelegate: { current: null as null | typeof import('node:fs/promises').rename },
@@ -139,7 +141,9 @@ module.exports = { unpackTools };
             }),
             commandProbe: (command) => command === 'bun' || command === 'yarn',
             runCommand: async () => {
-                await writeRepoFile(join(cliDistDir, 'index.mjs'), 'export const cli = "fresh";\n', newer);
+                const cliDistEntrypoint = join(cliDistDir, 'index.mjs');
+                await writeRepoFile(cliDistEntrypoint, 'export const cli = "fresh";\n', newer);
+                cliDistBuildManifest.writeCliDistBuildManifest(cliDistEntrypoint);
             },
             compileBinary: async ({ outfile }) => {
                 await writeRepoFile(outfile, 'compiled-binary');

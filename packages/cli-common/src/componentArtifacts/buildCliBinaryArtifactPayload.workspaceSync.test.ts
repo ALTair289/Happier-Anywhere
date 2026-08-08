@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import cliDistBuildManifest from '../../cliDistBuildManifest.cjs';
 import { buildCliBinaryArtifactPayload } from './buildCliBinaryArtifactPayload.js';
 
 const tempDirs: string[] = [];
@@ -140,7 +141,9 @@ describe('buildCliBinaryArtifactPayload bundled workspace sync', () => {
                 '@happier-dev/cli-common': '0.0.0',
             },
         }, null, 2)}\n`, older);
-        await writeRepoFile(join(repoRoot, 'apps', 'cli', 'dist', 'index.mjs'), 'export default "cli-entrypoint";\n', newer);
+        const cliDistEntrypoint = join(repoRoot, 'apps', 'cli', 'dist', 'index.mjs');
+        await writeRepoFile(cliDistEntrypoint, 'export default "cli-entrypoint";\n', newer);
+        cliDistBuildManifest.writeCliDistBuildManifest(cliDistEntrypoint);
         await writeRepoFile(join(repoRoot, 'apps', 'cli', 'src', 'index.ts'), 'export default "cli-source";\n', older);
         const staticRuntimeScriptAssets = await collectStaticRuntimeScriptAssetSegments();
         const sidecarPaths = [
