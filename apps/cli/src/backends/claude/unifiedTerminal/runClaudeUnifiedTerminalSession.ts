@@ -36,6 +36,7 @@ import { createClaudeUnifiedHostLivenessBridge } from './createClaudeUnifiedHost
 import { assertClaudeUnifiedHookActivationBeforeTranscriptFallback } from './claudeUnifiedHookActivation';
 import { createClaudeUnifiedInputArbiter } from './createClaudeUnifiedInputArbiter';
 import { interruptClaudeUnifiedQueuedPrompt } from './interruptClaudeUnifiedQueuedPrompt';
+import { releaseClaudeUsageLimitDialogAfterExactApplication } from './releaseClaudeUsageLimitDialogAfterExactApplication';
 import { isClaudeUnifiedPendingInputInterruptAndRunEnabled } from './pendingInputInterruptAndRunActivation';
 import {
   createClaudeGoalRuntimeControls,
@@ -60,6 +61,7 @@ import { createClaudeUnifiedAcceptedPromptTranscriptDiscovery } from './accepted
 import { retireClaudeEndpointArtifactsForTerminalAttachment } from '../endpointRecovery/claudeEndpointArtifacts';
 import { doesClaudeUnifiedPromptBatchMatchAcceptedTranscript } from './acceptedPromptDeliveryIdentity';
 import { ClaudeUnifiedTerminalInjectionFailureError } from './terminalInjectionFailureError';
+import { ClaudeUnifiedResumeIdentityMismatchError } from './resumeIdentity';
 import type {
   createClaudeProviderActivityLedger,
 } from '../providerActivity/createClaudeProviderActivityLedger';
@@ -196,6 +198,8 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   path: string;
   happySessionId?: string | null | undefined;
   sessionId?: string | null | undefined;
+  /** Exact provider identity a newly launched native resume must prove before input is admitted. */
+  expectedProviderResumeSessionId?: string | null | undefined;
   transcriptPath?: string | null | undefined;
   claudeArgs?: readonly string[] | undefined;
   hookSettingsPath?: string | undefined;
@@ -377,6 +381,12 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
       request: Readonly<SessionTerminalComposerClearRequestV1>,
     ) => Promise<SessionTerminalComposerClearResultV1>,
   ) => (() => void) | void) | undefined;
+  /** Registers the provider-owned release applied only after exact connected-service settlement. */
+  registerConnectedServiceExactApplicationHandler?: ((
+    releaseProviderUi: () => Promise<void>,
+  ) => (() => void) | void) | undefined;
+  /** Wakes the canonical Pending owner after the stale usage-limit overlay was dismissed. */
+  onConnectedServiceExactApplicationReleased?: (() => void) | undefined;
   onPendingInputInterruptAndRunLocalIdChange?: ((localId: string | null) => void) | undefined;
   registerPendingInputInterruptAndRunRuntimeControl?: ((
     interruptPendingInputAndRun: (
@@ -1120,6 +1130,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
   let unregisterStatuslineRuntimeReconciler: (() => void) | null = null;
   let unregisterMetadataRuntimeModeApplier: (() => void) | null = null;
   let unregisterTerminalComposerClearRuntimeControl: (() => void) | null = null;
+  let unregisterConnectedServiceExactApplicationHandler: (() => void) | null = null;
   let unregisterPendingInputInterruptAndRunRuntimeControl: (() => void) | null = null;
   let unregisterGoalRuntimeControl: (() => void) | null = null;
   let unregisterInFlightSteerAvailabilityRefresh: (() => void) | null = null;
@@ -1138,6 +1149,13 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
   const runtimeAbortController = new AbortController();
   const processSignalAbortController = new AbortController();
   let fatalRuntimeError: unknown = null;
+  const expectedProviderResumeSessionId =
+    typeof opts.expectedProviderResumeSessionId === 'string'
+    && opts.expectedProviderResumeSessionId.trim().length > 0
+      ? opts.expectedProviderResumeSessionId.trim()
+      : null;
+  let explicitResumeIdentityRequired = false;
+  let explicitResumeIdentityEstablished = expectedProviderResumeSessionId === null;
   let startupHostLivenessGraceActive = true;
   let providerSessionStartedObserved = false;
   let trustedHookActivationObserved = false;
@@ -1223,6 +1241,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         await discardExistingTerminalHost(existingTerminalHost, 'adopt_failed_host_confirmed_dead', liveness);
         const fallbackSpawn = await ensureSpawn();
         ensureHookSubscription();
+        explicitResumeIdentityRequired = expectedProviderResumeSessionId !== null;
         await opts.onProviderLaunchStarting?.();
         handle = await hostResolution.adapter.createOrAttachHost({
           sessionName: fallbackSessionName,
@@ -1250,6 +1269,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
           spawnEnv: launchSpawn.spawnEnv,
           isolatedEnv: true,
         } as const;
+        explicitResumeIdentityRequired = expectedProviderResumeSessionId !== null;
         await opts.onProviderLaunchStarting?.();
         handle = await hostResolution.adapter.createOrAttachHost(createOptions);
       }
@@ -1331,12 +1351,12 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     return guardedAttempt;
   };
   try {
-    if (opts.registerTerminalComposerClearRuntimeControl) {
-      const terminalComposerClearPort = hostResolution.adapter.createControlPort?.(activeHandle) ?? null;
-      if (terminalComposerClearPort) {
+    if (opts.registerTerminalComposerClearRuntimeControl || opts.registerConnectedServiceExactApplicationHandler) {
+      const terminalSessionControlPort = hostResolution.adapter.createControlPort?.(activeHandle) ?? null;
+      if (terminalSessionControlPort && opts.registerTerminalComposerClearRuntimeControl) {
         const unregister = opts.registerTerminalComposerClearRuntimeControl(async (request) => {
           const result = await clearUserAuthorizedClaudeComposerDraft({
-            port: terminalComposerClearPort,
+            port: terminalSessionControlPort,
           });
           const protocolResult = mapClaudeComposerClearResultToProtocolResult(result, request.sessionId);
           if (protocolResult.ok) {
@@ -1346,6 +1366,17 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
           return protocolResult;
         });
         unregisterTerminalComposerClearRuntimeControl = typeof unregister === 'function' ? unregister : null;
+      }
+      if (terminalSessionControlPort && opts.registerConnectedServiceExactApplicationHandler) {
+        const unregister = opts.registerConnectedServiceExactApplicationHandler(async () => {
+          const result = await releaseClaudeUsageLimitDialogAfterExactApplication({
+            port: terminalSessionControlPort,
+          });
+          if (result.status === 'released') {
+            opts.onConnectedServiceExactApplicationReleased?.();
+          }
+        });
+        unregisterConnectedServiceExactApplicationHandler = typeof unregister === 'function' ? unregister : null;
       }
     }
 
@@ -2299,6 +2330,28 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             },
             proveAcceptedMainTranscript: (value) => confirmPromptAcceptedFromTranscript([value]),
             onSessionFound: opts.onSessionFound,
+            validateSessionStart: (sessionInfo) => {
+              if (
+                !explicitResumeIdentityRequired
+                || !expectedProviderResumeSessionId
+                || explicitResumeIdentityEstablished
+              ) return true;
+              if (
+                sessionInfo.source === 'resume'
+                && sessionInfo.sessionId === expectedProviderResumeSessionId
+              ) {
+                explicitResumeIdentityEstablished = true;
+                return true;
+              }
+              const error = new ClaudeUnifiedResumeIdentityMismatchError(
+                expectedProviderResumeSessionId,
+                sessionInfo.sessionId,
+                sessionInfo.source,
+              );
+              fatalRuntimeError ??= error;
+              runtimeAbortController.abort(error);
+              return false;
+            },
             loadCommittedClaudeJsonlMessageBaseline: opts.loadCommittedClaudeJsonlMessageBaseline,
             transcriptMissingWarningMs: configuration.claudeTranscriptMissingWarningMs,
             subscribeClaudeSessionHooks: activeHookSubscription.subscribe,
@@ -2356,11 +2409,14 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             // slow-but-alive fresh session must not be killed before injection.
             hasHostAliveEvidence: () => providerSessionStartedObserved,
             canReportStartupReady: () => (
-              allowEmptyStartupInputBeforeSessionStart
-              || allowReadinessBeforeSessionStart
-              || !opts.subscribeClaudeSessionHooks
-              || Boolean(opts.sessionId || opts.transcriptPath)
-              || providerSessionStartedObserved
+              (!explicitResumeIdentityRequired || explicitResumeIdentityEstablished)
+              && (
+                allowEmptyStartupInputBeforeSessionStart
+                || allowReadinessBeforeSessionStart
+                || !opts.subscribeClaudeSessionHooks
+                || Boolean(opts.sessionId || opts.transcriptPath)
+                || providerSessionStartedObserved
+              )
             ),
             resolveStartupDialog,
             onScreenObserved: observeTerminalScreen,
@@ -2438,6 +2494,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     unregisterStatuslineRuntimeReconciler?.();
     unregisterMetadataRuntimeModeApplier?.();
     unregisterTerminalComposerClearRuntimeControl?.();
+    unregisterConnectedServiceExactApplicationHandler?.();
     unregisterPendingInputInterruptAndRunRuntimeControl?.();
     opts.onPendingInputInterruptAndRunLocalIdChange?.(null);
     unregisterGoalRuntimeControl?.();

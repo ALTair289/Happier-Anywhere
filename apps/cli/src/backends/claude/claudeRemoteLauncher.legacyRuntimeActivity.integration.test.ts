@@ -11,10 +11,22 @@ import { hashClaudeEnhancedModeForQueue } from './remote/modeHash';
 import { Session } from './session';
 
 const mockQuery = vi.hoisted(() => vi.fn());
+const mockClaudeRemoteAgentSdk = vi.hoisted(() => vi.fn());
+const mockRunClaudeUnifiedTerminalSession = vi.hoisted(() => vi.fn());
 
 vi.mock('@/backends/claude/sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/backends/claude/sdk')>();
   return { ...actual, query: mockQuery };
+});
+
+vi.mock('./remote/claudeRemoteAgentSdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./remote/claudeRemoteAgentSdk')>();
+  return { ...actual, claudeRemoteAgentSdk: mockClaudeRemoteAgentSdk };
+});
+
+vi.mock('./unifiedTerminal/runClaudeUnifiedTerminalSession', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./unifiedTerminal/runClaudeUnifiedTerminalSession')>();
+  return { ...actual, runClaudeUnifiedTerminalSession: mockRunClaudeUnifiedTerminalSession };
 });
 
 vi.mock('@/runtime/js/ensureJavaScriptRuntimeExecutable', () => ({
@@ -262,6 +274,8 @@ describe.sequential('claudeRemoteLauncher legacy Runtime Activity subscriber', (
   beforeEach(() => {
     vi.clearAllMocks();
     mockQuery.mockReset();
+    mockClaudeRemoteAgentSdk.mockReset();
+    mockRunClaudeUnifiedTerminalSession.mockReset();
     process.env.HAPPIER_CLAUDE_REMOTE_INTERRUPT_THEN_TEARDOWN_GRACE_MS = '0';
   });
 
@@ -310,5 +324,187 @@ describe.sequential('claudeRemoteLauncher legacy Runtime Activity subscriber', (
       ] as SDKMessage[],
       expectedAfterTerminal: 'idle',
     });
+  }, 60_000);
+
+  it('releases the previous Agent SDK input wait before a provider relaunch', async () => {
+    const awaitPhase = async <T>(label: string, promise: Promise<T>): Promise<T> => {
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), 5_000);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+    };
+    const { session, switchHandlerReady } = createHarness();
+    const firstLaunchStarted = createDeferred<void>();
+    const firstWaitArmed = createDeferred<void>();
+    const finishFirstLaunch = createDeferred<void>();
+    const secondLaunchStarted = createDeferred<void>();
+    const secondPromptOutcome = createDeferred<Readonly<{
+      status: 'fulfilled' | 'rejected';
+      message?: string;
+      error?: unknown;
+    }>>();
+    let launchCall = 0;
+
+    mockClaudeRemoteAgentSdk.mockImplementation(async (opts: Readonly<{
+      nextMessage: () => Promise<Readonly<{ message: string }> | null>;
+    }>) => {
+      launchCall += 1;
+      if (launchCall === 1) {
+        firstLaunchStarted.resolve(undefined);
+        await expect(opts.nextMessage()).resolves.toEqual(expect.objectContaining({ message: 'initial prompt' }));
+        void opts.nextMessage().catch(() => undefined);
+        firstWaitArmed.resolve(undefined);
+        await finishFirstLaunch.promise;
+        return;
+      }
+      if (launchCall === 2) {
+        secondLaunchStarted.resolve(undefined);
+        try {
+          const next = await opts.nextMessage();
+          secondPromptOutcome.resolve({
+            status: 'fulfilled',
+            message: next?.message,
+          });
+        } catch (error) {
+          secondPromptOutcome.resolve({ status: 'rejected', error });
+          throw error;
+        }
+        return;
+      }
+      await opts.nextMessage();
+    });
+
+    session.queue.push(
+      'initial prompt',
+      {
+        permissionMode: 'default',
+        claudeRemoteAgentSdkEnabled: true,
+        claudeUnifiedTerminalEnabled: false,
+      },
+      { userMessageLocalId: 'local-initial' },
+    );
+
+    const { claudeRemoteLauncher } = await import('./claudeRemoteLauncher');
+    const launcherPromise = claudeRemoteLauncher(session);
+    const launcherOutcome = launcherPromise.then(
+      (value) => ({ status: 'resolved' as const, value }),
+      (error: unknown) => ({ status: 'rejected' as const, error }),
+    );
+    const switchHandler = await switchHandlerReady;
+    try {
+      await expect(awaitPhase('first Agent SDK launch', Promise.race([
+        firstLaunchStarted.promise.then(() => ({ status: 'launch-started' as const })),
+        launcherOutcome,
+      ]))).resolves.toEqual({ status: 'launch-started' });
+      await awaitPhase('first input wait', firstWaitArmed.promise);
+      finishFirstLaunch.resolve(undefined);
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      session.queue.push(
+        'recovery prompt',
+        {
+          permissionMode: 'default',
+          claudeRemoteAgentSdkEnabled: true,
+          claudeUnifiedTerminalEnabled: false,
+        },
+        { userMessageLocalId: 'local-recovery' },
+      );
+
+      await awaitPhase('second Agent SDK launch', secondLaunchStarted.promise);
+      await expect(awaitPhase('second prompt', secondPromptOutcome.promise)).resolves.toEqual({
+        status: 'fulfilled',
+        message: 'recovery prompt',
+      });
+    } finally {
+      await awaitPhase('launcher shutdown', Promise.all([
+        Promise.resolve(switchHandler({ to: 'local' })),
+        session.cleanup(),
+        launcherPromise,
+      ]));
+    }
+  }, 60_000);
+
+  it('keeps the active Agent SDK runtime when a later queued prompt selects unified terminal', async () => {
+    const awaitPhase = async <T>(label: string, promise: Promise<T>): Promise<T> => {
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), 5_000);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+    };
+    const { session, switchHandlerReady } = createHarness();
+    const firstPromptConsumed = createDeferred<void>();
+    const secondPromptOutcome = createDeferred<Readonly<{
+      runtime: 'agentSdk' | 'unifiedTerminal';
+      message: string | null;
+    }>>();
+
+    mockClaudeRemoteAgentSdk.mockImplementationOnce(async (opts: Readonly<{
+      nextMessage: () => Promise<Readonly<{ message: string }> | null>;
+    }>) => {
+      await expect(opts.nextMessage()).resolves.toEqual(expect.objectContaining({ message: 'initial SDK prompt' }));
+      firstPromptConsumed.resolve(undefined);
+      const next = await opts.nextMessage();
+      if (next) {
+        secondPromptOutcome.resolve({ runtime: 'agentSdk', message: next.message });
+      }
+    });
+    mockRunClaudeUnifiedTerminalSession.mockImplementationOnce(async (opts: Readonly<{
+      nextMessage: () => Promise<Readonly<{ message: string }> | null>;
+    }>) => {
+      const next = await opts.nextMessage();
+      secondPromptOutcome.resolve({ runtime: 'unifiedTerminal', message: next?.message ?? null });
+    });
+
+    session.queue.push(
+      'initial SDK prompt',
+      {
+        permissionMode: 'default',
+        claudeRemoteAgentSdkEnabled: true,
+        claudeUnifiedTerminalEnabled: false,
+      },
+      { userMessageLocalId: 'local-sdk-initial' },
+    );
+
+    const { claudeRemoteLauncher } = await import('./claudeRemoteLauncher');
+    const launcherPromise = claudeRemoteLauncher(session);
+    const switchHandler = await switchHandlerReady;
+    try {
+      await awaitPhase('initial Agent SDK prompt', firstPromptConsumed.promise);
+      session.queue.push(
+        'prompt after account runtime change',
+        {
+          permissionMode: 'default',
+          claudeRemoteAgentSdkEnabled: true,
+          claudeUnifiedTerminalEnabled: true,
+        },
+        { userMessageLocalId: 'local-after-runtime-change' },
+      );
+
+      await expect(awaitPhase('second prompt dispatch', secondPromptOutcome.promise)).resolves.toEqual({
+        runtime: 'agentSdk',
+        message: 'prompt after account runtime change',
+      });
+      expect(mockClaudeRemoteAgentSdk).toHaveBeenCalledTimes(1);
+      expect(mockRunClaudeUnifiedTerminalSession).not.toHaveBeenCalled();
+    } finally {
+      await awaitPhase('launcher shutdown', Promise.all([
+        Promise.resolve(switchHandler({ to: 'local' })),
+        session.cleanup(),
+        launcherPromise,
+      ]));
+    }
   }, 60_000);
 });

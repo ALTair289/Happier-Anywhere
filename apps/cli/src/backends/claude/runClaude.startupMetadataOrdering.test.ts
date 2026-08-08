@@ -534,6 +534,62 @@ describe('runClaude startup metadata ordering', () => {
         expect(runtimeActivityPublisherCloseMock).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps Agent SDK capabilities and stop semantics after a later message selects Unified terminal', async () => {
+        currentMetadataVersion = 1;
+        initializeRuntimeOverridesSynchronizerMock.mockImplementationOnce(async (params: RuntimeOverridesSynchronizerParams) => {
+            lastRuntimeOverridesSynchronizerParams = params;
+            return createRuntimeOverridesSynchronizer({
+                seedFromSession: vi.fn(async () => {}),
+                syncFromMetadata: vi.fn(),
+            });
+        });
+        const { registerKillSessionHandler } = await import('@/rpc/handlers/killSession');
+        const { runClaude } = await import('./runClaude');
+
+        const runPromise = runClaude(testCredentials, {
+            startedBy: 'daemon',
+            startingMode: 'remote',
+            claudeRemoteMetaDefaults: {
+                claudeRemoteAgentSdkEnabled: true,
+                claudeUnifiedTerminalEnabled: false,
+                claudeLocalPermissionBridgeEnabled: false,
+            },
+        });
+
+        await waitFor(() => applyStartupMetadataUpdateToSessionMock.mock.calls.length === 1);
+        metadataUpdateDeferred.resolve();
+        await runPromise;
+
+        const userMessageHandler = lastSessionClient?.onUserMessage.mock.calls[0]?.[0] as ((message: {
+            content: { type: 'text'; text: string };
+            localId: string;
+            meta: Record<string, unknown>;
+        }) => void) | undefined;
+        expect(userMessageHandler).toBeTypeOf('function');
+        userMessageHandler?.({
+            content: { type: 'text', text: 'keep using the active runtime' },
+            localId: 'runtime-selection-change',
+            meta: {
+                claudeRemoteAgentSdkEnabled: true,
+                claudeUnifiedTerminalEnabled: true,
+                claudeLocalPermissionBridgeEnabled: true,
+            },
+        });
+
+        const stateAfterPreferenceChange = agentStateUpdateSnapshots.find(
+            (snapshot) => snapshot.reason === 'local_permission_bridge_mode_change',
+        )?.state;
+        expect(stateAfterPreferenceChange).toMatchObject({
+            controlledByUser: false,
+            localControl: null,
+        });
+        expect(stateAfterPreferenceChange?.capabilities?.inFlightSteerSupported).toBeUndefined();
+
+        const killHandler = vi.mocked(registerKillSessionHandler).mock.calls[0]?.[1];
+        expect(killHandler).toBeTypeOf('function');
+        await expect(killHandler?.()).resolves.toBeUndefined();
+    });
+
     it('disposes runtime Activity when standard session transport close fails', async () => {
         currentMetadataVersion = 1;
         const closeError = new Error('session-close-failed');

@@ -401,6 +401,7 @@ export class Session {
     private readonly criticalMetadataWrites = new Set<Promise<void>>();
     private readonly providerInputConsumers = new Set<SessionProviderInputConsumer<EnhancedMode, string>>();
     private providerInputAdmissionClosed = false;
+    private connectedServiceExactApplicationHandler: (() => Promise<void>) | null = null;
     private readonly reportSessionMetadataToDaemon: SessionMetadataDaemonReporter | null;
     
     /** Keep alive interval reference for cleanup */
@@ -530,6 +531,19 @@ export class Session {
         }
     }
 
+    unregisterProviderInputConsumer(consumer: SessionProviderInputConsumer<EnhancedMode, string>): void {
+        this.providerInputConsumers.delete(consumer);
+    }
+
+    registerConnectedServiceExactApplicationHandler(handler: () => Promise<void>): () => void {
+        this.connectedServiceExactApplicationHandler = handler;
+        return () => {
+            if (this.connectedServiceExactApplicationHandler === handler) {
+                this.connectedServiceExactApplicationHandler = null;
+            }
+        };
+    }
+
     async closeProviderInputAdmissionAndWaitForDispatches(): Promise<void> {
         this.providerInputAdmissionClosed = true;
         await Promise.all(
@@ -558,6 +572,7 @@ export class Session {
     cleanup = (): void => {
         this.unregisterConnectedServiceAuthGroupRuntimeControl();
         this.unregisterConnectedServiceAuthGroupRuntimeControl = () => {};
+        this.connectedServiceExactApplicationHandler = null;
         if (this.keepAliveTimer) {
             clearTimeout(this.keepAliveTimer);
             this.keepAliveTimer = null;
@@ -584,6 +599,15 @@ export class Session {
             return { ok: false, errorCode: 'invalid_request', error: 'invalid_request' };
         }
         this.connectedServiceAuthGroupRequestFence.applyCurrentTruth(truth.data);
+        if (
+            request.applicationSettled === true
+            && truth.data.kind === 'current_auth_group_available'
+            && this.connectedServiceExactApplicationHandler
+        ) {
+            await this.connectedServiceExactApplicationHandler().catch((error) => {
+                logger.debug('[Session] Failed to release Claude provider UI after exact connected-service application (non-fatal)', error);
+            });
+        }
         return { ok: true, appliedVia: 'current_truth_fence' };
     };
 

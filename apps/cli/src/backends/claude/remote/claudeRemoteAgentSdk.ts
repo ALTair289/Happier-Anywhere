@@ -179,6 +179,8 @@ export async function claudeRemoteAgentSdk(opts: {
     setUserMessageSender?: (sender: ((message: SDKUserMessage) => void) | null) => void;
     onPromptAcceptedByProvider?: ClaudeRemoteProviderPromptAcceptedHandler | null;
     onPromptTransportFailure?: ClaudeRemoteProviderPromptTransportFailureHandler | null;
+    /** Exact availability of the SDK streaming-input boundary for the active foreground turn. */
+    onInFlightSteerAvailabilityChange?: ((available: boolean) => void) | null;
     /**
      * Registers a best-effort interrupt handler that can stop the current turn without
      * terminating the underlying Claude Code subprocess.
@@ -343,6 +345,7 @@ export async function claudeRemoteAgentSdk(opts: {
         let mode = initial.mode;
         let response: any;
         let handleClaudeRuntimeActivityLossForCurrentQuery: ((reason: string) => void) | null = null;
+        let didSettleRuntimeActivityForCurrentTurn = false;
 		    let latestClaudeSessionId: string | null =
 		        typeof opts.sessionId === 'string' && opts.sessionId.trim().length > 0 ? opts.sessionId.trim() : startFrom ?? null;
 		    let latestTranscriptPath: string | null =
@@ -966,6 +969,7 @@ export async function claudeRemoteAgentSdk(opts: {
         return spawnedProcess;
     };
     let nextMessagePump: Promise<void> | null = null;
+    let deferredUntilForegroundTurnEnds: ClaudeRemoteProviderAcceptedPrompt<EnhancedMode> | null = null;
     const swallowOptionalPromise = async (promise: Promise<void> | null): Promise<void> => {
         if (!promise) return;
         await promise.catch(() => {});
@@ -1158,6 +1162,11 @@ export async function claudeRemoteAgentSdk(opts: {
         // fallback can skip re-emission for any scope that already reached the wire via any channel
         // (streamed deltas, full-message emit, stream-event buffer flush). Root is keyed as null.
         const sidechainsWithPublishedAssistantTextThisTurn = new Set<string | null>();
+        // The streamed writer may flush a segment at a tool boundary before the SDK emits its
+        // assembled assistant message. Keep exact per-scope coverage until that assembled
+        // message arrives so already-durable text is not emitted a second time.
+        const streamedAssistantTextAwaitingAssembly = new Map<string | null, string>();
+        const streamedThinkingTextAwaitingAssembly = new Map<string | null, string>();
         const turnDiagnostics = {
             streamEventCount: 0,
             assistantMessageCount: 0,
@@ -1268,6 +1277,15 @@ export async function claudeRemoteAgentSdk(opts: {
             didPublishAssistantTextThisTurn = true;
             turnDiagnostics.didPublishAssistantTextThisTurn = true;
             sidechainsWithPublishedAssistantTextThisTurn.add(sidechainId);
+        };
+
+        const appendStreamedTextAwaitingAssembly = (
+            target: Map<string | null, string>,
+            sidechainId: string | null,
+            text: string,
+        ) => {
+            if (text.length === 0) return;
+            target.set(sidechainId, `${target.get(sidechainId) ?? ''}${text}`);
         };
 
         const resolveAssistantSegmentFlushSummary = (
@@ -1471,12 +1489,16 @@ export async function claudeRemoteAgentSdk(opts: {
             nextMessagePump = (async () => {
                 try {
                     while (!abortSignal.aborted) {
-                        const nextOrAbort = await Promise.race([opts.nextMessage(), waitForAbort(abortSignal)]);
+                        const nextOrAbort = deferredUntilForegroundTurnEnds ?? await Promise.race([
+                            opts.nextMessage(),
+                            waitForAbort(abortSignal),
+                        ]);
+                        deferredUntilForegroundTurnEnds = null;
                         if (nextOrAbort === ABORTED) {
                             return;
                         }
 
-                        const next = nextOrAbort as { message: string; mode: EnhancedMode } | null;
+                        const next: ClaudeRemoteProviderAcceptedPrompt<EnhancedMode> | null = nextOrAbort;
                         if (!next) {
                             messages.end();
                             try {
@@ -1484,6 +1506,14 @@ export async function claudeRemoteAgentSdk(opts: {
                             } catch {
                                 // ignore
                             }
+                            return;
+                        }
+
+                        // The active pump exists only to consume an explicit provider action.
+                        // Preserve an ordinary queued row for the normal post-result turn rather
+                        // than silently turning it into in-flight steering input.
+                        if (foregroundTurnInterruptActive && next.pendingProviderAction === undefined) {
+                            deferredUntilForegroundTurnEnds = next;
                             return;
                         }
 
@@ -1587,11 +1617,45 @@ export async function claudeRemoteAgentSdk(opts: {
                             opts.onCompletionEvent?.('Failed to update runtime settings (non-fatal); continuing.');
                         }
 
-                        didPublishAssistantTextThisTurn = false;
-                        sidechainsWithPublishedAssistantTextThisTurn.clear();
-                        didReleaseTurnForResult = false;
+                        const pendingProviderAction = next.pendingProviderAction;
+                        if (pendingProviderAction === 'interrupt_and_send') {
+                            const interrupt = (response as any)?.interrupt;
+                            if (typeof interrupt !== 'function') {
+                                reportClaudeRemoteProviderPromptTransportFailure(
+                                    opts.onPromptTransportFailure,
+                                    next,
+                                    'rejected_before_effect',
+                                );
+                                continue;
+                            }
+                            opts.onInFlightSteerAvailabilityChange?.(false);
+                            try {
+                                didRequestTurnInterrupt = true;
+                                deferredInterruptedReason = deferredInterruptedReason ?? 'pending-interrupt-and-send';
+                                await interrupt.call(response);
+                                cleanupBufferedAssistantMessages?.(null);
+                                await flushStreamedTranscriptWriter('abort', 'pending-interrupt-and-send');
+                            } catch {
+                                reportClaudeRemoteProviderPromptTransportFailure(
+                                    opts.onPromptTransportFailure,
+                                    next,
+                                    'rejected_before_effect',
+                                );
+                                opts.onInFlightSteerAvailabilityChange?.(true);
+                                continue;
+                            }
+                        }
+
+                        if (pendingProviderAction !== 'steer') {
+                            didPublishAssistantTextThisTurn = false;
+                            sidechainsWithPublishedAssistantTextThisTurn.clear();
+                            streamedAssistantTextAwaitingAssembly.clear();
+                            streamedThinkingTextAwaitingAssembly.clear();
+                            didReleaseTurnForResult = false;
+                            didSettleRuntimeActivityForCurrentTurn = false;
+                            foregroundTaskInterruptId = null;
+                        }
                         foregroundTurnInterruptActive = true;
-                        foregroundTaskInterruptId = null;
                         messages.push({
                             message: {
                                 type: 'user',
@@ -1606,7 +1670,7 @@ export async function claudeRemoteAgentSdk(opts: {
                         });
 
                         updateThinking(true);
-                        return;
+                        opts.onInFlightSteerAvailabilityChange?.(true);
                     }
                 } finally {
                     nextMessagePump = null;
@@ -1619,6 +1683,7 @@ export async function claudeRemoteAgentSdk(opts: {
             didFinalizeTurn = true;
             awaitingNextTurnStart = true;
             foregroundTurnInterruptActive = false;
+            opts.onInFlightSteerAvailabilityChange?.(false);
             foregroundTaskInterruptId = null;
             updateThinking(false);
             const interruptedReason = deferredInterruptedReason;
@@ -1637,6 +1702,7 @@ export async function claudeRemoteAgentSdk(opts: {
                 ...runtimeActivityEffectParams,
                 reason: 'claude_agent_sdk_foreground_finalized',
             });
+            didSettleRuntimeActivityForCurrentTurn = true;
             resetTurnDiagnostics();
             if (params?.completionEvent) {
                 opts.onCompletionEvent?.(params.completionEvent);
@@ -1645,10 +1711,9 @@ export async function claudeRemoteAgentSdk(opts: {
             scheduleNextMessagePump();
         };
 
-        const releaseCurrentTurnForResult = async () => {
-            if (didFinalizeTurn || didReleaseTurnForResult) return;
-            didReleaseTurnForResult = true;
+        const reconcileRuntimeActivityForResult = async () => {
             foregroundTurnInterruptActive = false;
+            opts.onInFlightSteerAvailabilityChange?.(false);
             foregroundTaskInterruptId = null;
             if (!hasActiveProviderTasks()) {
                 detachedTaskInterruptId = null;
@@ -1667,7 +1732,14 @@ export async function claudeRemoteAgentSdk(opts: {
                 ...runtimeActivityEffectParams,
                 reason: 'claude_agent_sdk_foreground_result',
             });
+            didSettleRuntimeActivityForCurrentTurn = true;
             resetTurnDiagnostics();
+        };
+
+        const releaseCurrentTurnForResult = async () => {
+            if (didFinalizeTurn || didReleaseTurnForResult) return;
+            didReleaseTurnForResult = true;
+            await reconcileRuntimeActivityForResult();
             await opts.onReady();
             scheduleNextMessagePump();
         };
@@ -1702,6 +1774,9 @@ export async function claudeRemoteAgentSdk(opts: {
             }
             return true;
         };
+
+        opts.onInFlightSteerAvailabilityChange?.(true);
+        scheduleNextMessagePump();
 
         // Fire-and-forget capability publication.
         // This must not block the main streaming loop.
@@ -1837,7 +1912,9 @@ export async function claudeRemoteAgentSdk(opts: {
                     const buffered = ensureBufferedStreamEventAssistantMessage(message);
                     buffered.thinking += thinkingStart;
                     turnDiagnostics.streamedThinkingDeltaChars += thinkingStart.length;
-                    streamedTranscriptWriter?.appendThinkingDelta(thinkingStart, { sidechainId: normalizeSidechainIdForStream(message) });
+                    const sidechainId = normalizeSidechainIdForStream(message);
+                    appendStreamedTextAwaitingAssembly(streamedThinkingTextAwaitingAssembly, sidechainId, thinkingStart);
+                    streamedTranscriptWriter?.appendThinkingDelta(thinkingStart, { sidechainId });
                     continue;
                 }
 
@@ -1850,7 +1927,9 @@ export async function claudeRemoteAgentSdk(opts: {
                         const buffered = ensureBufferedStreamEventAssistantMessage(message);
                         buffered.text += textStart;
                         turnDiagnostics.streamedTextDeltaChars += textStart.length;
-                        streamedTranscriptWriter?.appendAssistantDelta(textStart, { sidechainId: normalizeSidechainIdForStream(message) });
+                        const sidechainId = normalizeSidechainIdForStream(message);
+                        appendStreamedTextAwaitingAssembly(streamedAssistantTextAwaitingAssembly, sidechainId, textStart);
+                        streamedTranscriptWriter?.appendAssistantDelta(textStart, { sidechainId });
                     } else {
                         streamingToolResult.content += textStart;
                         turnDiagnostics.streamedToolUseDeltaChars += textStart.length;
@@ -1876,7 +1955,9 @@ export async function claudeRemoteAgentSdk(opts: {
                     const buffered = ensureBufferedStreamEventAssistantMessage(message);
                     buffered.thinking += thinkingDelta;
                     turnDiagnostics.streamedThinkingDeltaChars += thinkingDelta.length;
-                    streamedTranscriptWriter?.appendThinkingDelta(thinkingDelta, { sidechainId: normalizeSidechainIdForStream(message) });
+                    const sidechainId = normalizeSidechainIdForStream(message);
+                    appendStreamedTextAwaitingAssembly(streamedThinkingTextAwaitingAssembly, sidechainId, thinkingDelta);
+                    streamedTranscriptWriter?.appendThinkingDelta(thinkingDelta, { sidechainId });
                     continue;
                 }
 
@@ -1889,7 +1970,9 @@ export async function claudeRemoteAgentSdk(opts: {
                         const buffered = ensureBufferedStreamEventAssistantMessage(message);
                         buffered.text += textDelta;
                         turnDiagnostics.streamedTextDeltaChars += textDelta.length;
-                        streamedTranscriptWriter?.appendAssistantDelta(textDelta, { sidechainId: normalizeSidechainIdForStream(message) });
+                        const sidechainId = normalizeSidechainIdForStream(message);
+                        appendStreamedTextAwaitingAssembly(streamedAssistantTextAwaitingAssembly, sidechainId, textDelta);
+                        streamedTranscriptWriter?.appendAssistantDelta(textDelta, { sidechainId });
                     } else {
                         streamingToolResult.content += textDelta;
                         turnDiagnostics.streamedToolUseDeltaChars += textDelta.length;
@@ -2033,11 +2116,17 @@ export async function claudeRemoteAgentSdk(opts: {
                     let stripThinkingText = false;
                     let stripAssistantText = false;
                     if (typeof thinkingText === 'string' && thinkingText.length > 0) {
-                        stripThinkingText = streamedTranscriptWriter.overrideThinkingText(thinkingText, { sidechainId });
+                        const didOverrideLiveSegment = streamedTranscriptWriter.overrideThinkingText(thinkingText, { sidechainId });
+                        stripThinkingText = streamedThinkingTextAwaitingAssembly.get(sidechainId) === thinkingText
+                            || didOverrideLiveSegment;
                     }
                     if (typeof assistantText === 'string' && assistantText.length > 0) {
-                        stripAssistantText = streamedTranscriptWriter.overrideAssistantText(assistantText, { sidechainId });
+                        const didOverrideLiveSegment = streamedTranscriptWriter.overrideAssistantText(assistantText, { sidechainId });
+                        stripAssistantText = streamedAssistantTextAwaitingAssembly.get(sidechainId) === assistantText
+                            || didOverrideLiveSegment;
                     }
+                    streamedThinkingTextAwaitingAssembly.delete(sidechainId);
+                    streamedAssistantTextAwaitingAssembly.delete(sidechainId);
                     messageToEmit = stripCoveredAssistantBlocks({
                         message: deduped,
                         stripAssistantText,
@@ -2190,6 +2279,7 @@ export async function claudeRemoteAgentSdk(opts: {
             if (message && message.type === 'result') {
                 const failure = readAgentSdkResultFailure(message);
                 if (failure) {
+                    await reconcileRuntimeActivityForResult();
                     throw new Error(failure);
                 }
 
@@ -2262,9 +2352,12 @@ export async function claudeRemoteAgentSdk(opts: {
         }
         throw e;
     } finally {
+        opts.onInFlightSteerAvailabilityChange?.(false);
         opts.setUserMessageSender?.(null);
         opts.setTurnInterrupt?.(null);
-        handleClaudeRuntimeActivityLossForCurrentQuery?.('claude_agent_sdk_stream_finalized');
+        if (!didSettleRuntimeActivityForCurrentTurn || providerActivityLedger.hasActiveProviderTasks()) {
+            handleClaudeRuntimeActivityLossForCurrentQuery?.('claude_agent_sdk_stream_finalized');
+        }
         updateThinking(false);
         cleanupBufferedAssistantMessages?.(null);
 

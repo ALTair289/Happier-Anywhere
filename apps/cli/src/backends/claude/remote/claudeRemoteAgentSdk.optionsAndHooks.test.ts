@@ -13,6 +13,14 @@ import { makeMode } from './claudeRemoteAgentSdk.testkit';
 import { resolveClaudeProjectId } from '../utils/path';
 
 const ORIGINAL_CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR;
+
+async function createMaterializedClaudeTranscript(sessionId: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-claude-agent-sdk-resume-'));
+    const transcriptPath = join(dir, `${sessionId}.jsonl`);
+    await writeFile(transcriptPath, '{"type":"summary"}\n', 'utf8');
+    return transcriptPath;
+}
+
 const {
     ensureJavaScriptRuntimeExecutableMock,
     refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridgeMock,
@@ -51,6 +59,55 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
         ensureJavaScriptRuntimeExecutableMock.mockReset();
         ensureJavaScriptRuntimeExecutableMock.mockResolvedValue('/managed/js-runtime');
         refreshDaemonClaudeSubscriptionAnthropicAuthTokensForBridgeMock.mockClear();
+    });
+
+    it('does not treat model-owned SubagentStop assistant text as provider auth evidence', async () => {
+        const onRuntimeAuthFailureEvent = vi.fn();
+        const createQuery = vi.fn((_params: any) => ({
+            async *[Symbol.asyncIterator]() {
+                const hook = _params.options.hooks.SubagentStop[0].hooks[0];
+                await hook({
+                    hook_event_name: 'SubagentStop',
+                    agent_id: 'agent-generic',
+                    error: 'Authentication failed',
+                });
+                await hook({
+                    hook_event_name: 'SubagentStop',
+                    agent_id: 'agent-revoked',
+                    last_assistant_message: 'API Error: 401 OAuth access token has been revoked.',
+                });
+                yield { type: 'result' } as any;
+            },
+            close: vi.fn(),
+            setPermissionMode: vi.fn(),
+            setModel: vi.fn(),
+            setMaxThinkingTokens: vi.fn(),
+            supportedCommands: vi.fn(async () => []),
+            supportedModels: vi.fn(async () => []),
+        } as any));
+        let didSendFirst = false;
+
+        await claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath: null,
+            path: '/tmp',
+            claudeArgs: [],
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            isAborted: () => false,
+            nextMessage: async () => {
+                if (didSendFirst) return null;
+                didSendFirst = true;
+                return { message: 'hello', mode: makeMode({ permissionMode: 'default' } as any) };
+            },
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage: () => {},
+            onRuntimeAuthFailureEvent,
+            createQuery,
+        } as any);
+
+        expect(onRuntimeAuthFailureEvent).not.toHaveBeenCalled();
     });
 
     it('yields stream-json user messages as objects (Agent SDK stringifies them)', async () => {
@@ -749,9 +806,10 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
                     .map((block) => block.text),
             );
 
-        // Streamed deltas still reach the UI (assistantText). The result text must NOT be
-        // re-emitted as a fallback; that would duplicate what the user already saw.
-        expect(assistantTexts).toContain(assistantText);
+        // Streamed deltas already reached the transcript writer. Neither the later assembled
+        // assistant nor the result fallback may emit another assistant message for that text.
+        expect(streamedTranscriptWriter.appendAssistantDelta).toHaveBeenCalled();
+        expect(assistantTexts).not.toContain(assistantText);
         expect(assistantTexts).not.toContain(resultText);
     });
 
@@ -1617,6 +1675,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
     });
 
     it('logs redacted Claude runtime auth diagnostics for the runner and subprocess env', async () => {
+        const transcriptPath = await createMaterializedClaudeTranscript('session-1');
         const originals = {
             apiKey: process.env.ANTHROPIC_API_KEY,
             oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
@@ -1660,7 +1719,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
 
             await claudeRemoteAgentSdk({
                 sessionId: 'session-1',
-                transcriptPath: null,
+                transcriptPath,
                 path: '/tmp',
                 claudeArgs: [],
                 claudeExecutablePath: '/tmp/claude',
@@ -1717,6 +1776,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
     });
 
     it('passes a Claude subscription OAuth refresh callback that delegates forced refresh to the daemon bridge', async () => {
+        const transcriptPath = await createMaterializedClaudeTranscript('session-1');
         const originalSelection = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
         process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = JSON.stringify([{
             kind: 'group',
@@ -1753,7 +1813,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
         try {
             await claudeRemoteAgentSdk({
                 sessionId: 'session-1',
-                transcriptPath: null,
+                transcriptPath,
                 path: '/tmp',
                 claudeArgs: [],
                 claudeExecutablePath: '/tmp/claude',
@@ -1796,6 +1856,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
     });
 
     it('uses the explicit Claude subscription refresh binding instead of rereading ambient runner env', async () => {
+        const transcriptPath = await createMaterializedClaudeTranscript('session-explicit-binding');
         const originalSelection = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
         process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = JSON.stringify([{
             kind: 'group',
@@ -1832,7 +1893,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
         try {
             await claudeRemoteAgentSdk({
                 sessionId: 'session-explicit-binding',
-                transcriptPath: null,
+                transcriptPath,
                 path: '/tmp',
                 claudeArgs: [],
                 claudeExecutablePath: '/tmp/claude',
@@ -1868,6 +1929,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
     });
 
     it('does not derive getOAuthToken from ambient runner env without an explicit connected-service binding', async () => {
+        const transcriptPath = await createMaterializedClaudeTranscript('ambient-env-session');
         const originalSelection = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
         process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = JSON.stringify([{
             kind: 'profile',
@@ -1901,7 +1963,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
         try {
             await claudeRemoteAgentSdk({
                 sessionId: 'ambient-env-session',
-                transcriptPath: null,
+                transcriptPath,
                 path: '/tmp',
                 claudeArgs: [],
                 claudeExecutablePath: '/tmp/claude',
@@ -1924,6 +1986,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
     });
 
     it('does not provide getOAuthToken for native Claude sessions', async () => {
+        const transcriptPath = await createMaterializedClaudeTranscript('native-session');
         const originalSelection = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
         delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
 
@@ -1953,7 +2016,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
         try {
             await claudeRemoteAgentSdk({
                 sessionId: 'native-session',
-                transcriptPath: null,
+                transcriptPath,
                 path: '/tmp',
                 claudeArgs: [],
                 claudeExecutablePath: '/tmp/claude',
@@ -1977,6 +2040,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
     });
 
     it('applies live setModel, setPermissionMode, and setMaxThinkingTokens before the next queued message', async () => {
+        const transcriptPath = await createMaterializedClaudeTranscript('session-runtime-settings');
         let response: any = null;
         const createQuery = vi.fn((_params: any) => {
             response = {
@@ -2016,7 +2080,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
 
         await claudeRemoteAgentSdk({
             sessionId: 'session-runtime-settings',
-            transcriptPath: null,
+            transcriptPath,
             path: '/tmp',
             claudeArgs: [],
             claudeExecutablePath: '/tmp/claude',
@@ -2099,6 +2163,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
     });
 
     it('injects isolated XDG dirs so Claude Code does not contend with global version locks', async () => {
+        const transcriptPath = await createMaterializedClaudeTranscript('sess_1');
         const originals = {
             XDG_DATA_HOME: process.env.XDG_DATA_HOME,
             XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
@@ -2136,7 +2201,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
 
             await claudeRemoteAgentSdk({
                 sessionId: 'sess_1',
-                transcriptPath: null,
+                transcriptPath,
                 path: '/tmp',
                 claudeArgs: [],
                 claudeExecutablePath: '/tmp/claude',

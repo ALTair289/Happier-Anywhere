@@ -32,6 +32,8 @@ export function createClaudeInFlightSteerCapabilityPublisher(opts: Readonly<{
   isCanonicalTurnActive?: (() => boolean) | undefined;
   nowMs?: (() => number) | undefined;
   minPublishIntervalMs?: number | undefined;
+  /** Agent SDK shares steerability publication but has no terminal composer to clear. */
+  terminalComposerControls?: boolean | undefined;
 }>): ClaudeInFlightSteerCapabilityPublisher {
   const nowMs = opts.nowMs ?? Date.now;
   const minPublishIntervalMs = Math.max(0, opts.minPublishIntervalMs ?? DEFAULT_MIN_PUBLISH_INTERVAL_MS);
@@ -51,7 +53,10 @@ export function createClaudeInFlightSteerCapabilityPublisher(opts: Readonly<{
 
   function write(snapshot: ClaudeInFlightSteerAvailabilitySnapshot): void {
     const reason = resolveReason(snapshot);
-    const terminalComposerDraftPresent = !snapshot.available && snapshot.reason === 'user_terminal_draft';
+    const terminalComposerControls = opts.terminalComposerControls !== false;
+    const terminalComposerDraftPresent = terminalComposerControls
+      && !snapshot.available
+      && snapshot.reason === 'user_terminal_draft';
     const key = `${snapshot.available}:${reason ?? ''}:${terminalComposerDraftPresent}`;
     if (key === lastPublishedKey) return;
     lastPublishedKey = key;
@@ -66,8 +71,12 @@ export function createClaudeInFlightSteerCapabilityPublisher(opts: Readonly<{
           inFlightSteerAvailable: snapshot.available,
           inFlightSteerUnavailableReason: reason,
           inFlightSteerStateAt: stateAt,
-          terminalComposerClearSupported: true,
-          terminalComposerDraftPresent,
+          ...(terminalComposerControls
+            ? {
+                terminalComposerClearSupported: true,
+                terminalComposerDraftPresent,
+              }
+            : {}),
         },
       }),
       '[unified]',

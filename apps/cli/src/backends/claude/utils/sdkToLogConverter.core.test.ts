@@ -394,6 +394,13 @@ describe('SDKToLogConverter core conversion', () => {
       ['last-prompt', { type: 'last-prompt', lastPrompt: 'hi', leafUuid: 'leaf-1' }],
       ['mode', { type: 'mode', mode: 'default' }],
       ['pr-link', { type: 'pr-link', url: 'https://example.test/pr/1' }],
+      ['tool_progress', {
+        type: 'tool_progress',
+        tool_name: 'Bash',
+        tool_use_id: 'tool-1',
+        elapsed_time_seconds: 30,
+        heartbeat: true,
+      }],
     ])('does not convert %s records (internal session state, not transcript content)', (_label, sdkMessage) => {
       // Boundary cast: these are raw internal SDK records outside the SDKMessage union by design.
       expect(converter.convert(sdkMessage as any)).toBeNull();

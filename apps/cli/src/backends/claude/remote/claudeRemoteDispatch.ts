@@ -14,6 +14,7 @@ import type {
     ClaudeRemoteProviderPromptTransportFailureHandler,
 } from './providerPromptAcceptance';
 import type { ClaudeUnifiedStartupLifecycleIntent } from '../unifiedTerminal/startupLifecycle';
+import { applyClaudeUnifiedTerminalLaunchIntent } from '../unifiedTerminal/launchIntent';
 
 type NextMessage = () => Promise<ClaudeRemoteProviderAcceptedPrompt<EnhancedMode> | null>;
 type ClaudeUnifiedTerminalFeatureDecision = Readonly<{ state: 'enabled' | 'disabled' | 'unsupported' | 'unknown' }>;
@@ -194,17 +195,22 @@ export async function claudeRemoteDispatch<T extends { nextMessage: NextMessage 
             claudeConfigDir: resolveClaudeConfigDirOverride(process.env),
             claudeArgs: readStringArray((baseOpts as Record<string, unknown>).claudeArgs),
         });
+        const startupLifecycleIntent: ClaudeUnifiedStartupLifecycleIntent = unifiedStartPlan.startFrom
+            ? {
+                kind: 'resume_native',
+                providerSessionId: unifiedStartPlan.startFrom,
+            }
+            : unifiedStartPlan.shouldContinue
+                ? { kind: 'continue_native' }
+                : { kind: 'new_session' };
         await resolvedUnifiedTerminal({
             ...baseOpts,
             sessionId: unifiedStartPlan.startFrom,
-            startupLifecycleIntent: unifiedStartPlan.startFrom
-                ? {
-                    kind: 'resume_native',
-                    providerSessionId: unifiedStartPlan.startFrom,
-                }
-                : unifiedStartPlan.shouldContinue
-                    ? { kind: 'continue_native' }
-                    : { kind: 'new_session' },
+            claudeArgs: applyClaudeUnifiedTerminalLaunchIntent(
+                readStringArray((baseOpts as Record<string, unknown>).claudeArgs) ?? [],
+                startupLifecycleIntent,
+            ),
+            startupLifecycleIntent,
             allowFirstInputBeforeSessionStart: true,
             nextMessage: createNextMessage(),
         });

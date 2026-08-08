@@ -71,6 +71,7 @@ import { configuration } from '@/configuration';
 import { delay } from '@/utils/time';
 import { readClaudeActiveUnifiedTerminalHost } from '../utils/readClaudeActiveTerminalMode';
 import { prepareClaudeUnifiedStartupLifecycle } from './startupLifecycle';
+import { applyClaudeUnifiedTerminalLaunchIntent } from './launchIntent';
 import { createClaudeUnifiedProviderInputOutcomeBridge } from './claudeUnifiedProviderInputOutcome';
 import { createClaudeUnifiedTerminalSharedCallbacks } from './createClaudeUnifiedTerminalSharedCallbacks';
 
@@ -94,33 +95,6 @@ type InFlightStartupMessage = Readonly<{
   source: 'initial' | 'parked' | 'queue';
   batch: ParkedUnifiedTerminalMessage;
 }>;
-
-function buildClaudeRecoveryResumeArgs(
-  claudeArgs: readonly string[],
-  sessionId: string | null,
-): readonly string[] {
-  if (!sessionId) return claudeArgs;
-  const argsWithoutPreviousResume: string[] = [];
-  for (let index = 0; index < claudeArgs.length; index += 1) {
-    const arg = claudeArgs[index];
-    if (arg === '--continue' || arg === '-c') continue;
-    if (arg === '--resume' || arg === '-r') {
-      const next = claudeArgs[index + 1];
-      if (typeof next === 'string' && !next.startsWith('-')) index += 1;
-      continue;
-    }
-    if (arg === '--session-id') {
-      const next = claudeArgs[index + 1];
-      if (typeof next === 'string' && !next.startsWith('-')) index += 1;
-      continue;
-    }
-    if (arg === '--fork-session') continue;
-    if (arg.startsWith('--resume=') || arg.startsWith('-r=')) continue;
-    if (arg.startsWith('--session-id=') || arg.startsWith('--fork-session=')) continue;
-    argsWithoutPreviousResume.push(arg);
-  }
-  return [...argsWithoutPreviousResume, '--resume', sessionId];
-}
 
 function readClaudeResumeSessionId(claudeArgs: readonly string[]): string | null {
   for (let index = 0; index < claudeArgs.length; index += 1) {
@@ -541,6 +515,11 @@ export async function claudeUnifiedTerminalLauncher(
     logPrefix: '[unified]',
     logDebug: (message, error) => logger.debug(message, error),
   });
+  const releaseUsageLimitPendingBlock = (): void => {
+    usageLimitDialogVisible = false;
+    recentPrimaryProviderUnavailableForPromptDelivery = null;
+    sustainedPendingDeliveryBlockHandler.wakePendingMaterialization();
+  };
   const observeTerminalScreen = (observation: ClaudeUnifiedTerminalScreenObservation): void => {
     if (observation.screenState.usageLimitDialogVisible) {
       recentPrimaryProviderUnavailableForPromptDelivery =
@@ -558,9 +537,7 @@ export async function claudeUnifiedTerminalLauncher(
       return;
     }
     if (!usageLimitDialogVisible) return;
-    usageLimitDialogVisible = false;
-    recentPrimaryProviderUnavailableForPromptDelivery = null;
-    sustainedPendingDeliveryBlockHandler.wakePendingMaterialization();
+    releaseUsageLimitPendingBlock();
   };
 
   // Daemon-owned pending drain (QA C-F2/A-F3, live repro cmqb329qm044z): all idle input waits go
@@ -827,7 +804,12 @@ export async function claudeUnifiedTerminalLauncher(
       : null;
     const claudeArgs = unifiedTerminalLaunchAttempt === 0
       ? initialPrompt.claudeArgs
-      : buildClaudeRecoveryResumeArgs(initialPrompt.claudeArgs, knownClaudeSessionId);
+      : knownClaudeSessionId
+        ? applyClaudeUnifiedTerminalLaunchIntent(initialPrompt.claudeArgs, {
+            kind: 'resume_native',
+            providerSessionId: knownClaudeSessionId,
+          })
+        : initialPrompt.claudeArgs;
     unifiedTerminalLaunchAttempt += 1;
     const resumeSessionId = readClaudeResumeSessionId(claudeArgs);
     const startupLifecycle = await prepareClaudeUnifiedStartupLifecycle({
@@ -862,6 +844,7 @@ export async function claudeUnifiedTerminalLauncher(
       sessionId: session.sessionId,
       transcriptPath: session.transcriptPath,
       claudeArgs,
+      expectedProviderResumeSessionId: resumeSessionId,
       hookSettingsPath: session.hookSettingsPath,
       hookPluginDir: session.hookPluginDir,
       statuslineForwarder: session.claudeStatuslineForwarder ?? undefined,
@@ -953,6 +936,9 @@ export async function claudeUnifiedTerminalLauncher(
       providerActivityLedger: session.getProviderTaskActivityLedger() ?? undefined,
       registerTerminalComposerClearRuntimeControl: (clearTerminalComposer) =>
         session.client.registerSessionRuntimeControls?.({ clearTerminalComposer }) ?? (() => undefined),
+      registerConnectedServiceExactApplicationHandler: (releaseProviderUi) =>
+        session.registerConnectedServiceExactApplicationHandler(releaseProviderUi),
+      onConnectedServiceExactApplicationReleased: releaseUsageLimitPendingBlock,
       onPendingInputInterruptAndRunLocalIdChange:
         inFlightSteerCapabilityPublisher.publishPendingInputInterruptAndRunLocalId,
       registerPendingInputInterruptAndRunRuntimeControl: (interruptPendingInputAndRun) =>

@@ -60,9 +60,10 @@ const claudeConnectedServiceCredentialLifecycleDescriptor: ConnectedServiceCrede
   },
   verifyGenerationApplication: verifyClaudeSharedGroupGenerationApplication,
   applySharedGenerationApplication: applyClaudeSharedGroupGenerationApplication,
-  buildLiveGenerationCurrentTruthRequest: ({ serviceId, currentTruth }) => ({
+  buildLiveGenerationCurrentTruthRequest: ({ serviceId, currentTruth, applicationSettled }) => ({
     serviceId,
     reason: 'diagnostic',
+    ...(applicationSettled ? { applicationSettled: true as const } : {}),
     authGeneration: currentTruth,
   }),
   credentialStorageCleanup: claudeConnectedServiceCredentialStorageCleanup,

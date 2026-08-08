@@ -120,6 +120,7 @@ describe('claudeRemoteDispatch', () => {
         expect(mockUnified).toHaveBeenCalledWith(expect.objectContaining({
             sessionId: 'resume-123',
             transcriptPath: null,
+            claudeArgs: ['--resume', 'resume-123'],
             allowFirstInputBeforeSessionStart: true,
             startupLifecycleIntent: {
                 kind: 'resume_native',
@@ -161,7 +162,62 @@ describe('claudeRemoteDispatch', () => {
 
         expect(mockUnified).toHaveBeenCalledWith(expect.objectContaining({
             sessionId: null,
+            claudeArgs: ['--continue'],
             startupLifecycleIntent: { kind: 'continue_native' },
+        }));
+    });
+
+    it('restores the exact resume argv when an Agent SDK launch already consumed its one-time flag', async () => {
+        const mockUnified = vi.fn(async () => {});
+        const claudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-dispatch-consumed-resume-'));
+        const workspaceDir = join(claudeConfigDir, 'workspace');
+        const transcriptPath = join(
+            getProjectPath(workspaceDir, claudeConfigDir),
+            'resume-after-agent-sdk.jsonl',
+        );
+        await mkdir(dirname(transcriptPath), { recursive: true });
+        await writeFile(transcriptPath, `${JSON.stringify({
+            type: 'user',
+            uuid: 'resume-after-agent-sdk-row',
+            sessionId: 'resume-after-agent-sdk',
+            message: { role: 'user', content: 'existing conversation' },
+        })}\n`);
+        let sent = false;
+
+        await claudeRemoteDispatch(
+            {
+                sessionId: 'resume-after-agent-sdk',
+                transcriptPath,
+                path: workspaceDir,
+                claudeArgs: ['--model', 'claude-sonnet-4-5'],
+                nextMessage: async () => {
+                    if (sent) return null;
+                    sent = true;
+                    return {
+                        message: 'switch this running session to unified terminal',
+                        mode: {
+                            permissionMode: 'default',
+                            claudeUnifiedTerminalEnabled: true,
+                            claudeUnifiedTerminalHost: 'auto',
+                        } as any,
+                    };
+                },
+            } as any,
+            {
+                claudeRemote: vi.fn(async () => {}),
+                claudeRemoteAgentSdk: vi.fn(async () => {}),
+                claudeUnifiedTerminal: mockUnified,
+                resolveClaudeUnifiedTerminalFeatureDecision: () => ({ state: 'enabled' }),
+            } as any,
+        );
+
+        expect(mockUnified).toHaveBeenCalledWith(expect.objectContaining({
+            sessionId: 'resume-after-agent-sdk',
+            claudeArgs: ['--model', 'claude-sonnet-4-5', '--resume', 'resume-after-agent-sdk'],
+            startupLifecycleIntent: {
+                kind: 'resume_native',
+                providerSessionId: 'resume-after-agent-sdk',
+            },
         }));
     });
 

@@ -123,7 +123,15 @@ import {
     observeClaudeProviderTaskRuntimeActivityHook,
     observeClaudeProviderTaskRuntimeActivityRow,
 } from './remote/runtimeActivityEvidence';
-import { hashClaudeUnifiedTerminalLaunchOptionsForQueue } from './remote/modeHash';
+import {
+    hashClaudeEnhancedModeForQueue,
+    hashClaudeUnifiedTerminalLaunchOptionsForQueue,
+} from './remote/modeHash';
+import {
+    normalizeClaudeRemoteMode,
+    pinClaudeRemoteModeToActiveRuntime,
+    type NormalizedClaudeRemoteModeKind,
+} from './remote/normalizeClaudeRemoteMode';
 import type { ClaudeCompletionEvent } from './contextCompactionEvents';
 import { mergeSessionWorkStateMetadataV1, type SessionWorkStateV1 } from '@/session/workState/sessionWorkStateMetadata';
 import { createClaudeGoalWorkStateSource } from './workState/claudeGoalSource';
@@ -147,6 +155,7 @@ import { surfacePrimarySessionRuntimeIssue } from '@/agent/runtime/session/error
 import { createClaudeUnifiedTerminalMetadataModeApplier } from './unifiedTerminal/metadataRuntimeModeApplier';
 import { createClaudeUnifiedTerminalSharedCallbacks } from './unifiedTerminal/createClaudeUnifiedTerminalSharedCallbacks';
 import { resolveClaudeSubscriptionRefreshSelectionFromEnv } from './connectedServices/claudeSubscriptionAccessTokenRefresh';
+import { readClaudeMainChainAssistantModelId } from './sessionModels/readClaudeMainChainAssistantModelId';
 
 function mergeSessionWorkStateIntoMetadata(
     metadata: Metadata,
@@ -304,10 +313,7 @@ function readClaudeSdkEffectiveModelId(message: SDKMessage): string | null {
     if (message.type === 'system') {
         return readNonEmptyString((message as Record<string, unknown>).model);
     }
-    if (message.type !== 'assistant') return null;
-    const parentToolUseId = readNonEmptyString((message as Record<string, unknown>).parent_tool_use_id);
-    if (parentToolUseId) return null;
-    return readNonEmptyString(readRecord((message as Record<string, unknown>).message)?.model);
+    return readClaudeMainChainAssistantModelId(message);
 }
 
 async function formatClaudeCodeArtifactsTailForUi(artifacts: ClaudeCodeArtifacts): Promise<string> {
@@ -349,7 +355,10 @@ export function resolveClaudeRemoteLaunchErrorDisposition(params: Readonly<{
     return 'surface';
 }
 
-export async function claudeRemoteLauncher(session: Session): Promise<'switch' | 'exit'> {
+export async function claudeRemoteLauncher(
+    session: Session,
+    options: Readonly<{ initialMode?: EnhancedMode }> = {},
+): Promise<'switch' | 'exit'> {
     logger.debug('[claudeRemoteLauncher] Starting remote launcher');
     const turnAssistantPreviewTracker = createTurnAssistantPreviewTracker();
     // Resolve the Claude Unified TUI runtime-control feature gate once per launch. It defaults ON
@@ -1141,8 +1150,61 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         }
     }
 
+    let inFlightSteerAvailabilitySnapshot: ClaudeInFlightSteerAvailabilitySnapshot = {
+        available: false,
+        reason: 'unsafe_window',
+    };
+    let agentSdkInFlightSteerCapabilityPublisher: ReturnType<
+        typeof createClaudeInFlightSteerCapabilityPublisher
+    > | null = null;
+    const disposeAgentSdkInFlightSteerCapabilityPublisher = (
+        publisher: ReturnType<typeof createClaudeInFlightSteerCapabilityPublisher> | null,
+    ) => publisher?.dispose();
+    let refreshInFlightSteerAvailability: (() => Promise<ClaudeInFlightSteerAvailabilitySnapshot>) | null = null;
+    let applyActiveLaunchPermissionMetadata: ReturnType<typeof createClaudeUnifiedTerminalMetadataModeApplier> | null = null;
+    const inputConsumer = createClaudePendingAwareInputConsumer(session, {
+        resolveActiveTurnSteerability: () => (
+            inFlightSteerAvailabilitySnapshot.available ? 'steerable' : 'unsteerable'
+        ),
+        refreshActiveTurnSteerability: async () => {
+            const refresh = refreshInFlightSteerAvailability;
+            if (!refresh) {
+                return inFlightSteerAvailabilitySnapshot.available ? 'steerable' : 'unsteerable';
+            }
+            const snapshot = await refresh();
+            return snapshot.available ? 'steerable' : 'unsteerable';
+        },
+        onMetadataUpdate: async () => {
+            const currentPermissionHandler = permissionHandler;
+            if (!currentPermissionHandler) return;
+            const updated = syncClaudePermissionModeFromMetadata({
+                session,
+                permissionHandler: currentPermissionHandler,
+            });
+            if (!updated) return;
+            logger.debug(`[remote]: Permission mode updated from metadata to: ${updated}`);
+            await applyActiveLaunchPermissionMetadata?.(updated);
+        },
+    });
+
     try {
         let pending: MessageBatch<EnhancedMode, string> | null = null;
+        let activeRuntimeModeKind: NormalizedClaudeRemoteModeKind | null = options.initialMode
+            ? normalizeClaudeRemoteMode(options.initialMode).kind
+            : null;
+
+        const pinBatchToActiveRuntime = (
+            batch: MessageBatch<EnhancedMode, string>,
+        ): MessageBatch<EnhancedMode, string> => {
+            activeRuntimeModeKind ??= normalizeClaudeRemoteMode(batch.mode).kind;
+            const mode = pinClaudeRemoteModeToActiveRuntime(batch.mode, activeRuntimeModeKind);
+            if (mode === batch.mode) return batch;
+            return {
+                ...batch,
+                mode,
+                hash: hashClaudeEnhancedModeForQueue(mode),
+            };
+        };
 
         // Track session ID to detect when it actually changes
         // This prevents context loss when mode changes (permission mode, model, etc.)
@@ -1229,6 +1291,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 getCurrentMode: () => mode,
                 getApplier: () => applyUnifiedTerminalMetadataMode,
             });
+            applyActiveLaunchPermissionMetadata = applyUnifiedTerminalPermissionMetadata;
             let didReplaySeedBootstrap = false;
             let unifiedTerminalLaunchOptionsHash: string | null = null;
             let lastUnifiedTerminalRestartOnlyNoticeHash: string | null = null;
@@ -1307,41 +1370,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                 beginReadyNotificationTurn();
                 await recordClaudeRemotePromptTurnStarted();
             };
-            const hasQueuedUnifiedTerminalPrompt = (): boolean =>
-                session.queue.queue.some((item) => item.mode.claudeUnifiedTerminalEnabled === true);
             const isUnifiedTerminalTranscriptActive = (): boolean =>
-                mode?.claudeUnifiedTerminalEnabled === true
-                || pending?.mode.claudeUnifiedTerminalEnabled === true
-                || hasQueuedUnifiedTerminalPrompt();
+                activeRuntimeModeKind === 'unifiedTerminal';
             let surfaceUnifiedTerminalRuntimeIssue: (
                 error: unknown,
                 options?: Readonly<{ deferAmbiguousRuntimeIssue?: boolean | undefined }>,
             ) => Promise<ClaudeUnifiedTerminalRuntimeIssueSurfaceResult> = async () => false;
             try {
-                let inFlightSteerAvailabilitySnapshot: ClaudeInFlightSteerAvailabilitySnapshot = {
-                    available: false,
-                    reason: 'unsafe_window',
-                };
-                let refreshInFlightSteerAvailability: (() => Promise<ClaudeInFlightSteerAvailabilitySnapshot>) | null = null;
-                const inputConsumer = createClaudePendingAwareInputConsumer(session, {
-                    resolveActiveTurnSteerability: () => (
-                        inFlightSteerAvailabilitySnapshot.available ? 'steerable' : 'unsteerable'
-                    ),
-                    refreshActiveTurnSteerability: async () => {
-                        const refresh = refreshInFlightSteerAvailability;
-                        if (!refresh) return 'unsteerable';
-                        const snapshot = await refresh();
-                        return snapshot.available ? 'steerable' : 'unsteerable';
-                    },
-                    onMetadataUpdate: async () => {
-                        const updated = syncClaudePermissionModeFromMetadata({ session, permissionHandler });
-                        if (updated) {
-                            logger.debug(`[remote]: Permission mode updated from metadata to: ${updated}`);
-                            await applyUnifiedTerminalPermissionMetadata(updated);
-                        }
-                    },
-                });
-
                 const waitForNextBatch = async (): Promise<MessageBatch<EnhancedMode, string> | null> => {
                     const batch = await inputConsumer.waitForNextInput({ abortSignal: controller.signal });
                     if (!batch) return null;
@@ -1349,7 +1384,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     if (!localId) {
                         throw new Error('Canonical Pending provider input requires exactly one nonblank localId');
                     }
-                    return { ...batch, userMessageLocalIds: [localId] };
+                    return pinBatchToActiveRuntime({ ...batch, userMessageLocalIds: [localId] });
                 };
 
                 const takeBatchDeliveryAttributionForProvider = (batch: MessageBatch<EnhancedMode, string>) =>
@@ -1506,7 +1541,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 ? hashClaudeUnifiedTerminalLaunchOptionsForQueue(p.mode)
                                 : null;
                             permissionHandler.handleModeChange(p.mode.permissionMode);
-                            if (!shouldDeferTurnStartUntilTerminalInjection(p.mode)) {
+                            if (p.pendingProviderAction !== 'steer' && !shouldDeferTurnStartUntilTerminalInjection(p.mode)) {
                                 await beginPromptTurn();
                             } else {
                                 unifiedBinding.noteNextInjectedPromptShouldSuppressEcho();
@@ -1552,7 +1587,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             didBootstrap: didReplaySeedBootstrap,
                         });
                         didReplaySeedBootstrap = replaySeedResolution.didBootstrap;
-                        if (!shouldDeferTurnStartUntilTerminalInjection(nextMode)) {
+                        if (msg.pendingProviderAction !== 'steer' && !shouldDeferTurnStartUntilTerminalInjection(nextMode)) {
                             await beginPromptTurn();
                         } else {
                             unifiedBinding.noteNextInjectedPromptShouldSuppressEcho();
@@ -1751,6 +1786,15 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             userMessageLocalIds: failure.userMessageLocalIds,
                         });
                     },
+                    onInFlightSteerAvailabilityChange: (available: boolean) => {
+                        if (activeRemoteRunnerKind !== 'agentSdk') return;
+                        const snapshot: ClaudeInFlightSteerAvailabilitySnapshot = {
+                            available,
+                            reason: available ? null : 'unsafe_window',
+                        };
+                        inFlightSteerAvailabilitySnapshot = snapshot;
+                        agentSdkInFlightSteerCapabilityPublisher?.publish(snapshot);
+                    },
                     onProviderPromptStarted: () => {
                         if (isUnifiedTerminalTranscriptActive()) {
                             return unifiedBinding.sessionOptions.onProviderPromptStarted?.();
@@ -1763,6 +1807,17 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     // engage only for the SDK-stream runners (the unified runner explicitly reports null).
                     onRunnerSelected: (runner: ClaudeRemoteRunnerKind | null) => {
                         activeRemoteRunnerKind = runner;
+                        disposeAgentSdkInFlightSteerCapabilityPublisher(agentSdkInFlightSteerCapabilityPublisher);
+                        agentSdkInFlightSteerCapabilityPublisher = null;
+                        if (runner === 'agentSdk') {
+                            agentSdkInFlightSteerCapabilityPublisher = createClaudeInFlightSteerCapabilityPublisher({
+                                session: session.client,
+                                isCanonicalTurnActive: () => session.client.hasActiveCanonicalTurn?.() ?? true,
+                                terminalComposerControls: false,
+                            });
+                            inFlightSteerAvailabilitySnapshot = { available: false, reason: 'unsafe_window' };
+                            agentSdkInFlightSteerCapabilityPublisher.publish(inFlightSteerAvailabilitySnapshot);
+                        }
                         if (runner === null) return;
                         remoteProviderInputOutcomes = createClaudeRemoteProviderInputOutcomeBridge(session.client);
                         reportClaudeSubscriptionAccessTokenRefreshCapability(runner);
@@ -1804,8 +1859,10 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             });
                             return result && typeof result === 'object' ? result : undefined;
                         };
+                        const startupLifecycleIntent =
+                            unifiedDispatchOpts.startupLifecycleIntent ?? { kind: 'new_session' };
                         const startupLifecycle = await prepareClaudeUnifiedStartupLifecycle({
-                            intent: unifiedDispatchOpts.startupLifecycleIntent ?? { kind: 'new_session' },
+                            intent: startupLifecycleIntent,
                             binding: unifiedBinding,
                         });
                         // Lane P (O-design Seam A): publish live steer availability (+reason) to agentState.
@@ -1868,6 +1925,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         return await runClaudeUnifiedTerminalSession({
                             ...unifiedDispatchOpts,
                             happySessionId: session.client.sessionId,
+                            expectedProviderResumeSessionId: startupLifecycleIntent.kind === 'resume_native'
+                                ? startupLifecycleIntent.providerSessionId
+                                : null,
                             dialogChoiceBroker,
                             statuslineForwarder: session.claudeStatuslineForwarder ?? undefined,
                             onProviderLaunchStarting: () => startupLifecycle.onProviderLaunchStarting(),
@@ -2059,8 +2119,20 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     }
                 }
             } finally {
-
                 logger.debug('[remote]: launch finally');
+
+                // A provider launch may finish while its SDK prompt iterator is still waiting for
+                // the next Pending row. End that obsolete wait before the next launch reuses this
+                // session-owned consumer; otherwise MessageQueue2 correctly rejects a competing
+                // waiter and every subsequent relaunch can spin without consuming input.
+                controller.abort('claude-remote-provider-launch-finished');
+                disposeAgentSdkInFlightSteerCapabilityPublisher(agentSdkInFlightSteerCapabilityPublisher);
+                agentSdkInFlightSteerCapabilityPublisher = null;
+                refreshInFlightSteerAvailability = null;
+                inFlightSteerAvailabilitySnapshot = { available: false, reason: 'unsafe_window' };
+                if (applyActiveLaunchPermissionMetadata === applyUnifiedTerminalPermissionMetadata) {
+                    applyActiveLaunchPermissionMetadata = null;
+                }
 
                 // Flush any remaining messages in the queue
                 logger.debug('[remote]: flushing message queue');
@@ -2089,6 +2161,12 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             }
         }
     } finally {
+
+        try {
+            await inputConsumer.closeProviderInputAdmissionAndWaitForDispatches();
+        } finally {
+            session.unregisterProviderInputConsumer(inputConsumer);
+        }
 
         session.removeClaudeSessionHookCallback(observeLegacyProviderActivityHook);
 

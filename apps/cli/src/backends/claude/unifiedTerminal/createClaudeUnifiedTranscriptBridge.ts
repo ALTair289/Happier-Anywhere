@@ -15,7 +15,6 @@ import { createJsonlFollowController, type JsonlFollowController } from '@/agent
 import type { JsonlFollowerMetricEvent } from '@/agent/localControl/jsonlFollowMetrics';
 import { createClaudeJsonlResetReplaySuppressor } from '../utils/claudeJsonlReplaySuppression';
 import { readClaudeJsonlTimestampMs } from '../utils/claudeJsonlTimestamp';
-import { wasClaudeSessionHookIdentityReported } from './createReplayableHookSubscription';
 
 type ClaudeUnifiedTranscriptBridgeSessionFound = (sessionId: string, data: SessionHookData) => void;
 
@@ -161,6 +160,11 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
    */
   proveAcceptedMainTranscript?: ((value: unknown) => boolean) | undefined;
   onSessionFound?: ClaudeUnifiedTranscriptBridgeSessionFound | undefined;
+  validateSessionStart?: ((info: Readonly<{
+    sessionId: string;
+    transcriptPath: string | null;
+    source: string | null;
+  }>) => boolean) | undefined;
   onTranscriptMissing?: ((info: { sessionId: string; filePath: string }) => void) | undefined;
   transcriptMissingWarningMs?: number | undefined;
   subscribeClaudeSessionHooks?: ClaudeUnifiedSessionHookSubscription | undefined;
@@ -228,9 +232,7 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
     }
     activeTrustedSessionStart = { data, sessionInfo };
     recordSessionStartBaselines(sessionInfo, receivedAtMs);
-    if (!wasClaudeSessionHookIdentityReported(data)) {
-      opts.onSessionFound?.(sessionInfo.sessionId, data);
-    }
+    opts.onSessionFound?.(sessionInfo.sessionId, data);
 
     if (!scanner) {
       pendingSessionStarts.push({ data, receivedAtMs, sessionInfo });
@@ -343,6 +345,7 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
   return {
     async start() {
       if (disposed || scanner) return;
+      const startedAtMs = Date.now();
       const waitForSessionStartHook = Boolean(opts.subscribeClaudeSessionHooks);
       if (opts.subscribeClaudeSessionHooks && !unsubscribe) {
         logger.debug('[unified]: Claude SessionStart hook subscription registered', {
@@ -373,6 +376,7 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
             source: sessionInfo.source,
             knownResumeSessionId,
           });
+          if (opts.validateSessionStart?.(sessionInfo) === false) return;
           applySessionStart(sessionInfo, data, Date.now());
         }) ?? null;
       }
@@ -399,6 +403,15 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
         && knownResumeTranscriptPath
         && knownResumeTranscript?.source === 'canonical',
       );
+      // An adopted terminal may not emit another SessionStart. Seed the same resume-era cutoff
+      // before snapshot replay so old lifecycle rows cannot become current-runner activity.
+      if (
+        prebindKnownResumeTranscript
+        && knownResumeSessionId
+        && !resumeLiveTranscriptAfterMsBySessionId.has(knownResumeSessionId)
+      ) {
+        resumeLiveTranscriptAfterMsBySessionId.set(knownResumeSessionId, startedAtMs);
+      }
       const nextScanner = await createSessionScanner({
         sessionId: waitForSessionStartHook
           ? (prebindKnownResumeTranscript ? knownResumeSessionId : null)

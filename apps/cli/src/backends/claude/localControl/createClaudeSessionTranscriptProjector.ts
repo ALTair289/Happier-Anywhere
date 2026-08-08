@@ -26,6 +26,7 @@ import {
   buildClaudeCompactionStartedEvent,
 } from '../contextCompactionEvents';
 import { applyClaudeEffectiveModelUpdate } from '../sessionModels/effectiveModelUpdate';
+import { readClaudeMainChainAssistantModelId } from '../sessionModels/readClaudeMainChainAssistantModelId';
 
 type ClaudeLocalWorkStateSnapshot = ReturnType<typeof buildClaudeTodoWriteWorkState>
   & Readonly<{ ownedSourceFamilies?: readonly string[] }>;
@@ -92,21 +93,6 @@ function readCompactCommandMarkerKind(message: RawJSONLines): CompactCommandMark
 
 function readSystemSubtype(message: RawJSONLines): string | null {
   return message.type === 'system' ? readString((message as Record<string, unknown>).subtype) : null;
-}
-
-/**
- * Effective model id carried on a main-chain assistant transcript row.
- *
- * Sidechain rows are skipped (subagents may run a different model) and synthetic placeholders
- * (e.g. `<synthetic>` on API-error rows) are never real model ids.
- */
-function readMainChainAssistantModelId(message: RawJSONLines): string | null {
-  if (message.type !== 'assistant') return null;
-  const record = message as Record<string, unknown>;
-  if (record.isSidechain === true) return null;
-  const model = readString(readRecord(record.message)?.model);
-  if (!model || model.includes('<')) return null;
-  return model;
 }
 
 export function createClaudeSessionTranscriptProjector(params: Readonly<{
@@ -244,7 +230,7 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
   // `runtime_model_update` adoption keeps session models metadata (and therefore UI context-window
   // resolution) correct for terminal sessions.
   const maybeAdoptEffectiveModel = (message: RawJSONLines): void => {
-    const modelId = readMainChainAssistantModelId(message);
+    const modelId = readClaudeMainChainAssistantModelId(message);
     if (!modelId) return;
     applyClaudeEffectiveModelUpdate({
       client: params.session.client,

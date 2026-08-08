@@ -49,6 +49,10 @@ import { hashClaudeEnhancedModeForQueue } from '@/backends/claude/remote/modeHas
 import { applyRunnerMcpSessionContext } from '@/mcp/runtime/applyRunnerMcpSessionContext';
 import { applyClaudeRemoteMetaState } from '@/backends/claude/remote/claudeRemoteMetaState';
 import { resolveInitialClaudeRemoteMetaState } from '@/backends/claude/remote/resolveInitialClaudeRemoteMetaState';
+import {
+    normalizeClaudeRemoteMode,
+    pinClaudeRemoteModeToActiveRuntime,
+} from '@/backends/claude/remote/normalizeClaudeRemoteMode';
 import { inferPermissionIntentFromClaudeArgs } from './utils/inferPermissionIntentFromArgs';
 import { adoptModelOverrideFromMetadata } from './utils/adoptModelOverrideFromMetadata';
 import { adoptReasoningEffortOverrideFromMessageMeta } from './utils/adoptReasoningEffortOverrideFromMessageMeta';
@@ -98,8 +102,6 @@ import { serializeAxiosErrorForLog } from '@/api/client/serializeAxiosErrorForLo
 import type { SessionRuntimeActivityContributionHandle } from '@/session/runtimeActivity/types';
 import type { RuntimeActivityApplicability } from '@/session/runtimeActivity/types';
 import { createClaudeProviderRuntimeActivityBindingOwner } from './providerActivity/createClaudeProviderRuntimeActivityAdapter';
-import { isSidechainSessionHook, readSessionHookEventName } from './utils/sessionHookAttribution';
-import { markClaudeSessionHookIdentityReported } from './unifiedTerminal/createReplayableHookSubscription';
 
 type ClaudePermissionLifecycleHookEventName = 'PermissionRequest' | 'PermissionRequestCompleted';
 
@@ -120,19 +122,13 @@ function routeClaudeSessionHookAtCallerBoundary(params: Readonly<{
     data: SessionHookData;
     unifiedTerminalEnabled: boolean;
 }>): void {
-    // An authenticated primary SessionStart can arrive before Unified's replayable bridge subscribes
-    // (the provider starts while the terminal host is still attaching), so the caller preserves that
-    // one initial discovery path. All later proof/promotion remains bridge-owned, and every hook stays
-    // lifecycle-visible. Legacy launchers retain their historical direct discovery behavior.
-    const isPrimarySessionStart = readSessionHookEventName(params.data) === 'SessionStart'
-        && !isSidechainSessionHook(params.data);
-    if (!params.unifiedTerminalEnabled || isPrimarySessionStart) {
+    // Unified installs a replayable hook subscription before launching Claude. Its transcript/runtime
+    // owner validates explicit resume identity before persisting it; global ingress only publishes the
+    // hook. Legacy launchers retain their historical direct discovery behavior.
+    if (!params.unifiedTerminalEnabled) {
         params.session.onSessionFound(params.sessionId, params.data);
     }
-    const lifecycleData = params.unifiedTerminalEnabled && isPrimarySessionStart
-        ? markClaudeSessionHookIdentityReported(params.data)
-        : params.data;
-    params.session.onClaudeSessionHook(lifecycleData);
+    params.session.onClaudeSessionHook(params.data);
 }
 
 /** JavaScript runtime to use for spawning Claude Code */
@@ -622,7 +618,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         }
 
     let currentClaudeRemoteMetaState = resolveInitialClaudeRemoteMetaState({ metaDefaults: options.claudeRemoteMetaDefaults });
-    const adoptEndpointRecovery = currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true
+    const sessionRuntimeModeKind = normalizeClaudeRemoteMode(currentClaudeRemoteMetaState).kind;
+    const unifiedTerminalRuntimeActive = sessionRuntimeModeKind === 'unifiedTerminal';
+    const adoptEndpointRecovery = unifiedTerminalRuntimeActive
         ? await resolveClaudeAdoptEndpointRecovery({
             ...(currentClaudeRemoteMetaState.claudeLocalPermissionBridgeWaitIndefinitely === true
                 ? {}
@@ -630,7 +628,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         })
         : null;
     if (
-        currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true
+        unifiedTerminalRuntimeActive
         && hasClaudeEndpointRecoveryRequest()
         && !adoptEndpointRecovery
     ) {
@@ -723,7 +721,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     session: currentSession,
                     sessionId,
                     data,
-                    unifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+                    unifiedTerminalEnabled: unifiedTerminalRuntimeActive,
                 });
                 localPermissionBridge?.handleSessionHook(data);
             }
@@ -802,7 +800,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         (currentState) => buildClaudeAgentState({
             currentState,
             mode: startingMode === 'remote' ? 'remote' : 'local',
-            claudeUnifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+            claudeUnifiedTerminalEnabled: unifiedTerminalRuntimeActive,
             tuiRuntimeControlEnabled: claudeTuiRuntimeControlEnabled,
             localPermissionBridgeEnabled,
             userMessageHandlerReady,
@@ -986,7 +984,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 (currentState) => buildClaudeAgentState({
                     currentState,
                     mode: currentState.controlledByUser === true ? 'local' : 'remote',
-                    claudeUnifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+                    claudeUnifiedTerminalEnabled: unifiedTerminalRuntimeActive,
                     tuiRuntimeControlEnabled: claudeTuiRuntimeControlEnabled,
                     localPermissionBridgeEnabled,
                     userMessageHandlerReady,
@@ -1056,7 +1054,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         (currentState) => buildClaudeAgentState({
             currentState,
             mode: currentState.controlledByUser === true ? 'local' : 'remote',
-            claudeUnifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+            claudeUnifiedTerminalEnabled: unifiedTerminalRuntimeActive,
             tuiRuntimeControlEnabled: claudeTuiRuntimeControlEnabled,
             localPermissionBridgeEnabled,
             userMessageHandlerReady,
@@ -1163,7 +1161,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     registerKillSessionHandler(session.rpcHandlerManager, async () => {
         await requestClaudeExplicitRunnerStop({
-            unifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+            unifiedTerminalEnabled: unifiedTerminalRuntimeActive,
             destroyOwnedHostForExplicitStop,
             requestTermination: terminationHandlers.requestTermination,
             whenTerminated: terminationHandlers.whenTerminated,
@@ -1205,15 +1203,15 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let loopError: unknown = null;
     try {
         activeLoopAbortController = new AbortController();
-        activeLoopShouldWaitOnTermination = currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true;
+        activeLoopShouldWaitOnTermination = unifiedTerminalRuntimeActive;
         activeLoopPromise = loop({
             path: workingDirectory,
             model: options.model,
             permissionMode: options.permissionMode,
             permissionModeUpdatedAt: options.permissionModeUpdatedAt,
             startingMode: options.startingMode,
-            claudeUnifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
-            initialClaudeUnifiedTerminalMode: {
+            claudeUnifiedTerminalEnabled: unifiedTerminalRuntimeActive,
+            initialClaudeUnifiedTerminalMode: pinClaudeRemoteModeToActiveRuntime({
                 permissionMode: options.permissionMode ?? 'default',
                 agentModeId: currentAgentModeId,
                 model: currentModel,
@@ -1223,7 +1221,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 reasoningEffort: currentReasoningEffort,
                 ultracode: currentUltracode,
                 ...currentClaudeRemoteMetaState,
-            },
+            }, sessionRuntimeModeKind),
             claudeCodeExperimentalAgentTeamsEnabled: currentClaudeRemoteMetaState.claudeCodeExperimentalAgentTeamsEnabled,
             startedBy: options.startedBy,
             messageQueue,
@@ -1244,7 +1242,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     (currentState) => buildClaudeAgentState({
                         currentState,
                         mode: newMode,
-                        claudeUnifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+                        claudeUnifiedTerminalEnabled: unifiedTerminalRuntimeActive,
                         tuiRuntimeControlEnabled: claudeTuiRuntimeControlEnabled,
                         localPermissionBridgeEnabled,
                         userMessageHandlerReady,
@@ -1488,6 +1486,8 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
     };
     let pushSender: PushNotificationClient | null = null;
     let currentClaudeRemoteMetaState = resolveInitialClaudeRemoteMetaState({ metaDefaults: options.claudeRemoteMetaDefaults });
+    const sessionRuntimeModeKind = normalizeClaudeRemoteMode(currentClaudeRemoteMetaState).kind;
+    const unifiedTerminalRuntimeActive = sessionRuntimeModeKind === 'unifiedTerminal';
     let localPermissionBridgeEnabled = currentClaudeRemoteMetaState.claudeLocalPermissionBridgeEnabled === true;
     let localPermissionBridgeWaitIndefinitely = currentClaudeRemoteMetaState.claudeLocalPermissionBridgeWaitIndefinitely === true;
     let localPermissionBridgeTimeoutMs = localPermissionBridgeWaitIndefinitely
@@ -1530,7 +1530,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                     session: currentSession,
                     sessionId,
                     data,
-                    unifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+                    unifiedTerminalEnabled: unifiedTerminalRuntimeActive,
                 });
                 localPermissionBridge?.handleSessionHook(data);
             }
@@ -1713,7 +1713,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                     (currentState) => buildClaudeAgentState({
                         currentState,
                         mode: startingMode === 'remote' ? 'remote' : 'local',
-                        claudeUnifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+                        claudeUnifiedTerminalEnabled: unifiedTerminalRuntimeActive,
                         tuiRuntimeControlEnabled: claudeTuiRuntimeControlEnabled,
                         localPermissionBridgeEnabled,
                         userMessageHandlerReady,
@@ -1861,7 +1861,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                             (currentState) => buildClaudeAgentState({
                                 currentState,
                                 mode: currentState.controlledByUser === true ? 'local' : 'remote',
-                                claudeUnifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+                                claudeUnifiedTerminalEnabled: unifiedTerminalRuntimeActive,
                                 tuiRuntimeControlEnabled: claudeTuiRuntimeControlEnabled,
                                 localPermissionBridgeEnabled,
                                 userMessageHandlerReady,
@@ -2017,8 +2017,8 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                         permissionMode: options.permissionMode,
                         permissionModeUpdatedAt: options.permissionModeUpdatedAt,
                         startingMode: options.startingMode,
-                        claudeUnifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
-                        initialClaudeUnifiedTerminalMode: {
+                        claudeUnifiedTerminalEnabled: unifiedTerminalRuntimeActive,
+                        initialClaudeUnifiedTerminalMode: pinClaudeRemoteModeToActiveRuntime({
                             permissionMode: options.permissionMode ?? 'default',
                             agentModeId: currentAgentModeId,
                             model: currentModel,
@@ -2028,7 +2028,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                             reasoningEffort: currentReasoningEffort,
                             ultracode: currentUltracode,
                             ...currentClaudeRemoteMetaState,
-                        },
+                        }, sessionRuntimeModeKind),
                         claudeCodeExperimentalAgentTeamsEnabled: currentClaudeRemoteMetaState.claudeCodeExperimentalAgentTeamsEnabled,
                         startedBy: options.startedBy,
                         terminalRuntime: options.terminalRuntime ?? null,
@@ -2040,7 +2040,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                                 (currentState) => buildClaudeAgentState({
                                     currentState,
                                     mode: newMode,
-                                    claudeUnifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+                                    claudeUnifiedTerminalEnabled: unifiedTerminalRuntimeActive,
                                     tuiRuntimeControlEnabled: claudeTuiRuntimeControlEnabled,
                                     localPermissionBridgeEnabled,
                                     userMessageHandlerReady,
@@ -2207,7 +2207,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
 
     registerKillSessionHandler(coordinator.artifacts.deferredSession.rpcHandlerManager, async () => {
         await requestClaudeExplicitRunnerStop({
-            unifiedTerminalEnabled: currentClaudeRemoteMetaState.claudeUnifiedTerminalEnabled === true,
+            unifiedTerminalEnabled: unifiedTerminalRuntimeActive,
             destroyOwnedHostForExplicitStop,
             requestTermination: terminationHandlers.requestTermination,
             whenTerminated: terminationHandlers.whenTerminated,

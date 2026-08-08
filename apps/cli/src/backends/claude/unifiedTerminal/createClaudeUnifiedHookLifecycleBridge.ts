@@ -15,6 +15,7 @@ import {
 } from '../providerActivity/createClaudeProviderActivityLedger';
 import type { createClaudeProviderRuntimeActivityAdapter } from '../providerActivity/createClaudeProviderRuntimeActivityAdapter';
 import { isClaudeRuntimeAuthFailureEvidence } from '../connectedServices/classifyClaudeConnectedServiceRuntimeAuthFailure';
+import { containsDefinitiveClaudeOAuthRevocationEvidence } from '../connectedServices/surfaceClaudeRuntimeIssues';
 import {
   mapClaudeRateLimitEventToUsageDetails,
   mapClaudeStopFailureHookToUsageDetails,
@@ -476,7 +477,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
     // sidechain (subagent, `agent_id`) auth StopFailure describes a subagent request, not the
     // parent session's credentials, and must never drive parent-session recovery/restart
     // (incident 2026-06-12 cmq8171…) — mirrors the transcript-path subagent gating.
-    if (sidechain) return;
+    if (sidechain && !containsDefinitiveClaudeOAuthRevocationEvidence(data)) return;
     if (!opts.onRuntimeAuthFailureEvent) return;
     if (!isClaudeRuntimeAuthFailureEvidence(data)) return;
     chainTerminalSideEffect('runtime-auth', () => opts.onRuntimeAuthFailureEvent?.(data));

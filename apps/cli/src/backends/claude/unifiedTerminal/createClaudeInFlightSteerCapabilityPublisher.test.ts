@@ -76,6 +76,23 @@ describe('createClaudeInFlightSteerCapabilityPublisher (lane P, O-design Seam A)
     publisher.dispose();
   });
 
+  it('publishes Agent SDK steerability without advertising terminal-composer controls', () => {
+    const captured = capture();
+    const publisher = createClaudeInFlightSteerCapabilityPublisher({
+      session: captured.session,
+      isCanonicalTurnActive: () => true,
+      nowMs: () => 1234,
+      terminalComposerControls: false,
+    });
+
+    publisher.publish({ available: true, reason: null });
+
+    expect(captured.state.capabilities?.inFlightSteerAvailable).toBe(true);
+    expect(captured.state.capabilities?.terminalComposerClearSupported).toBeUndefined();
+    expect(captured.state.capabilities?.terminalComposerDraftPresent).toBeUndefined();
+    publisher.dispose();
+  });
+
   it('emits a final cleared snapshot on dispose after a terminal composer draft', () => {
     const captured = capture();
     const publisher = createClaudeInFlightSteerCapabilityPublisher({

@@ -190,6 +190,7 @@ function createSession(overrides: Readonly<{
     getProviderTaskRuntimeActivityAdapter: vi.fn(() => null),
     getProviderTaskActivityLedger: vi.fn(() => null),
     registerProviderInputConsumer: vi.fn(),
+    registerConnectedServiceExactApplicationHandler: vi.fn(() => vi.fn()),
     isWorkflowOwnedTaskReference: vi.fn(() => false),
     onSessionFound: vi.fn(),
     publishUnifiedTerminalHostMetadata: vi.fn(async () => {}),
@@ -889,6 +890,33 @@ describe('claudeUnifiedTerminalLauncher', () => {
       });
       dispose?.();
       expect(unregister).toHaveBeenCalledTimes(1);
+    });
+
+    await claudeUnifiedTerminalLauncher(session, {
+      initialMode: {
+        permissionMode: 'default',
+        claudeUnifiedTerminalHost: 'tmux',
+      },
+    });
+  });
+
+  it('wires exact connected-service application to the Claude host and canonical Pending wake', async () => {
+    setProcessTty(false);
+    const session = createSession();
+    const register = vi.mocked(session.registerConnectedServiceExactApplicationHandler);
+
+    mocks.runClaudeUnifiedTerminalSession.mockImplementationOnce(async (opts: {
+      registerConnectedServiceExactApplicationHandler?: (
+        handler: () => Promise<void>,
+      ) => (() => void) | void;
+      onConnectedServiceExactApplicationReleased?: () => void;
+    }) => {
+      const handler = vi.fn(async () => undefined);
+      opts.registerConnectedServiceExactApplicationHandler?.(handler);
+      expect(register).toHaveBeenCalledWith(handler);
+
+      opts.onConnectedServiceExactApplicationReleased?.();
+      expect(session.client.wakePendingMaterialization).toHaveBeenCalledOnce();
     });
 
     await claudeUnifiedTerminalLauncher(session, {

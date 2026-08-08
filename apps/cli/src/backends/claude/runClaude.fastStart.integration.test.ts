@@ -454,12 +454,9 @@ describe('runClaude fast-start', () => {
         transcript_path: '/tmp/sidechain-session.jsonl',
         agent_id: 'subagent-1',
       });
-      expect(onSessionFound).toHaveBeenCalledTimes(1);
-      expect(onSessionFound).toHaveBeenCalledWith(sessionId, expect.objectContaining({
-        hook_event_name: 'SessionStart',
-        session_id: sessionId,
-        transcript_path: transcriptPath,
-      }));
+      // Unified identity belongs to the subscribed transcript/runtime owner, which can validate
+      // explicit resume identity before persisting it. The global hook ingress only publishes.
+      expect(onSessionFound).not.toHaveBeenCalled();
       expect(onClaudeSessionHook).toHaveBeenCalledTimes(5);
       expect(onClaudeSessionHook.mock.calls.map(([data]) => data.hook_event_name)).toEqual([
         'SessionStart',

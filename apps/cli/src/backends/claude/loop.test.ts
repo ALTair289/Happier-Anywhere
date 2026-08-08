@@ -277,6 +277,29 @@ describe.sequential('loop', () => {
     }
   });
 
+  it('passes the session-lifecycle runtime selection to the remote launcher', async () => {
+    mockClaudeRemoteLauncher.mockResolvedValueOnce('exit');
+    const initialMode: EnhancedMode = {
+      permissionMode: 'default',
+      claudeRemoteAgentSdkEnabled: true,
+      claudeUnifiedTerminalEnabled: false,
+    };
+
+    const result = await runLoop({
+      startingMode: 'remote',
+      initialClaudeUnifiedTerminalMode: initialMode,
+    });
+    try {
+      expect(result.code).toBe(0);
+      expect(mockClaudeRemoteLauncher).toHaveBeenCalledWith(
+        expect.anything(),
+        { initialMode },
+      );
+    } finally {
+      result.capturedSession?.cleanup();
+    }
+  });
+
   it('activates the current-runtime provider observer before a remote provider can accept input', async () => {
     const order: string[] = [];
     const readySession: { current: Session | null } = { current: null };

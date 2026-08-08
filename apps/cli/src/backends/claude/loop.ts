@@ -231,7 +231,9 @@ export async function loop(opts: LoopOptions): Promise<number> {
             }
 
             case 'remote': {
-                const reason = await claudeRemoteLauncher(session);
+                const reason = await claudeRemoteLauncher(session, {
+                    initialMode: opts.initialClaudeUnifiedTerminalMode,
+                });
                 switch (reason) {
                     case 'exit':
                         return 0;

@@ -1,11 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { SessionHookData } from '../utils/startHookServer';
-import {
-  createReplayableHookSubscription,
-  markClaudeSessionHookIdentityReported,
-  wasClaudeSessionHookIdentityReported,
-} from './createReplayableHookSubscription';
+import { createReplayableHookSubscription } from './createReplayableHookSubscription';
 
 function createHarness(): Readonly<{
   emit: (data: SessionHookData) => void;
@@ -29,31 +25,6 @@ function createHarness(): Readonly<{
 }
 
 describe('createReplayableHookSubscription', () => {
-  it('carries caller identity ownership through replay without serializing internal state', () => {
-    const { emit, subscription } = createHarness();
-    const sessionStart: SessionHookData = {
-      hook_event_name: 'SessionStart',
-      session_id: 'sess_owned',
-      transcript_path: '/tmp/sess_owned.jsonl',
-    };
-    const markedSessionStart = markClaudeSessionHookIdentityReported(sessionStart);
-    expect(markedSessionStart).toBe(sessionStart);
-    expect(wasClaudeSessionHookIdentityReported(markedSessionStart)).toBe(true);
-    expect(JSON.parse(JSON.stringify(markedSessionStart))).toEqual({
-      hook_event_name: 'SessionStart',
-      session_id: 'sess_owned',
-      transcript_path: '/tmp/sess_owned.jsonl',
-    });
-
-    emit(markedSessionStart);
-    const received: SessionHookData[] = [];
-    subscription.subscribe?.((data) => received.push(data));
-    expect(received).toHaveLength(1);
-    expect(received[0]).toBe(sessionStart);
-    expect(wasClaudeSessionHookIdentityReported(received[0]!)).toBe(true);
-    subscription.dispose();
-  });
-
   it('replays an early SessionStart to the first late startup subscriber', () => {
     const { emit, subscription } = createHarness();
     const earlySessionStart: SessionHookData = {

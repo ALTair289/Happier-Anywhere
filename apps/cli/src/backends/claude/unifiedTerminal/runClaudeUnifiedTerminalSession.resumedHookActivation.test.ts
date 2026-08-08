@@ -85,6 +85,113 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
     }
   });
 
+  it('fails closed before prompt injection when Claude starts a different session than the explicit resume', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-claude-resume-identity-mismatch-'));
+    tempDirs.push(dir);
+    const workspaceDir = join(dir, 'workspace');
+    await mkdir(workspaceDir, { recursive: true });
+    const requestedSessionId = '11111111-1111-4111-8111-111111111111';
+    const unexpectedSessionId = '22222222-2222-4222-8222-222222222222';
+    const claudeConfigDir = join(dir, 'claude-config');
+    const projectDir = getProjectPath(workspaceDir, claudeConfigDir);
+    await mkdir(projectDir, { recursive: true });
+    const transcriptPath = join(projectDir, `${requestedSessionId}.jsonl`);
+    await writeFile(transcriptPath, '');
+    const previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+    const abortController = new AbortController();
+    const onSessionFound = vi.fn(() => abortController.abort());
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    let pendingPulled = false;
+    const handle: TerminalHostHandle = {
+      kind: 'tmux',
+      sessionName: 'happier-claude-resume-identity-mismatch-test',
+      paneId: '%1',
+      attachMetadata: {
+        attachStrategy: 'terminal_host',
+        topology: 'shared',
+        locality: 'same_machine',
+        liveProbe: 'required',
+      },
+    };
+    const injectUserPrompt = vi.fn<TerminalHostAdapter['injectUserPrompt']>(async (_handle, input) => ({
+      status: 'injected',
+      at: Date.now(),
+      bytesWritten: input.text.length,
+    }));
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(async () => {
+        const hook = subscribedHook;
+        if (!hook) throw new Error('provider launched before the hook subscription was installed');
+        hook({
+          hook_event_name: 'SessionStart',
+          session_id: unexpectedSessionId,
+          transcript_path: join(projectDir, `${unexpectedSessionId}.jsonl`),
+          source: 'startup',
+        });
+        return handle;
+      }),
+      injectUserPrompt,
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: true, observedAt: Date.now() })),
+      captureInputState: vi.fn(async () => ({
+        stable: true,
+        currentInput: interactiveClaudeScreen,
+        observedAt: Date.now(),
+      })),
+      interruptTurn: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    };
+
+    try {
+      await expect(runClaudeUnifiedTerminalSession({
+        path: workspaceDir,
+        happySessionId: 'resume-identity-mismatch-session',
+        sessionId: requestedSessionId,
+        transcriptPath,
+        expectedProviderResumeSessionId: requestedSessionId,
+        hookPluginDir: join(dir, 'owned-happier-hook-plugin'),
+        signal: abortController.signal,
+        nextMessage: async () => {
+          if (pendingPulled) return await new Promise(() => undefined);
+          pendingPulled = true;
+          return {
+            message: 'This must stay pending when Claude starts the wrong conversation.',
+            mode: { permissionMode: 'default', claudeUnifiedTerminalHost: 'tmux' },
+            userMessageLocalIds: ['resume-identity-mismatch-local-id'],
+          };
+        },
+        onSessionFound,
+        resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
+        buildSpawn: async () => ({
+          spawnArgv: ['/bin/claude', '--resume', requestedSessionId],
+          spawnEnv: {},
+        }),
+        createSessionName: () => 'happier-claude-resume-identity-mismatch-test',
+        subscribeClaudeSessionHooks: (callback) => {
+          subscribedHook = callback;
+          return () => {
+            subscribedHook = undefined;
+          };
+        },
+        lifecycleCompletionQuiescenceMs: 0,
+        dialogTurnEndScreenProbeDelaysMs: [],
+      })).rejects.toMatchObject({
+        code: 'claude_unified_resume_identity_mismatch',
+      });
+
+      expect(onSessionFound).not.toHaveBeenCalled();
+      expect(injectUserPrompt).not.toHaveBeenCalled();
+    } finally {
+      abortController.abort();
+      if (previousClaudeConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousClaudeConfigDir;
+      }
+    }
+  });
+
   it('does not interrupt provider-owned resume-summary compaction before delivering the queued Pending row once', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'happier-claude-resume-summary-compaction-'));
     tempDirs.push(dir);

@@ -819,6 +819,46 @@ describe('createClaudeUnifiedHookLifecycleBridge', () => {
     }
   });
 
+  it('routes definitive sidechain OAuth revocation without promoting generic subagent auth evidence', async () => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const onRuntimeAuthFailureEvent = vi.fn();
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle: vi.fn(),
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onRuntimeAuthFailureEvent,
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      hook({
+        hook_event_name: 'StopFailure',
+        session_id: 'claude-session-id',
+        agent_id: 'agent_sidechain_1',
+        error: 'authentication_failed',
+        last_assistant_message: 'Please run /login · API Error: 401 OAuth access token has been revoked.',
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(onRuntimeAuthFailureEvent).toHaveBeenCalledOnce();
+      });
+    } finally {
+      bridge.dispose();
+    }
+  });
+
   it('surfaces transcript-only Claude auth API errors and marks the turn failed', async () => {
     let subscribedHook: ((data: SessionHookData) => void) | undefined;
     const observeLifecycle = vi.fn();

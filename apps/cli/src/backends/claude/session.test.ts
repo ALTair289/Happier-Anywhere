@@ -258,6 +258,47 @@ describe('Session', () => {
     expect(unregister).toHaveBeenCalledOnce();
   });
 
+  it('notifies the active Claude runtime after exact connected-service application without failing settlement', async () => {
+    const registerSessionRuntimeControls = vi.fn((
+      _controls: Parameters<NonNullable<SessionClientPort['registerSessionRuntimeControls']>>[0],
+    ) => () => undefined);
+    const client = createSessionClientStub({ registerSessionRuntimeControls });
+    const session = createSession(client);
+    const releaseRuntime = vi.fn(async () => {
+      throw new Error('terminal release is best effort');
+    });
+    const unregisterRelease = session.registerConnectedServiceExactApplicationHandler(releaseRuntime);
+
+    const controls = registerSessionRuntimeControls.mock.calls[0]?.[0];
+    await expect(controls?.applyConnectedServiceAuthGeneration?.({
+      serviceId: 'claude-subscription',
+      reason: 'diagnostic',
+      applicationSettled: true,
+      authGeneration: {
+        kind: 'current_auth_group_available',
+        groupId: 'team',
+        generation: 3,
+        credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+      },
+    })).resolves.toEqual({ ok: true, appliedVia: 'current_truth_fence' });
+    expect(releaseRuntime).toHaveBeenCalledOnce();
+
+    unregisterRelease();
+    await controls?.applyConnectedServiceAuthGeneration?.({
+      serviceId: 'claude-subscription',
+      reason: 'diagnostic',
+      applicationSettled: true,
+      authGeneration: {
+        kind: 'current_auth_group_available',
+        groupId: 'team',
+        generation: 4,
+        credentialRevision: 'csr_bbbbbbbbbbbbbbbbbbbbbb',
+      },
+    });
+    expect(releaseRuntime).toHaveBeenCalledOnce();
+    session.cleanup();
+  });
+
   it('tracks recent user abort requests', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-02-26T07:46:00.000Z'));

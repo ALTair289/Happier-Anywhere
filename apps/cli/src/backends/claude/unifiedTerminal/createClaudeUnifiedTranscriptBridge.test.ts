@@ -9,10 +9,7 @@ import { getProjectPath } from '../utils/path';
 import type { SessionHookData } from '../utils/startHookServer';
 import { createClaudeUnifiedAcceptedPromptTranscriptDiscovery } from './acceptedPromptTranscriptDiscovery';
 import { createClaudeUnifiedTranscriptBridge } from './createClaudeUnifiedTranscriptBridge';
-import {
-  createReplayableHookSubscription,
-  markClaudeSessionHookIdentityReported,
-} from './createReplayableHookSubscription';
+import { createReplayableHookSubscription } from './createReplayableHookSubscription';
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
   const startedAt = Date.now();
@@ -419,7 +416,62 @@ describe('createClaudeUnifiedTranscriptBridge', () => {
     }
   });
 
+  it('does not let historical compact replay drive lifecycle before a known resumed session becomes live', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'happier-claude-unified-transcript-known-resume-lifecycle-'));
+    tempDirs.push(dir);
+    const workspaceDir = join(dir, 'workspace');
+    const claudeConfigDir = join(dir, 'claude-config');
+    const sessionId = 'sess_known_resume_lifecycle';
+    const projectDir = getProjectPath(workspaceDir, claudeConfigDir);
+    await mkdir(projectDir, { recursive: true });
+    const transcriptPath = join(projectDir, `${sessionId}.jsonl`);
+    await writeFile(transcriptPath, `${JSON.stringify({
+      type: 'system',
+      subtype: 'compact_boundary',
+      uuid: 'historical_compact_boundary',
+      timestamp: new Date(Date.now() - 60_000).toISOString(),
+      sessionId,
+      compactMetadata: { trigger: 'auto' },
+    })}\n`);
 
+    const onTranscriptMessage = vi.fn();
+    const bridge = createClaudeUnifiedTranscriptBridge({
+      sessionId,
+      transcriptPath: null,
+      workingDirectory: workspaceDir,
+      claudeConfigDir,
+      onTranscriptMessage,
+      loadCommittedClaudeJsonlMessageBaseline: async () => ({
+        keys: new Set<string>(),
+        complete: true,
+        oldestCoveredAtMs: null,
+      }),
+      subscribeClaudeSessionHooks: () => () => {},
+      transcriptMissingWarningMs: 0,
+    });
+
+    try {
+      await bridge.start({ abortSignal: new AbortController().signal });
+      await waitMs(100);
+      expect(onTranscriptMessage).not.toHaveBeenCalled();
+
+      await appendJsonl(transcriptPath, {
+        type: 'system',
+        subtype: 'compact_boundary',
+        uuid: 'live_compact_boundary',
+        timestamp: new Date().toISOString(),
+        sessionId,
+        compactMetadata: { trigger: 'auto' },
+      } as RawJSONLines);
+
+      await waitUntil(() => onTranscriptMessage.mock.calls.length === 1);
+      expect(onTranscriptMessage).toHaveBeenCalledWith(expect.objectContaining({
+        uuid: 'live_compact_boundary',
+      }));
+    } finally {
+      await bridge.dispose();
+    }
+  });
 
   it('suppresses historical resume rows in a fresh Happier session while emitting the newly accepted prompt', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'happier-claude-unified-transcript-resume-'));
@@ -899,7 +951,7 @@ describe('createClaudeUnifiedTranscriptBridge', () => {
     }
   });
 
-  it('replays a caller-reported SessionStart without duplicate discovery, then re-reports once on exact proof', async () => {
+  it('replays an early SessionStart through the identity owner, then re-reports once on exact proof', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'happier-claude-unified-transcript-proof-'));
     tempDirs.push(dir);
     const workspaceDir = join(dir, 'workspace');
@@ -954,9 +1006,9 @@ describe('createClaudeUnifiedTranscriptBridge', () => {
         transcript_path: transcriptPath,
       };
 
-      // Caller discovery must survive a SessionStart that arrives before the bridge subscribes.
-      onSessionFound(sessionId, originalSessionStart);
-      emitLifecycleHook(markClaudeSessionHookIdentityReported(originalSessionStart));
+      // Global hook ingress publishes before the bridge subscribes; replay preserves the event for
+      // this single identity owner, which validates and reports it exactly once.
+      emitLifecycleHook(originalSessionStart);
       await appendRawJsonl(transcriptPath, {
         type: 'mode',
         mode: 'normal',
@@ -1034,8 +1086,7 @@ describe('createClaudeUnifiedTranscriptBridge', () => {
         session_id: compactSessionId,
         transcript_path: join(projectDir, `${compactSessionId}.jsonl`),
       };
-      onSessionFound(compactSessionId, compactSessionStart);
-      emitLifecycleHook(markClaudeSessionHookIdentityReported(compactSessionStart));
+      emitLifecycleHook(compactSessionStart);
       expect(onSessionFound).toHaveBeenCalledTimes(3);
       expect(onSessionFound).toHaveBeenLastCalledWith(compactSessionId, compactSessionStart);
       expect(lifecycleHooks).toHaveLength(6);

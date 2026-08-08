@@ -16,5 +16,5 @@ export const INTERNAL_CLAUDE_EVENT_TYPES = new Set<string>([
   'last-prompt',
   'mode',
   'pr-link',
+  'tool_progress',
 ]);
-

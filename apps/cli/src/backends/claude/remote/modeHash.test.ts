@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { EnhancedMode } from '@/backends/claude/loop';
 
 import { hashClaudeEnhancedModeForQueue } from './modeHash';
+import { pinClaudeRemoteModeToActiveRuntime } from './normalizeClaudeRemoteMode';
 
 function makeMode(overrides?: Partial<EnhancedMode>): EnhancedMode {
     return {
@@ -11,6 +12,26 @@ function makeMode(overrides?: Partial<EnhancedMode>): EnhancedMode {
 }
 
 describe('hashClaudeEnhancedModeForQueue', () => {
+    it('keeps runtime-selector changes out of the active runtime hash', () => {
+        const agentSdkMode = makeMode({
+            claudeRemoteAgentSdkEnabled: true,
+            claudeUnifiedTerminalEnabled: false,
+            claudeUnifiedTerminalHost: 'auto',
+        });
+        const unifiedMode = makeMode({
+            claudeRemoteAgentSdkEnabled: true,
+            claudeUnifiedTerminalEnabled: true,
+            claudeUnifiedTerminalHost: 'auto',
+        });
+
+        expect(hashClaudeEnhancedModeForQueue(
+            pinClaudeRemoteModeToActiveRuntime(unifiedMode, 'agentSdk'),
+        )).toBe(hashClaudeEnhancedModeForQueue(agentSdkMode));
+        expect(hashClaudeEnhancedModeForQueue(
+            pinClaudeRemoteModeToActiveRuntime(agentSdkMode, 'unifiedTerminal'),
+        )).toBe(hashClaudeEnhancedModeForQueue(unifiedMode));
+    });
+
     it('treats missing Agent SDK flag like explicit Agent SDK enabled', () => {
         const missingFlag = hashClaudeEnhancedModeForQueue(makeMode({
             claudeRemoteSettingSourcesV2: ['project'],
