@@ -62,6 +62,26 @@ on:
       channel:
         required: true
         type: string
+      candidate_source_sha:
+        required: false
+        default: ''
+        type: string
+      candidate_cli_version:
+        required: false
+        default: ''
+        type: string
+      candidate_stack_version:
+        required: false
+        default: ''
+        type: string
+      candidate_server_version:
+        required: false
+        default: ''
+        type: string
+      candidate_ui_web_version:
+        required: false
+        default: ''
+        type: string
       run_installers_smoke:
         required: false
         default: true
@@ -108,8 +128,105 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify_candidate:
+    name: Verify exact immutable candidate artifacts
+    if: ${{ inputs.candidate_source_sha != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted workflow control bytes
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .release-control
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.x
+
+      - name: Install minisign from trusted control bytes
+        uses: ./.release-control/.github/actions/bootstrap-minisign
+
+      - name: Verify immutable identities and download candidate data
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+          CANDIDATE_CLI_VERSION: ${{ inputs.candidate_cli_version }}
+          CANDIDATE_STACK_VERSION: ${{ inputs.candidate_stack_version }}
+          CANDIDATE_SERVER_VERSION: ${{ inputs.candidate_server_version }}
+          CANDIDATE_UI_WEB_VERSION: ${{ inputs.candidate_ui_web_version }}
+        run: |
+          set -euo pipefail
+          node "$GITHUB_WORKSPACE/.release-control/scripts/pipeline/release/verify-release-candidate-identity.mjs" \
+            --repository "$REPOSITORY" \
+            --channel "$RELEASE_CHANNEL" \
+            --candidate-source-sha "$CANDIDATE_SOURCE_SHA" \
+            --candidate-cli-version "$CANDIDATE_CLI_VERSION" \
+            --candidate-stack-version "$CANDIDATE_STACK_VERSION" \
+            --candidate-server-version "$CANDIDATE_SERVER_VERSION" \
+            --candidate-ui-web-version "$CANDIDATE_UI_WEB_VERSION"
+
+          candidates_dir="$RUNNER_TEMP/release-candidates"
+          mkdir -p "$candidates_dir"
+          if [ -n "$CANDIDATE_CLI_VERSION" ]; then
+            mkdir -p "$candidates_dir/cli"
+            gh release download "cli-v${CANDIDATE_CLI_VERSION}" --repo "$REPOSITORY" --dir "$candidates_dir/cli"
+          fi
+          if [ -n "$CANDIDATE_STACK_VERSION" ]; then
+            mkdir -p "$candidates_dir/stack"
+            gh release download "stack-v${CANDIDATE_STACK_VERSION}" --repo "$REPOSITORY" --dir "$candidates_dir/stack"
+          fi
+          if [ -n "$CANDIDATE_SERVER_VERSION" ]; then
+            mkdir -p "$candidates_dir/server"
+            gh release download "server-v${CANDIDATE_SERVER_VERSION}" --repo "$REPOSITORY" --dir "$candidates_dir/server"
+          fi
+          if [ -n "$CANDIDATE_UI_WEB_VERSION" ]; then
+            mkdir -p "$candidates_dir/ui-web"
+            gh release download "ui-web-v${CANDIDATE_UI_WEB_VERSION}" --repo "$REPOSITORY" --dir "$candidates_dir/ui-web"
+          fi
+
+      - name: Verify downloaded signed artifacts without repository token
+        env:
+          CANDIDATE_CLI_VERSION: ${{ inputs.candidate_cli_version }}
+          CANDIDATE_STACK_VERSION: ${{ inputs.candidate_stack_version }}
+          CANDIDATE_SERVER_VERSION: ${{ inputs.candidate_server_version }}
+          CANDIDATE_UI_WEB_VERSION: ${{ inputs.candidate_ui_web_version }}
+        run: |
+          set -euo pipefail
+          verifier="$GITHUB_WORKSPACE/.release-control/scripts/pipeline/release/verify-artifacts.mjs"
+          public_key="$GITHUB_WORKSPACE/.release-control/scripts/release/installers/happier-release.pub"
+          candidates_dir="$RUNNER_TEMP/release-candidates"
+          verify_artifacts() {
+            version="$1"
+            product_dir="$2"
+            checksum_stem="$3"
+            if [ -z "$version" ]; then
+              return
+            fi
+            checksums="$product_dir/checksums-${checksum_stem}-v${version}.txt"
+            test -f "$checksums"
+            test -f "${checksums}.minisig"
+            node "$verifier" \
+              --artifacts-dir "$product_dir" \
+              --checksums "$checksums" \
+              --public-key "$public_key" \
+              --skip-smoke
+          }
+          verify_artifacts "$CANDIDATE_CLI_VERSION" "$candidates_dir/cli" happier
+          verify_artifacts "$CANDIDATE_STACK_VERSION" "$candidates_dir/stack" hstack
+          verify_artifacts "$CANDIDATE_SERVER_VERSION" "$candidates_dir/server" happier-server
+          verify_artifacts "$CANDIDATE_UI_WEB_VERSION" "$candidates_dir/ui-web" happier-ui-web
+
   verify:
     name: Verify (tests.yml)
+    needs: [verify_candidate]
+    if: ${{ always() && (needs.verify_candidate.result == 'success' || needs.verify_candidate.result == 'skipped') }}
     uses: ./.github/workflows/tests.yml
     with:
       run_ui: false
@@ -124,6 +241,8 @@ jobs:
       run_release_contracts: false
       run_installers_smoke: ${{ inputs.run_installers_smoke }}
       installers_channel: ${{ inputs.channel == 'production' && 'stable' || inputs.channel == 'dev' && 'dev' || 'preview' }}
+      installers_source: ${{ inputs.candidate_cli_version != '' && 'published-tag' || 'published-channel' }}
+      installers_ref: ${{ inputs.candidate_cli_version != '' && format('cli-v{0}', inputs.candidate_cli_version) || '' }}
       run_binary_smoke: ${{ inputs.run_binary_smoke }}
       run_cli_update_continuity: ${{ inputs.run_cli_update_continuity }}
       run_daemon_continuity: ${{ inputs.run_daemon_continuity }}

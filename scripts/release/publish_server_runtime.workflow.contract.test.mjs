@@ -27,7 +27,7 @@ test('publish-server-runtime workflow exists and does not manage deploy branches
 test('publish-server-runtime workflow publishes rolling server-preview tag via release bot', async () => {
   const raw = await loadWorkflow('publish-server-runtime.yml');
 
-  assert.match(raw, /actions\/create-github-app-token@v1/);
+  assert.match(raw, /actions\/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547/);
   assert.match(raw, /RELEASE_BOT_APP_ID/);
   assert.match(raw, /RELEASE_BOT_PRIVATE_KEY/);
 
@@ -58,20 +58,36 @@ test('publish-server-runtime embeds build feature policy defaults by channel', a
   assert.doesNotMatch(raw, /inputs\.channel\s*==\s*'publicdev'/);
 });
 
+test('publish-server-runtime installs cross-target optional native packages for the candidate build', async () => {
+  const workflow = YAML.parse(await loadWorkflow('publish-server-runtime.yml'));
+  const install = workflow.jobs.build_candidate.steps.find(
+    (step) => step.uses === './.github/actions/install-yarn-dependencies',
+  );
+
+  assert.match(install.with.args, /(?:^|\s)--ignore-platform(?:\s|$)/);
+});
+
 test('publish-server-runtime isolates unprivileged candidate bytes from trusted signing and publishing', async () => {
   const raw = await loadWorkflow('publish-server-runtime.yml');
-  const candidate = raw.match(/\n  build_candidate:[\s\S]*?\n  finalize_publish:/)?.[0] ?? '';
-  const finalize = raw.match(/\n  finalize_publish:[\s\S]*$/)?.[0] ?? '';
+  const workflow = YAML.parse(raw);
+  const candidate = JSON.stringify(workflow.jobs.build_candidate);
+  const darwin = JSON.stringify(workflow.jobs.finalize_darwin);
+  const finalize = JSON.stringify(workflow.jobs.finalize_publish);
 
-  assert.match(candidate, /permissions:\s*\n\s*contents:\s*read/);
-  assert.match(candidate, /persist-credentials:\s*false/);
-  assert.match(candidate, /repository:\s*\$\{\{\s*job\.workflow_repository\s*\}\}/);
+  assert.equal(workflow.jobs.build_candidate.permissions.contents, 'read');
+  assert.match(candidate, /"persist-credentials":false/);
+  assert.match(candidate, /job\.workflow_repository/);
   assert.match(candidate, /--phase\s+build-candidate/);
   assert.match(candidate, /actions\/upload-artifact@/);
   assert.doesNotMatch(candidate, /MINISIGN_SECRET_KEY|RELEASE_BOT_PRIVATE_KEY|create-github-app-token|environment:/);
 
-  assert.match(finalize, /repository:\s*\$\{\{\s*job\.workflow_repository\s*\}\}/);
-  assert.match(finalize, /ref:\s*\$\{\{\s*job\.workflow_sha\s*\}\}/);
+  assert.match(darwin, /job\.workflow_sha/);
+  assert.match(darwin, /setup-apple-codesigning/);
+  assert.doesNotMatch(darwin, /Checkout exact authorized candidate/);
+  assert.doesNotMatch(darwin, /"uses":"\.\/\.github\/actions\/install-yarn-dependencies"[^}]*candidate/);
+
+  assert.match(finalize, /job\.workflow_repository/);
+  assert.match(finalize, /job\.workflow_sha/);
   assert.match(finalize, /--phase\s+finalize-candidate/);
   assert.match(finalize, /--authorized-sha/);
   assert.match(finalize, /MINISIGN_SECRET_KEY/);

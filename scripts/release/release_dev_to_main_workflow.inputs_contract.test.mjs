@@ -48,7 +48,9 @@ test('release workflow uses compact grouped inputs', async () => {
 test('release workflow derives promote mode from confirm and uses compact defaults for advanced options', async () => {
   const { raw } = await loadWorkflow();
 
-  assert.match(raw, /confirm="\$\{\{ inputs\.confirm \}\}"/, 'confirm should be read as the only promotion selector');
+  assert.match(raw, /CONFIRM:\s*\$\{\{ inputs\.confirm \}\}/, 'confirm should cross the workflow boundary as environment data');
+  assert.match(raw, /confirm="\$CONFIRM"/, 'confirm should be read as the only promotion selector');
+  assert.doesNotMatch(raw, /confirm="\$\{\{ inputs\.confirm \}\}"/, 'workflow input must not be interpolated into shell source');
   assert.doesNotMatch(raw, /inputs\.promote_mode/, 'workflow should not read promote_mode input anymore');
 
   assert.doesNotMatch(raw, /inputs\.custom_checks/, 'manual release workflow should not expose custom check toggles');

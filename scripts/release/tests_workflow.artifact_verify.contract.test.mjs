@@ -11,14 +11,15 @@ async function loadWorkflow(name) {
   return readFile(join(repoRoot, '.github', 'workflows', name), 'utf8');
 }
 
-test('release-npm prepares CLI binary assets through one code-owned pipeline command', async () => {
+test('release-npm leaves signed CLI binary assets to the dedicated binary publisher', async () => {
   const raw = await loadWorkflow('release-npm.yml');
 
-  assert.match(
+  assert.doesNotMatch(
     raw,
-    /node scripts\/pipeline\/run\.mjs release-prepare-binary-assets[\s\S]*?--product cli[\s\S]*?--version "\$\{\{ steps\.meta\.outputs\.cli_version \}\}"[\s\S]*?--skip-smoke/,
-    'release-npm should delegate CLI build/manifest/verification to one pipeline command',
+    /release-prepare-binary-assets|MINISIGN_|bootstrap-minisign/,
+    'npm package preparation must not sign or prepare the separately published CLI binary release',
   );
+  assert.match(raw, /node scripts\/pipeline\/run\.mjs npm-release[\s\S]*?--mode pack/);
   assert.doesNotMatch(
     raw,
     /node scripts\/pipeline\/run\.mjs release-build-cli-binaries/,

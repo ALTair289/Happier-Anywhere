@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
@@ -138,7 +139,7 @@ test('release workflow delegates deploy plan computation to pipeline script', as
 
   assert.match(
     raw,
-    /- name: Compute deploy plan[\s\S]*?node scripts\/pipeline\/run\.mjs release-compute-deploy-plan/,
+    /- name: Compute deploy plan[\s\S]*?node \.\.\/scripts\/pipeline\/release\/compute-deploy-plan\.mjs/,
     'release.yml should delegate deploy plan computation to compute-deploy-plan.mjs',
   );
   assert.doesNotMatch(raw, /plan_one\(\)/, 'release.yml should not embed deploy plan logic in inline bash');
@@ -183,7 +184,7 @@ test('release-npm embeds build feature policy defaults by channel', async () => 
 test('release-npm is compatible with npm trusted publishing (OIDC)', async () => {
   const raw = await loadWorkflow('release-npm.yml');
 
-  assert.match(raw, /node scripts\/pipeline\/run\.mjs npm-publish/, 'release-npm should delegate npm publishing to the pipeline command');
+  assert.match(raw, /node scripts\/pipeline\/npm\/publish-tarball\.mjs/, 'trusted release control should invoke the canonical npm tarball publisher directly');
   assert.match(raw, /node scripts\/pipeline\/run\.mjs npm-release/, 'release-npm should delegate npm pack preparation to the pipeline command');
   assert.doesNotMatch(raw, /npm pack --ignore-scripts --json/, 'release-npm should not embed npm pack json parsing boilerplate (use release-packages.mjs)');
   assert.doesNotMatch(raw, /npm install --global npm@11/, 'release-npm should avoid global npm installs (use pinned npm via npx inside the pipeline)');
@@ -198,15 +199,10 @@ test('release-npm installs Sapling before cli integration tests', async () => {
     /release:[\s\S]*?runs-on:\s*ubuntu-22\.04/,
     'release-npm should pin ubuntu-22.04 because the Sapling installer is Ubuntu 22.04 specific',
   );
-  assert.match(
-    raw,
-    /- name: Install minisign \(signing \+ verification\)[\s\S]*?uses:\s*\.\/\.github\/actions\/bootstrap-minisign/,
-    'release-npm should bootstrap minisign via the pinned action instead of apt repositories',
-  );
   assert.doesNotMatch(
     raw,
-    /- name: Install minisign \(signing \+ verification\)[\s\S]*?apt-get install -y minisign/,
-    'release-npm should not rely on apt minisign availability',
+    /MINISIGN_|bootstrap-minisign|release-prepare-binary-assets/,
+    'npm candidate packing must not cross the binary-signing trust boundary',
   );
   assert.match(
     raw,
@@ -231,7 +227,7 @@ test('release-npm derives unique preview prerelease versions from base versions'
   assert.doesNotMatch(raw, /packages\/server\//, 'release-npm must not reference removed packages/server');
   assert.match(raw, /dir="packages\/relay-server"/);
   assert.match(raw, /SERVER_RUNNER_DIR:\s*\$\{\{ steps\.server_runner\.outputs\.dir \}\}/);
-  assert.match(raw, /yarn --cwd [^\n]*steps\.server_runner\.outputs\.dir[^\n]* test/);
+  assert.match(raw, /SERVER_RUNNER_DIR:\s*\$\{\{ steps\.server_runner\.outputs\.dir \}\}[\s\S]*?yarn --cwd "\$\{SERVER_RUNNER_DIR\}" test/);
   assert.match(raw, /node scripts\/pipeline\/run\.mjs npm-release[\s\S]*?--server-runner-dir "\$\{SERVER_RUNNER_DIR\}"/);
 
   const script = await loadFile('scripts/pipeline/npm/set-preview-versions.mjs');
@@ -243,8 +239,9 @@ test('stack version bumps use shared bump-version script across release workflow
   const orchestrator = await loadWorkflow('release.yml');
   const releaseNpm = await loadWorkflow('release-npm.yml');
 
-  assert.match(orchestrator, /node scripts\/pipeline\/run\.mjs release-bump-versions-dev/);
-  assert.match(orchestrator, /--bump-stack "\$\{\{ needs\.plan\.outputs\.bump_stack \}\}"/);
+  assert.match(orchestrator, /node \.\.\/scripts\/pipeline\/release\/bump-versions-dev\.mjs/);
+  assert.match(orchestrator, /BUMP_STACK:\s*\$\{\{ needs\.plan\.outputs\.bump_stack \}\}/);
+  assert.match(orchestrator, /--bump-stack "\$BUMP_STACK"/);
   assert.doesNotMatch(orchestrator, /node scripts\/release\/bump-version\.mjs --component stack/, 'release.yml should delegate version bumps to the pipeline script');
   assert.doesNotMatch(orchestrator, /BUMP="\$\{\{ needs\.plan\.outputs\.bump_stack \}\}" node - <<'NODE'/);
 
@@ -289,12 +286,31 @@ test('promote-ui native_submit uses the shared Expo submit script (handles previ
   assert.match(script, /::warning::Expo submit failed for/);
 });
 
-test('promote-ui preview OTA updates are non-interactive and provide an update message', async () => {
+test('promote-ui prepares OTA bytes without secrets and publishes the exact bound artifacts with trusted control', async () => {
   const raw = await loadWorkflow('promote-ui.yml');
-  assert.match(raw, /- name: Expo OTA update/);
-  assert.match(raw, /node scripts\/pipeline\/run\.mjs ui-mobile-release/);
-  assert.match(raw, /--action "\$\{\{ inputs\.expo_action \}\}"/);
-  assert.match(raw, /--platform all/);
+  const workflow = parse(raw);
+  const validate = workflow?.jobs?.validate_candidate;
+  const promote = workflow?.jobs?.promote;
+  const validateText = JSON.stringify(validate);
+  const promoteText = JSON.stringify(promote);
+
+  assert.ok(validate, 'promote-ui must validate the exact candidate in a separate job');
+  assert.equal(validate.environment, undefined, 'candidate OTA preparation must not receive release secrets');
+  assert.doesNotMatch(validateText, /EXPO_TOKEN|RELEASE_BOT_PRIVATE_KEY/);
+  assert.match(validateText, /--phase prepare/);
+  assert.match(validateText, /--platform android/);
+  assert.match(validateText, /--platform ios/);
+  assert.match(validateText, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/);
+
+  assert.equal(promote?.environment, 'release-shared');
+  assert.match(promoteText, /actions\/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093/);
+  assert.match(promoteText, /--phase publish/);
+  assert.match(promoteText, /--expected-source-sha/);
+  assert.match(promoteText, /EXPO_TOKEN/);
+  assert.doesNotMatch(promoteText, /ui-mobile-release/);
+  for (const step of promote.steps ?? []) {
+    assert.doesNotMatch(String(step?.run ?? ''), /\$\{\{\s*inputs\.expo_update_message\s*\}\}/);
+  }
 
   const script = await loadFile('scripts/pipeline/expo/ota-update.mjs');
   assert.match(script, /eas-cli@\$\{easCliVersion\}/);
@@ -302,6 +318,8 @@ test('promote-ui preview OTA updates are non-interactive and provide an update m
   assert.match(script, /--channel/);
   assert.match(script, /resolveExpoInteractivity/);
   assert.match(script, /--message/);
+  assert.match(script, /--skip-bundler/);
+  assert.match(script, /--input-dir/);
 });
 
 test('release workflow can pass a top-level release message down to promote-ui for Expo updates', async () => {

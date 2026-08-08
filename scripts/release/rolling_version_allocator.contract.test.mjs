@@ -13,6 +13,49 @@ function git(cwd, args) {
   execFileSync('git', args, { cwd, stdio: 'ignore' });
 }
 
+test('exact finalized candidate versions reject non-canonical and wrong-channel identities', async () => {
+  const { validateExactRollingPublishVersion } = await import('../pipeline/release/lib/rolling-version-allocation.mjs');
+
+  assert.equal(validateExactRollingPublishVersion({
+    productId: 'cli',
+    channel: 'publicdev',
+    baseVersion: '0.2.10',
+    version: '0.2.10-dev.41',
+  }), '0.2.10-dev.41');
+  assert.equal(validateExactRollingPublishVersion({
+    productId: 'server',
+    channel: 'preview',
+    baseVersion: '0.2.10',
+    version: '0.2.10-preview.42.2',
+  }), '0.2.10-preview.42.2');
+  assert.equal(validateExactRollingPublishVersion({
+    productId: 'ui-web',
+    channel: 'stable',
+    baseVersion: '1.2.3',
+    version: '1.2.3',
+  }), '1.2.3');
+
+  for (const { channel, version } of [
+    { channel: 'publicdev', version: '0.2.10-dev.01' },
+    { channel: 'publicdev', version: '0.2.10-dev.1.01' },
+    { channel: 'publicdev', version: '0.2.10-preview.1' },
+    { channel: 'preview', version: '0.2.10-preview.1; touch /tmp/pwned' },
+  ]) {
+    assert.throws(() => validateExactRollingPublishVersion({
+      productId: 'cli',
+      channel,
+      baseVersion: '0.2.10',
+      version,
+    }), /must match/);
+  }
+  assert.throws(() => validateExactRollingPublishVersion({
+    productId: 'cli',
+    channel: 'stable',
+    baseVersion: '01.2.3',
+    version: '01.2.3',
+  }), /Invalid version/);
+});
+
 test('rolling version allocation uses the max published GitHub or npm version for a product channel', async () => {
   const { resolveRollingPublishVersion } = await import('../pipeline/release/lib/rolling-version-allocation.mjs');
 

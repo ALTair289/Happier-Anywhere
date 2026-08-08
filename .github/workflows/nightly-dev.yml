@@ -2,8 +2,6 @@ name: NIGHTLY — Dev Releases
 
 on:
   schedule:
-    # Nightly dev channel builds from the default branch (dev). Avoid minute 0 because GitHub
-    # Actions scheduled workflows are more likely to be delayed or dropped at the top of the hour.
     - cron: "17 2 * * *"
   workflow_dispatch:
     inputs:
@@ -28,52 +26,146 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare_release_candidate:
+    name: Prepare exact nightly candidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+    steps:
+      - name: Checkout requested nightly source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || 'dev' }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Bind exact nightly source SHA
+        id: identity
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          test "$(printf '%s' "$source_sha" | wc -c | tr -d ' ')" = "40"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
   cli:
-    name: CLI binaries (dev)
+    name: CLI immutable candidate (dev)
+    needs: [prepare_release_candidate]
     uses: ./.github/workflows/publish-cli-binaries.yml
     secrets: inherit
     with:
       channel: dev
-      source_ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || 'dev' }}
+      source_ref: ${{ needs.prepare_release_candidate.outputs.source_sha }}
+      publish_rolling: false
       allow_stable: false
       release_message: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_message || format('Nightly dev build (run {0})', github.run_id) }}
 
   hstack:
-    name: HStack binaries (dev)
+    name: HStack immutable candidate (dev)
+    needs: [prepare_release_candidate]
     uses: ./.github/workflows/publish-hstack-binaries.yml
     secrets: inherit
     with:
       channel: dev
-      source_ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || 'dev' }}
+      source_ref: ${{ needs.prepare_release_candidate.outputs.source_sha }}
+      publish_rolling: false
       allow_stable: false
       release_message: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_message || format('Nightly dev build (run {0})', github.run_id) }}
 
   server_runtime:
-    name: Server runtime (dev)
+    name: Server immutable candidate (dev)
+    needs: [prepare_release_candidate]
     uses: ./.github/workflows/publish-server-runtime.yml
     secrets: inherit
     with:
       channel: dev
-      source_ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || 'dev' }}
+      source_ref: ${{ needs.prepare_release_candidate.outputs.source_sha }}
+      authorized_sha: ${{ needs.prepare_release_candidate.outputs.source_sha }}
+      publish_rolling: false
       allow_stable: false
       release_message: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_message || format('Nightly dev build (run {0})', github.run_id) }}
 
   ui_web:
-    name: UI web bundle (dev)
+    name: UI web immutable candidate (dev)
+    needs: [prepare_release_candidate]
     uses: ./.github/workflows/publish-ui-web.yml
     secrets: inherit
     with:
       channel: dev
-      source_ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || 'dev' }}
+      source_ref: ${{ needs.prepare_release_candidate.outputs.source_sha }}
+      publish_rolling: false
+      allow_stable: false
+      release_message: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_message || format('Nightly dev build (run {0})', github.run_id) }}
+
+  release_verify:
+    name: Verify exact immutable nightly candidates
+    needs: [prepare_release_candidate, cli, hstack, server_runtime, ui_web]
+    uses: ./.github/workflows/release-verify.yml
+    secrets: inherit
+    with:
+      channel: dev
+      candidate_source_sha: ${{ needs.prepare_release_candidate.outputs.source_sha }}
+      candidate_cli_version: ${{ needs.cli.outputs.version }}
+      candidate_stack_version: ${{ needs.hstack.outputs.version }}
+      candidate_server_version: ${{ needs.server_runtime.outputs.version }}
+      candidate_ui_web_version: ${{ needs.ui_web.outputs.version }}
+      run_installers_smoke: true
+      run_binary_smoke: true
+      run_cli_update_continuity: true
+      run_daemon_continuity: true
+      run_session_continuity: true
+
+  promote_server:
+    name: Promote verified server candidate
+    needs: [server_runtime, release_verify]
+    uses: ./.github/workflows/publish-server-runtime.yml
+    secrets: inherit
+    with:
+      channel: dev
+      retry_version: ${{ needs.server_runtime.outputs.version }}
+      allow_stable: false
+      release_message: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_message || format('Nightly dev build (run {0})', github.run_id) }}
+
+  promote_hstack:
+    name: Promote verified HStack candidate
+    needs: [hstack, promote_server]
+    uses: ./.github/workflows/publish-hstack-binaries.yml
+    secrets: inherit
+    with:
+      channel: dev
+      retry_version: ${{ needs.hstack.outputs.version }}
+      allow_stable: false
+      release_message: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_message || format('Nightly dev build (run {0})', github.run_id) }}
+
+  promote_cli:
+    name: Promote verified CLI candidate
+    needs: [cli, promote_hstack]
+    uses: ./.github/workflows/publish-cli-binaries.yml
+    secrets: inherit
+    with:
+      channel: dev
+      retry_version: ${{ needs.cli.outputs.version }}
+      allow_stable: false
+      release_message: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_message || format('Nightly dev build (run {0})', github.run_id) }}
+
+  promote_ui_web:
+    name: Promote verified UI web candidate
+    needs: [ui_web, promote_cli]
+    uses: ./.github/workflows/publish-ui-web.yml
+    secrets: inherit
+    with:
+      channel: dev
+      retry_version: ${{ needs.ui_web.outputs.version }}
       allow_stable: false
       release_message: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_message || format('Nightly dev build (run {0})', github.run_id) }}
 
   ui_mobile:
     name: UI mobile (dev)
+    needs: [prepare_release_candidate, release_verify]
     uses: ./.github/workflows/publish-ui-mobile-dev.yml
     secrets: inherit
     with:
-      source_ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || 'dev' }}
+      source_ref: ${{ needs.prepare_release_candidate.outputs.source_sha }}
       publish_ota: true
       publish_android_apk: true
       submit_ios_testflight: true
@@ -82,35 +174,58 @@ jobs:
 
   ui_desktop:
     name: UI desktop (Tauri) (dev)
+    needs: [prepare_release_candidate, release_verify]
     uses: ./.github/workflows/build-tauri.yml
     secrets: inherit
     with:
       environment: dev
-      source_ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || 'dev' }}
+      source_ref: ${{ needs.prepare_release_candidate.outputs.source_sha }}
       publish_release: true
 
   docker:
     name: Docker images (dev)
-    needs: [cli, server_runtime, ui_web]
+    needs: [prepare_release_candidate, cli, server_runtime, promote_ui_web]
     uses: ./.github/workflows/publish-docker.yml
     secrets: inherit
     with:
       channel: dev
-      source_ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || 'dev' }}
+      source_ref: ${{ needs.prepare_release_candidate.outputs.source_sha }}
+      authorized_sha: ${{ needs.prepare_release_candidate.outputs.source_sha }}
+      server_version: ${{ needs.server_runtime.outputs.version }}
+      cli_version: ${{ needs.cli.outputs.version }}
       push_latest: true
       registries: dockerhub,ghcr
       build_relay: true
       build_dev_box: true
 
-  release_verify:
-    name: Release Verification (dev)
-    needs: [cli, hstack, server_runtime, ui_web, ui_mobile, ui_desktop, docker]
-    uses: ./.github/workflows/release-verify.yml
-    secrets: inherit
-    with:
-      channel: dev
-      run_installers_smoke: true
-      run_binary_smoke: true
-      run_cli_update_continuity: true
-      run_daemon_continuity: true
-      run_session_continuity: true
+  verify_promoted:
+    name: Verify promoted nightly references
+    needs: [prepare_release_candidate, ui_mobile, ui_desktop, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify rolling references bind the candidate SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EXPECTED_SHA: ${{ needs.prepare_release_candidate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          resolve_tag_commit() {
+            tag="$1"
+            read -r object_type object_sha <<EOF
+          $(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.type + " " + .object.sha')
+          EOF
+            while [ "$object_type" = "tag" ]; do
+              read -r object_type object_sha <<EOF
+          $(gh api "repos/${GH_REPO}/git/tags/${object_sha}" --jq '.object.type + " " + .object.sha')
+          EOF
+            done
+            test "$object_type" = "commit"
+            printf '%s\n' "$object_sha"
+          }
+          for tag in server-dev stack-dev cli-dev ui-web-dev; do
+            actual="$(resolve_tag_commit "$tag")"
+            test "$actual" = "$EXPECTED_SHA"
+          done

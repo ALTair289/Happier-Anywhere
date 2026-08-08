@@ -28,11 +28,24 @@ on:
         default: ""
         type: string
       retry_version:
-        description: "Existing immutable version to re-promote after an interrupted rolling upload"
+        description: "Recovery — exact immutable version to re-project to the rolling channel"
         required: false
         default: ""
         type: string
+      authorized_sha:
+        description: "Caller-bound source SHA"
+        required: false
+        default: ""
+        type: string
+      publish_rolling:
+        description: "Promote the immutable version to the user-consumed rolling channel"
+        required: true
+        default: true
+        type: boolean
   workflow_call:
+    outputs:
+      version:
+        value: ${{ jobs.publish.outputs.version }}
     inputs:
       channel:
         required: true
@@ -53,6 +66,14 @@ on:
         required: false
         default: ""
         type: string
+      authorized_sha:
+        required: false
+        default: ""
+        type: string
+      publish_rolling:
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -62,14 +83,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  trusted_ref_guard:
+    name: Trust called workflow repository and ref
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Reject cross-repository or untrusted workflow control
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          CALLER_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_REF: ${{ job.workflow_ref }}
+        run: |
+          set -euo pipefail
+          case "$CHANNEL" in
+            stable|preview|dev) ;;
+            *) echo "Noncanonical UI-web publisher channel: $CHANNEL" >&2; exit 1 ;;
+          esac
+          test "$CALLER_REPOSITORY" = "$WORKFLOW_REPOSITORY"
+          case "$WORKFLOW_REF" in
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-ui-web.yml@refs/heads/dev"|\
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-ui-web.yml@refs/heads/preview"|\
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-ui-web.yml@refs/heads/main") ;;
+            *) echo "Untrusted UI-web publisher control ref: $WORKFLOW_REF" >&2; exit 1 ;;
+          esac
+
   release_actor_guard:
     name: Release actor guard
+    needs: [trusted_ref_guard]
     permissions:
       contents: read
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
       - name: Authorize release actor
         uses: ./.github/actions/release-actor-guard
         with:
@@ -77,13 +130,19 @@ jobs:
           app_id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private_key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 
-  publish:
-    needs: [release_actor_guard]
+  prepare:
     if: ${{ inputs.retry_version == '' }}
+    needs: [release_actor_guard]
     runs-on: ubuntu-latest
-    environment: release-shared
-    env:
-      EXPO_UNSTABLE_WEB_MODAL: "1"
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      base_version: ${{ steps.candidate_base.outputs.base_version }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      app_env: ${{ steps.channel_meta.outputs.app_env }}
+      expo_updates_channel: ${{ steps.channel_meta.outputs.expo_updates_channel }}
+      embedded_policy_env: ${{ steps.channel_meta.outputs.embedded_policy_env }}
     steps:
       - name: Enforce stable publishing gate
         if: ${{ inputs.channel == 'stable' && inputs.allow_stable != true }}
@@ -91,13 +150,16 @@ jobs:
           echo "Stable ui web bundle publishing is disabled. Re-run with allow_stable=true if intentional." >&2
           exit 1
 
-      - name: Checkout workflow repo
-        uses: actions/checkout@v4
+      - name: Checkout trusted workflow control bytes
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22.x
           cache: yarn
@@ -105,30 +167,117 @@ jobs:
 
       - name: Resolve channel metadata
         id: channel_meta
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          REQUESTED_SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
           node scripts/pipeline/release/resolve-public-release-channel-meta.mjs \
-            --channel "${{ inputs.channel }}" \
-            --source-ref "${{ inputs.source_ref }}" \
+            --channel "$CHANNEL" \
+            --source-ref "$REQUESTED_SOURCE_REF" \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Create GitHub App token
-        id: app_token
-        uses: actions/create-github-app-token@v1
+      - name: Checkout exact source as inert data
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-
-      - name: Checkout source ref
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.channel_meta.outputs.source_ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ inputs.authorized_sha != '' && inputs.authorized_sha || steps.channel_meta.outputs.source_ref }}
+          path: .candidate-source
           fetch-depth: 0
-          token: ${{ steps.app_token.outputs.token }}
           persist-credentials: false
+
+      - name: Freeze source SHA
+        id: source
+        run: |
+          set -euo pipefail
+          echo "source_sha=$(git -C .candidate-source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce caller-authorized source SHA
+        if: ${{ inputs.authorized_sha != '' }}
+        env:
+          AUTHORIZED_SHA: ${{ inputs.authorized_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .candidate-source rev-parse HEAD)" = "$AUTHORIZED_SHA"
+
+      - name: Read candidate base version as data
+        id: candidate_base
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import { normalizeRollingBaseVersion } from "./scripts/pipeline/release/lib/rolling-version-allocation.mjs";
+            const value = JSON.parse(fs.readFileSync(".candidate-source/apps/ui/package.json", "utf8")).version;
+            if (typeof value !== "string" || normalizeRollingBaseVersion(value) !== value) {
+              throw new Error("Candidate UI package version must be exact canonical base semver");
+            }
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_version=${value}\n`);
+          '
+
+      - name: Allocate exact UI-web version
+        id: version
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          ALLOW_STABLE: ${{ inputs.allow_stable }}
+          CANDIDATE_BASE_VERSION: ${{ steps.candidate_base.outputs.base_version }}
+        run: |
+          set -euo pipefail
+          node scripts/pipeline/release/publish-ui-web.mjs \
+            --channel "$CHANNEL" \
+            --allow-stable "$ALLOW_STABLE" \
+            --base-version "$CANDIDATE_BASE_VERSION" \
+            --resolve-version-only \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Package exact candidate source as inert transport data
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git -C .candidate-source archive \
+            --format=tar.gz \
+            --output "${RUNNER_TEMP}/ui-web-source-${SOURCE_SHA}.tar.gz" \
+            HEAD
+
+      - name: Upload exact candidate source transport
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ui-web-source-${{ steps.source.outputs.source_sha }}
+          path: ${{ runner.temp }}/ui-web-source-${{ steps.source.outputs.source_sha }}.tar.gz
+          if-no-files-found: error
+          retention-days: 2
+
+  build_candidate:
+    name: Build unsigned UI-web candidate
+    if: ${{ inputs.retry_version == '' }}
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      EXPO_UNSTABLE_WEB_MODAL: "1"
+    steps:
+      - name: Download exact candidate source transport
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ui-web-source-${{ needs.prepare.outputs.source_sha }}
+          path: ${{ runner.temp }}/ui-web-source
+
+      - name: Materialize candidate source without repository authority
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/ui-web-source/ui-web-source-${SOURCE_SHA}.tar.gz"
+          test -f "$archive"
+          tar -xzf "$archive" -C "$GITHUB_WORKSPACE"
+          test -f "$GITHUB_WORKSPACE/scripts/pipeline/run.mjs"
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.x
+          cache: yarn
+          cache-dependency-path: yarn.lock
 
       - name: Enable Corepack (Yarn)
         run: |
@@ -136,16 +285,13 @@ jobs:
           corepack enable
           corepack prepare yarn@1.22.22 --activate
 
-      - name: Install minisign (signing + verification)
-        uses: ./.github/actions/bootstrap-minisign
-
       - name: Install dependencies
         env:
           YARN_PRODUCTION: "false"
           npm_config_production: "false"
-          APP_ENV: ${{ steps.channel_meta.outputs.app_env }}
-          EXPO_UPDATES_CHANNEL: ${{ steps.channel_meta.outputs.expo_updates_channel }}
-          HAPPIER_EMBEDDED_POLICY_ENV: ${{ steps.channel_meta.outputs.embedded_policy_env }}
+          APP_ENV: ${{ needs.prepare.outputs.app_env }}
+          EXPO_UPDATES_CHANNEL: ${{ needs.prepare.outputs.expo_updates_channel }}
+          HAPPIER_EMBEDDED_POLICY_ENV: ${{ needs.prepare.outputs.embedded_policy_env }}
         uses: ./.github/actions/install-yarn-dependencies
         with:
           args: --frozen-lockfile --ignore-engines
@@ -161,9 +307,136 @@ jobs:
           node scripts/pipeline/release/release-notes/build-release-notes-assets.mjs \
             --out-dir "dist/release-notes-assets"
 
-      - name: Create release notes assets GitHub App token
+      - name: Build unsigned UI-web archive
+        env:
+          MINISIGN_SECRET_KEY: ""
+          MINISIGN_PASSPHRASE: ""
+          APP_ENV: ${{ needs.prepare.outputs.app_env }}
+          EXPO_UPDATES_CHANNEL: ${{ needs.prepare.outputs.expo_updates_channel }}
+          HAPPIER_EMBEDDED_POLICY_ENV: ${{ needs.prepare.outputs.embedded_policy_env }}
+          CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          EXPO_PUBLIC_SENTRY_RELEASE: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/pipeline/release/build-ui-web-bundle.mjs \
+            --channel "$CHANNEL" \
+            --version "$VERSION"
+
+      - name: Assemble opaque UI-web candidate handoff
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="dist/release-assets/ui-web/happier-ui-web-v${VERSION}-web-any.tar.gz"
+          test -f "$archive"
+          test "$(find dist/release-assets/ui-web -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')" = "1"
+          rm -rf dist/ui-web-candidate
+          mkdir -p dist/ui-web-candidate/ui-web dist/ui-web-candidate/release-notes-assets
+          cp "$archive" dist/ui-web-candidate/ui-web/
+          cp -R dist/release-notes-assets/. dist/ui-web-candidate/release-notes-assets/
+
+      - name: Upload opaque UI-web candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ui-web-candidate-${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.source_sha }}
+          path: dist/ui-web-candidate
+          if-no-files-found: error
+          retention-days: 2
+
+  publish:
+    if: ${{ inputs.retry_version == '' }}
+    needs: [prepare, build_candidate]
+    runs-on: ubuntu-latest
+    environment: release-shared
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout trusted workflow control bytes
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.x
+          cache: yarn
+          cache-dependency-path: yarn.lock
+
+      - name: Enable Corepack (Yarn)
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+
+      - name: Install minisign (signing + verification)
+        uses: ./.github/actions/bootstrap-minisign
+
+      - name: Install trusted workflow control dependencies
+        env:
+          YARN_PRODUCTION: "false"
+          npm_config_production: "false"
+        uses: ./.github/actions/install-yarn-dependencies
+        with:
+          args: --frozen-lockfile --ignore-engines
+
+      - name: Download exact opaque UI-web candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ui-web-candidate-${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.source_sha }}
+          path: dist/ui-web-candidate
+
+      - name: Materialize candidate data for trusted publishers
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          source_archive="dist/ui-web-candidate/ui-web/happier-ui-web-v${VERSION}-web-any.tar.gz"
+          test -f "$source_archive"
+          test "$(find dist/ui-web-candidate/ui-web -maxdepth 1 -type f | wc -l | tr -d ' ')" = "1"
+          test -d dist/ui-web-candidate/release-notes-assets
+          rm -rf dist/release-assets/ui-web dist/release-notes-assets
+          mkdir -p dist/release-assets/ui-web dist/release-notes-assets
+          cp "$source_archive" dist/release-assets/ui-web/
+          cp -R dist/ui-web-candidate/release-notes-assets/. dist/release-notes-assets/
+
+      - name: Upload exact UI-web source maps to Sentry
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_RELEASE: ${{ needs.prepare.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          source_archive="dist/release-assets/ui-web/happier-ui-web-v${VERSION}-web-any.tar.gz"
+          extract_dir="${RUNNER_TEMP}/ui-web-sourcemaps"
+          bundle_dir="${extract_dir}/happier-ui-web-v${VERSION}-web-any"
+          rm -rf "$extract_dir"
+          node scripts/pipeline/release/node-archive.mjs \
+            --extract-archive-path "$source_archive" \
+            --extract-dir "$extract_dir"
+          node scripts/pipeline/expo/sentry-upload-sourcemaps.mjs \
+            --ui-dir "$GITHUB_WORKSPACE/apps/ui" \
+            --dist-dir "$bundle_dir"
+
+      - name: Create GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Create release-notes assets token
         id: release_notes_assets_token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
         with:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
@@ -183,25 +456,34 @@ jobs:
             --tag "release-notes"
 
       - name: Publish UI web bundle (pipeline)
+        id: publish
         env:
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
           GH_REPO: ${{ github.repository }}
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_PASSPHRASE: ${{ secrets.MINISIGN_PASSPHRASE }}
-          APP_ENV: ${{ steps.channel_meta.outputs.app_env }}
-          EXPO_UPDATES_CHANNEL: ${{ steps.channel_meta.outputs.expo_updates_channel }}
-          HAPPIER_EMBEDDED_POLICY_ENV: ${{ steps.channel_meta.outputs.embedded_policy_env }}
+          HAPPIER_EMBEDDED_POLICY_ENV: ${{ needs.prepare.outputs.embedded_policy_env }}
+          CHANNEL: ${{ inputs.channel }}
+          ALLOW_STABLE: ${{ inputs.allow_stable }}
+          RELEASE_MESSAGE: ${{ inputs.release_message }}
+          PUBLISH_PHASE: ${{ inputs.publish_rolling == false && 'publish-immutable' || 'publish' }}
+          BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          AUTHORIZED_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
-          node scripts/pipeline/run.mjs publish-ui-web \
-            --channel "${{ inputs.channel }}" \
-            --allow-stable "${{ inputs.allow_stable }}" \
-            --release-message "${{ inputs.release_message }}" \
+          node scripts/pipeline/release/publish-ui-web.mjs \
+            --channel "$CHANNEL" \
+            --allow-stable "$ALLOW_STABLE" \
+            --release-message "$RELEASE_MESSAGE" \
+            --phase "$PUBLISH_PHASE" \
+            --base-version "$BASE_VERSION" \
+            --version "$VERSION" \
+            --authorized-sha "$AUTHORIZED_SHA" \
+            --prepared-artifacts \
+            --github-output "$GITHUB_OUTPUT" \
             --run-contracts "true" \
             --check-installers "true"
-
-    permissions:
-      contents: write
 
   promote_existing:
     name: Re-promote exact immutable UI web version after interrupted rolling upload
@@ -215,18 +497,28 @@ jobs:
       - name: Enforce stable publishing gate
         if: ${{ inputs.channel == 'stable' && inputs.allow_stable != true }}
         run: exit 1
-      - name: Checkout workflow control bytes
-        uses: actions/checkout@v4
+      - name: Checkout trusted workflow control bytes
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           fetch-depth: 1
           persist-credentials: false
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22.x
+          cache: yarn
+          cache-dependency-path: yarn.lock
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install dependencies
+        uses: ./.github/actions/install-yarn-dependencies
+        with:
+          args: --frozen-lockfile --ignore-engines
       - name: Create narrowly scoped publish token
         id: app_token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
         with:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
@@ -250,10 +542,14 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RETRY_VERSION: ${{ inputs.retry_version }}
           AUTHORIZED_SHA: ${{ steps.source.outputs.authorized_sha }}
+          CHANNEL: ${{ inputs.channel }}
+          ALLOW_STABLE: ${{ inputs.allow_stable }}
+          RELEASE_MESSAGE: ${{ inputs.release_message }}
         run: |
+          set -euo pipefail
           node scripts/pipeline/release/publish-ui-web.mjs \
-            --phase promote-rolling --channel "${{ inputs.channel }}" \
-            --allow-stable "${{ inputs.allow_stable }}" \
+            --phase promote-rolling --channel "$CHANNEL" \
+            --allow-stable "$ALLOW_STABLE" \
             --version "$RETRY_VERSION" --authorized-sha "$AUTHORIZED_SHA" \
-            --release-message "${{ inputs.release_message }}" \
+            --release-message "$RELEASE_MESSAGE" \
             --run-contracts false --check-installers false

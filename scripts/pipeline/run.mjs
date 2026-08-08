@@ -806,6 +806,16 @@ function runTauriBuildUpdaterArtifacts({ repoRoot, env, args, dryRun }) {
 /**
  * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
  */
+function runTauriBundleCandidate({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'tauri', 'bundle-candidate.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  execFileSync(process.execPath, fullArgs, { cwd: repoRoot, env, stdio: 'inherit' });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
 function runTauriNotarizeMacosArtifacts({ repoRoot, env, args, dryRun }) {
   const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'tauri', 'notarize-macos-artifacts.mjs');
   const fullArgs = [scriptPath, ...args];
@@ -833,6 +843,16 @@ function runTauriCollectUpdaterArtifacts({ repoRoot, env, args, dryRun }) {
     env,
     stdio: 'inherit',
   });
+}
+
+/**
+ * @param {{ repoRoot: string; env: Record<string, string>; args: string[]; dryRun: boolean }} opts
+ */
+function runTauriSignUpdaterArtifacts({ repoRoot, env, args, dryRun }) {
+  const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'tauri', 'sign-updater-artifacts.mjs');
+  const fullArgs = [scriptPath, ...args];
+  if (dryRun) console.log(`[pipeline] exec: node ${fullArgs.map((a) => JSON.stringify(a)).join(' ')}`);
+  execFileSync(process.execPath, fullArgs, { cwd: repoRoot, env, stdio: 'inherit' });
 }
 
 /**
@@ -1072,8 +1092,10 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
       subcommand !== 'tauri-prepare-assets' &&
       subcommand !== 'tauri-validate-updater-pubkey' &&
       subcommand !== 'tauri-build-updater-artifacts' &&
+      subcommand !== 'tauri-bundle-candidate' &&
       subcommand !== 'tauri-notarize-macos-artifacts' &&
       subcommand !== 'tauri-collect-updater-artifacts' &&
+      subcommand !== 'tauri-sign-updater-artifacts' &&
       subcommand !== 'testing-create-auth-credentials' &&
       subcommand !== 'secrets-import' &&
         subcommand !== 'docker-publish' &&
@@ -3306,6 +3328,35 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
       return;
     }
 
+    if (subcommand === 'tauri-bundle-candidate') {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          mode: { type: 'string' },
+          'platform-key': { type: 'string' },
+          'source-sha': { type: 'string', default: '' },
+          'expected-source-sha': { type: 'string', default: '' },
+          environment: { type: 'string', default: '' },
+          'expected-environment': { type: 'string', default: '' },
+          'ui-version': { type: 'string', default: '' },
+          'expected-ui-version': { type: 'string', default: '' },
+          'build-version': { type: 'string', default: '' },
+          'expected-build-version': { type: 'string', default: '' },
+          'tauri-target': { type: 'string', default: '' },
+          'ui-dir': { type: 'string', default: 'apps/ui' },
+          'out-dir': { type: 'string', default: '' },
+          'candidate-dir': { type: 'string', default: '' },
+        },
+        allowPositionals: false,
+      });
+      const args = [];
+      for (const [name, value] of Object.entries(values)) {
+        if (value !== undefined && value !== '') args.push(`--${name}`, String(value));
+      }
+      runTauriBundleCandidate({ repoRoot, env: { ...process.env }, args, dryRun: false });
+      return;
+    }
+
     if (subcommand === 'tauri-build-updater-artifacts') {
       const { values } = parseArgs({
         args: rest,
@@ -3314,6 +3365,8 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           'build-version': { type: 'string', default: '' },
           'tauri-target': { type: 'string', default: '' },
           'ui-dir': { type: 'string', default: 'apps/ui' },
+          'no-bundle': { type: 'boolean', default: false },
+          'bundle-only': { type: 'boolean', default: false },
           'dry-run': { type: 'boolean', default: false },
           'secrets-source': { type: 'string', default: 'auto' },
           'keychain-service': { type: 'string', default: 'happier/pipeline' },
@@ -3332,6 +3385,8 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
       const buildVersion = String(values['build-version'] ?? '').trim();
       const tauriTarget = String(values['tauri-target'] ?? '').trim();
       const uiDir = String(values['ui-dir'] ?? '').trim() || 'apps/ui';
+      const noBundle = values['no-bundle'] === true;
+      const bundleOnly = values['bundle-only'] === true;
       const dryRun = values['dry-run'] === true;
 
       const { env, sources } = loadPipelineEnv({ repoRoot });
@@ -3370,6 +3425,8 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           ...(buildVersion ? ['--build-version', buildVersion] : []),
           ...(tauriTarget ? ['--tauri-target', tauriTarget] : []),
           ...(uiDir ? ['--ui-dir', uiDir] : []),
+          ...(noBundle ? ['--no-bundle'] : []),
+          ...(bundleOnly ? ['--bundle-only'] : []),
           ...(dryRun ? ['--dry-run'] : []),
         ],
       });
@@ -3432,6 +3489,14 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
         ],
       });
 
+      return;
+    }
+
+    if (subcommand === 'tauri-sign-updater-artifacts') {
+      const { values } = parseArgs({ args: rest, options: { 'ui-dir': { type: 'string', default: 'apps/ui' }, 'tauri-target': { type: 'string', default: '' } }, allowPositionals: false });
+      const uiDir = String(values['ui-dir'] ?? '').trim() || 'apps/ui';
+      const tauriTarget = String(values['tauri-target'] ?? '').trim();
+      runTauriSignUpdaterArtifacts({ repoRoot, env: { ...process.env }, dryRun: false, args: ['--ui-dir', uiDir, ...(tauriTarget ? ['--tauri-target', tauriTarget] : [])] });
       return;
     }
 

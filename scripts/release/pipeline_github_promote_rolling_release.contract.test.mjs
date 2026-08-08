@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -18,6 +17,7 @@ import { createHash } from 'node:crypto';
 
 const repoRoot = resolve(new URL('../..', import.meta.url).pathname);
 const scriptPath = resolve(repoRoot, 'scripts/pipeline/github/promote-rolling-release.mjs');
+const nodeArchiveScript = resolve(repoRoot, 'scripts/pipeline/release/node-archive.mjs');
 const targetSha = '0123456789abcdef0123456789abcdef01234567';
 const oldSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
@@ -35,9 +35,11 @@ function fixture({ missingRolling = false } = {}) {
   const bin = join(root, 'bin');
   const source = join(root, 'source');
   const rolling = join(root, 'rolling');
+  const staging = join(root, 'staging');
   mkdirSync(bin);
   mkdirSync(source);
   mkdirSync(rolling);
+  mkdirSync(staging);
   const archivePlatform = process.platform === 'darwin' ? 'darwin' : 'linux';
   const archiveArch = process.arch === 'arm64' ? 'arm64' : 'x64';
   const archiveName = `happier-v1.2.3-preview.4-${archivePlatform}-${archiveArch}.tar.gz`;
@@ -49,12 +51,17 @@ function fixture({ missingRolling = false } = {}) {
     join(archiveRoot, 'happier'),
     '#!/bin/sh\nprintf \'%s\\n\' \'1.2.3-preview.4\'\n',
   );
-  execFileSync('tar', ['-czf', join(source, archiveName), '-C', archiveStage, archiveStem], {
-    cwd: repoRoot,
-    stdio: 'pipe',
-  });
+  execFileSync(
+    process.execPath,
+    [
+      nodeArchiveScript,
+      '--artifact-path', join(source, archiveName),
+      '--source-path', archiveStage,
+      '--source-name', archiveStem,
+    ],
+    { cwd: repoRoot, stdio: 'pipe' },
+  );
   const archive = readFileSync(join(source, archiveName));
-  rmSync(archiveStage, { recursive: true, force: true });
   const checksumsName = 'checksums-happier-v1.2.3-preview.4.txt';
   writeFileSync(join(source, checksumsName), `${sha256(archive)}  ${archiveName}\n`);
   writeFileSync(join(source, `${checksumsName}.minisig`), 'signature\n');
@@ -65,6 +72,13 @@ function fixture({ missingRolling = false } = {}) {
   const draftState = join(root, 'draft-state');
   const publishedState = join(root, 'published-state');
   const channelRef = join(root, 'channel-ref');
+  const stagingRef = join(root, 'staging-ref');
+  const backupRef = join(root, 'backup-ref');
+  const release1Tag = join(root, 'release-1-tag');
+  const release1Name = join(root, 'release-1-name');
+  const release77Tag = join(root, 'release-77-tag');
+  const rollingReadFailureMarker = join(root, 'rolling-read-failure-marker');
+  const deleteConfirmFailureMarker = join(root, 'delete-confirm-failure-marker');
   writeFileSync(log, '');
   writeFileSync(uploadCounter, '0');
   if (missingRolling) {
@@ -72,6 +86,8 @@ function fixture({ missingRolling = false } = {}) {
   } else {
     writeFileSync(channelRef, oldSha);
     writeFileSync(publishedState, '1');
+    writeFileSync(release1Tag, 'cli-preview');
+    writeFileSync(release1Name, 'Previous CLI Preview');
   }
 
   writeExecutable(
@@ -83,6 +99,11 @@ function fixture({ missingRolling = false } = {}) {
     `#!/bin/sh
 set -eu
 echo "gh $*" >> ${JSON.stringify(log)}
+
+not_found() {
+  echo "gh: Not Found (HTTP 404)" >&2
+  exit 1
+}
 
 if [ "$1" = "release" ] && [ "$2" = "view" ]; then
   if [ "$3" = "cli-preview" ] && [ ! -f ${JSON.stringify(publishedState)} ]; then exit 1; fi
@@ -100,6 +121,8 @@ if [ "$1" = "release" ] && [ "$2" = "download" ]; then
   mkdir -p "$destination"
   if [ "$tag" = "cli-v1.2.3-preview.4" ]; then
     cp ${JSON.stringify(source)}/* "$destination"/
+  elif [ -f ${JSON.stringify(release77Tag)} ] && [ "$(cat ${JSON.stringify(release77Tag)})" = "$tag" ] && [ ! -f ${JSON.stringify(draftState)} ]; then
+    cp ${JSON.stringify(staging)}/* "$destination"/
   else
     cp ${JSON.stringify(rolling)}/* "$destination"/
   fi
@@ -127,6 +150,13 @@ if [ "$1" = "release" ] && [ "$2" = "create" ]; then
 fi
 
 if [ "$1" = "api" ]; then
+  if [ "\${HAPPIER_TEST_FAIL_ROLLING_RELEASE_READ:-0}" = "1" ] \
+    && echo "$*" | grep -q "releases/tags/cli-preview" \
+    && [ ! -f ${JSON.stringify(rollingReadFailureMarker)} ]; then
+    : > ${JSON.stringify(rollingReadFailureMarker)}
+    echo "gh: injected authorization failure (HTTP 401)" >&2
+    exit 1
+  fi
   case "$*" in
     *uploads.github.com*releases/77/assets*)
       count="$(cat ${JSON.stringify(uploadCounter)})"
@@ -146,14 +176,31 @@ if [ "$1" = "api" ]; then
         shift
       done
       name="\${endpoint##*name=}"
-      cp "$input" ${JSON.stringify(rolling)}/"$name"
+      cp "$input" ${JSON.stringify(staging)}/"$name"
       exit 0
       ;;
   esac
   case "$*" in
     *git/ref/tags/cli-v1.2.3-preview.4*) printf '%s\\n' ${JSON.stringify(targetSha)} ;;
-    *git/ref/tags/cli-preview*) if [ -f ${JSON.stringify(channelRef)} ]; then cat ${JSON.stringify(channelRef)}; else exit 1; fi ;;
-    *releases/tags/cli-preview*) if [ -f ${JSON.stringify(publishedState)} ]; then printf '%s\\n' "1"; else exit 1; fi ;;
+    *git/ref/tags/happier-rolling-staging-*) if [ -f ${JSON.stringify(stagingRef)} ]; then cat ${JSON.stringify(stagingRef)}; else not_found; fi ;;
+    *git/ref/tags/happier-rolling-backup-*) if [ -f ${JSON.stringify(backupRef)} ]; then cat ${JSON.stringify(backupRef)}; else not_found; fi ;;
+    *git/ref/tags/cli-preview*) if [ -f ${JSON.stringify(channelRef)} ]; then cat ${JSON.stringify(channelRef)}; else not_found; fi ;;
+    *releases/tags/happier-rolling-backup-cli-preview*)
+      if [ -f ${JSON.stringify(release1Tag)} ] && [ "$(cat ${JSON.stringify(release1Tag)})" = "happier-rolling-backup-cli-preview" ]; then
+        printf '{"id":1,"tag_name":"happier-rolling-backup-cli-preview","name":"%s","body":"previous notes","prerelease":true,"draft":false}\\n' "$(cat ${JSON.stringify(release1Name)})"
+      else
+        not_found
+      fi
+      ;;
+    *releases/tags/cli-preview*)
+      if [ -f ${JSON.stringify(release1Tag)} ] && [ "$(cat ${JSON.stringify(release1Tag)})" = "cli-preview" ]; then
+        printf '{"id":1,"tag_name":"cli-preview","name":"%s","body":"previous notes","prerelease":true,"draft":false}\\n' "$(cat ${JSON.stringify(release1Name)})"
+      elif [ -f ${JSON.stringify(release77Tag)} ] && [ "$(cat ${JSON.stringify(release77Tag)})" = "cli-preview" ] && [ ! -f ${JSON.stringify(draftState)} ]; then
+        printf '{"id":77,"tag_name":"cli-preview","name":"Happier CLI Preview","body":"Current version: 1.2.3-preview.4","prerelease":true,"draft":false}\\n'
+      else
+        not_found
+      fi
+      ;;
     *"releases?per_page=100"*)
       if [ -f ${JSON.stringify(draftState)} ] && echo "$*" | grep -q "cli-preview"; then
         printf '%s\\n' "77"
@@ -170,25 +217,21 @@ if [ "$1" = "api" ]; then
         shift
       done
       : > ${JSON.stringify(draftState)}
-      if [ "$tag_name" = "cli-preview" ]; then
-        printf '%s' "$target_commitish" > ${JSON.stringify(channelRef)}
-      else
-        echo "unexpected draft tag: $tag_name" >&2
-        exit 3
-      fi
-      printf '%s\\n' "77"
+      printf '%s' "$tag_name" > ${JSON.stringify(release77Tag)}
       ;;
     *"-X DELETE repos/test/test/releases/assets/"*)
-      if [ ${missingRolling ? '1' : '0'} = "0" ]; then
-        rm -f ${JSON.stringify(rolling)}/*
-      else
-        asset="\${4##*/}"
-        rm -f ${JSON.stringify(rolling)}/"$asset"
-      fi
+      asset="\${4##*/}"
+      case "$asset" in
+        77-*) rm -f ${JSON.stringify(staging)}/"\${asset#77-}" ;;
+        1-*) rm -f ${JSON.stringify(rolling)}/"\${asset#1-}" ;;
+      esac
       ;;
     *"repos/test/test/releases/assets/"*)
       asset="\${2##*/}"
-      cat ${JSON.stringify(rolling)}/"$asset"
+      case "$asset" in
+        77-*) cat ${JSON.stringify(staging)}/"\${asset#77-}" ;;
+        1-*) cat ${JSON.stringify(rolling)}/"\${asset#1-}" ;;
+      esac
       ;;
     *releases/77*)
       if echo "$*" | grep -q -- "-X PATCH"; then
@@ -197,29 +240,78 @@ if [ "$1" = "api" ]; then
           exit 1
         fi
         tag_name=""
-        target_commitish=""
+        draft_value=""
         while [ "$#" -gt 0 ]; do
           case "$1" in
             tag_name=*) tag_name="\${1#tag_name=}" ;;
-            target_commitish=*) target_commitish="\${1#target_commitish=}" ;;
+            draft=*) draft_value="\${1#draft=}" ;;
           esac
           shift
         done
-        if [ "$tag_name" = "cli-preview" ]; then
-          printf '%s' "$target_commitish" > ${JSON.stringify(channelRef)}
-        fi
-        : > ${JSON.stringify(publishedState)}
-        rm -f ${JSON.stringify(draftState)}
+        [ -n "$tag_name" ] && printf '%s' "$tag_name" > ${JSON.stringify(release77Tag)}
+        if [ "$draft_value" = "false" ]; then : > ${JSON.stringify(publishedState)}; rm -f ${JSON.stringify(draftState)}; fi
+        if [ "$draft_value" = "true" ]; then : > ${JSON.stringify(draftState)}; fi
       else
         case "$*" in
-          *"@tsv"*) for file in ${JSON.stringify(rolling)}/*; do [ -e "$file" ] || continue; name="$(basename "$file")"; printf '%s\\t%s\\n' "$name" "$name"; done ;;
-          *) for file in ${JSON.stringify(rolling)}/*; do [ -e "$file" ] || continue; basename "$file"; done ;;
+          *"@tsv"*) for file in ${JSON.stringify(staging)}/*; do [ -e "$file" ] || continue; name="$(basename "$file")"; printf '77-%s\\t%s\\n' "$name" "$name"; done ;;
+          *) printf '{"id":77,"tag_name":"%s","name":"staging","body":"","prerelease":true,"draft":%s}\\n' "$(cat ${JSON.stringify(release77Tag)})" "$([ -f ${JSON.stringify(draftState)} ] && echo true || echo false)" ;;
         esac
       fi
       ;;
-    *"-X POST repos/test/test/git/refs "*) printf '%s' ${JSON.stringify(targetSha)} > ${JSON.stringify(channelRef)} ;;
-    *"-X PATCH repos/test/test/git/refs/tags/cli-preview"*) printf '%s' ${JSON.stringify(targetSha)} > ${JSON.stringify(channelRef)} ;;
-    *releases/assets/1*) rm -f ${JSON.stringify(rolling)}/* ;;
+    *releases/1*)
+      if echo "$*" | grep -q -- "-X PATCH"; then
+        tag_name=""; name=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in tag_name=*) tag_name="\${1#tag_name=}" ;; name=*) name="\${1#name=}" ;; esac
+          shift
+        done
+        [ -n "$tag_name" ] && printf '%s' "$tag_name" > ${JSON.stringify(release1Tag)}
+        [ -n "$name" ] && printf '%s' "$name" > ${JSON.stringify(release1Name)}
+      elif echo "$*" | grep -q -- "-X DELETE"; then
+        rm -f ${JSON.stringify(release1Tag)} ${JSON.stringify(release1Name)} ${JSON.stringify(rolling)}/*
+      elif echo "$*" | grep -q '@tsv'; then
+        for file in ${JSON.stringify(rolling)}/*; do [ -e "$file" ] || continue; name="$(basename "$file")"; printf '1-%s\\t%s\\n' "$name" "$name"; done
+      else
+        if [ ! -f ${JSON.stringify(release1Tag)} ] \
+          && [ "\${HAPPIER_TEST_FAIL_DELETE_CONFIRM_READ:-0}" = "1" ] \
+          && [ ! -f ${JSON.stringify(deleteConfirmFailureMarker)} ]; then
+          : > ${JSON.stringify(deleteConfirmFailureMarker)}
+          echo "gh: injected service failure (HTTP 503)" >&2
+          exit 1
+        fi
+        [ -f ${JSON.stringify(release1Tag)} ] || not_found
+        printf '{"id":1,"tag_name":"%s","name":"%s","body":"previous notes","prerelease":true,"draft":false}\\n' "$(cat ${JSON.stringify(release1Tag)})" "$(cat ${JSON.stringify(release1Name)})"
+      fi
+      ;;
+    *"-X POST repos/test/test/git/refs "*)
+      ref=""; sha=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in ref=*) ref="\${1#ref=refs/tags/}" ;; sha=*) sha="\${1#sha=}" ;; esac
+        shift
+      done
+      case "$ref" in
+        cli-preview) printf '%s' "$sha" > ${JSON.stringify(channelRef)} ;;
+        happier-rolling-staging-*) printf '%s' "$sha" > ${JSON.stringify(stagingRef)} ;;
+        happier-rolling-backup-*) printf '%s' "$sha" > ${JSON.stringify(backupRef)} ;;
+      esac
+      ;;
+    *"-X PATCH repos/test/test/git/refs/tags/"*)
+      tag="\${4##*/}"; sha=""
+      while [ "$#" -gt 0 ]; do case "$1" in sha=*) sha="\${1#sha=}" ;; esac; shift; done
+      case "$tag" in
+        cli-preview) printf '%s' "$sha" > ${JSON.stringify(channelRef)} ;;
+        happier-rolling-staging-*) printf '%s' "$sha" > ${JSON.stringify(stagingRef)} ;;
+        happier-rolling-backup-*) printf '%s' "$sha" > ${JSON.stringify(backupRef)} ;;
+      esac
+      ;;
+    *"-X DELETE repos/test/test/git/refs/tags/"*)
+      tag="\${4##*/}"
+      case "$tag" in
+        cli-preview) rm -f ${JSON.stringify(channelRef)} ;;
+        happier-rolling-staging-*) rm -f ${JSON.stringify(stagingRef)} ;;
+        happier-rolling-backup-*) rm -f ${JSON.stringify(backupRef)} ;;
+      esac
+      ;;
   esac
   exit 0
 fi
@@ -235,10 +327,15 @@ exit 2
     archiveName,
     log,
     rolling,
+    staging,
     uploadCounter,
     draftState,
     publishedState,
     channelRef,
+    stagingRef,
+    backupRef,
+    release1Tag,
+    release77Tag,
   };
 }
 
@@ -256,7 +353,16 @@ function args() {
   ];
 }
 
-test('failed rolling replacement leaves tag and notes unchanged, then the same-version retry completes from immutable bytes', () => {
+test('rolling promotion dry-run shows private staging and whole-release backup cleanup', () => {
+  const result = spawnSync(process.execPath, [...args(), '--dry-run'], { cwd: repoRoot, encoding: 'utf8' });
+  assert.equal(result.status, 0);
+  const output = `${String(result.stdout ?? '')}\n${String(result.stderr ?? '')}`;
+  assert.match(output, /happier-rolling-staging-cli-preview-/);
+  assert.match(output, /happier-rolling-backup-cli-preview/);
+  assert.doesNotMatch(output, /releases\/assets\//);
+});
+
+test('existing rolling replacement stages privately, restores after publish failure, and exposes only audited bytes', () => {
   const testFixture = fixture();
   try {
     const env = {
@@ -273,6 +379,31 @@ test('failed rolling replacement leaves tag and notes unchanged, then the same-v
     const failedLog = readFileSync(testFixture.log, 'utf8');
     assert.doesNotMatch(failedLog, /git\/refs\/tags\/cli-preview/);
     assert.doesNotMatch(failedLog, /release edit cli-preview/);
+    assert.deepEqual(
+      readdirSync(testFixture.rolling),
+      ['old-asset'],
+      'a failed replacement must leave the published predecessor asset set untouched',
+    );
+
+    writeFileSync(testFixture.uploadCounter, '0');
+    writeFileSync(testFixture.log, '');
+    const failedSwitch = spawnSync(process.execPath, args(), {
+      cwd: repoRoot,
+      env: {
+        ...env,
+        HAPPIER_TEST_FAIL_UPLOAD_NUMBER: '0',
+        HAPPIER_TEST_FAIL_DRAFT_PUBLISH: '1',
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(failedSwitch.status, 0);
+    assert.equal(readFileSync(testFixture.release1Tag, 'utf8'), 'cli-preview');
+    assert.equal(readFileSync(testFixture.channelRef, 'utf8'), oldSha);
+    assert.deepEqual(readdirSync(testFixture.rolling), ['old-asset']);
+    const failedSwitchLog = readFileSync(testFixture.log, 'utf8');
+    assert.match(failedSwitchLog, /tag_name=happier-rolling-backup-cli-preview/);
+    assert.match(failedSwitchLog, /releases\/1 .*tag_name=cli-preview/);
+    assert.doesNotMatch(failedSwitchLog, /DELETE repos\/test\/test\/releases\/assets\/1-/);
 
     writeFileSync(testFixture.uploadCounter, '0');
     writeFileSync(testFixture.log, '');
@@ -283,26 +414,41 @@ test('failed rolling replacement leaves tag and notes unchanged, then the same-v
     });
 
     const successLog = readFileSync(testFixture.log, 'utf8');
-    const auditDownload = successLog.lastIndexOf('gh release download cli-preview');
+    const stagedAudit = successLog.lastIndexOf('Accept: application/octet-stream');
     const moveTag = successLog.lastIndexOf('gh api -X PATCH repos/test/test/git/refs/tags/cli-preview');
-    const editNotes = successLog.lastIndexOf('gh release edit cli-preview');
-    assert.ok(auditDownload >= 0);
-    assert.ok(moveTag > auditDownload, 'moving tag must follow the rolling byte/signature audit');
-    assert.ok(editNotes > moveTag, 'rolling notes/version marker must follow the audited tag move');
+    const publishReplacement = successLog.lastIndexOf('PATCH repos/test/test/releases/77');
+    const visibleAudit = successLog.lastIndexOf('gh release download cli-preview');
+    const deleteBackup = successLog.lastIndexOf('DELETE repos/test/test/releases/1');
+    assert.ok(stagedAudit >= 0);
+    assert.ok(moveTag > stagedAudit, 'moving tag must follow the private draft byte/signature audit');
+    assert.ok(publishReplacement > moveTag);
+    assert.ok(visibleAudit > publishReplacement);
+    assert.ok(deleteBackup > visibleAudit, 'predecessor deletion must follow visible replacement audit');
+    assert.doesNotMatch(successLog, /DELETE repos\/test\/test\/releases\/assets\/1-/);
     assert.deepEqual(
-      readdirSync(testFixture.rolling).sort(),
+      readdirSync(testFixture.staging).sort(),
       [
         'checksums-happier-v1.2.3-preview.4.txt',
         'checksums-happier-v1.2.3-preview.4.txt.minisig',
         testFixture.archiveName,
       ],
     );
-    for (const name of readdirSync(testFixture.rolling)) {
+    for (const name of readdirSync(testFixture.staging)) {
       assert.deepEqual(
-        readFileSync(join(testFixture.rolling, name)),
+        readFileSync(join(testFixture.staging, name)),
         readFileSync(join(testFixture.root, 'source', basename(name))),
       );
     }
+
+    writeFileSync(testFixture.log, '');
+    execFileSync(process.execPath, args(), {
+      cwd: repoRoot,
+      env: { ...env, HAPPIER_TEST_FAIL_UPLOAD_NUMBER: '0' },
+      encoding: 'utf8',
+    });
+    const idempotentLog = readFileSync(testFixture.log, 'utf8');
+    assert.match(idempotentLog, /release download cli-preview/);
+    assert.doesNotMatch(idempotentLog, /-X PATCH repos\/test\/test\/releases|releases\/assets/);
   } finally {
     rmSync(testFixture.root, { recursive: true, force: true });
   }
@@ -337,7 +483,87 @@ test('rolling promotion rejects an immutable tag whose SHA differs from the auth
   }
 });
 
-test('an initially missing rolling release uses one native draft on the real tag and retries that draft before publishing', () => {
+test('a non-404 predecessor read failure aborts before any release or tag mutation', () => {
+  const testFixture = fixture();
+  try {
+    const result = spawnSync(process.execPath, args(), {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${testFixture.bin}:${process.env.PATH ?? ''}`,
+        HAPPIER_TEST_FAIL_ROLLING_RELEASE_READ: '1',
+      },
+      encoding: 'utf8',
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(String(result.stderr), /HTTP 401/);
+    assert.doesNotMatch(readFileSync(testFixture.log, 'utf8'), /gh api -X (?:POST|PATCH|DELETE)/);
+    assert.equal(readFileSync(testFixture.release1Tag, 'utf8'), 'cli-preview');
+    assert.equal(readFileSync(testFixture.channelRef, 'utf8'), oldSha);
+    assert.deepEqual(readdirSync(testFixture.rolling), ['old-asset']);
+  } finally {
+    rmSync(testFixture.root, { recursive: true, force: true });
+  }
+});
+
+test('a transport failure while confirming deletion is not accepted as successful absence', () => {
+  const testFixture = fixture();
+  try {
+    const env = {
+      ...process.env,
+      PATH: `${testFixture.bin}:${process.env.PATH ?? ''}`,
+      HAPPIER_TEST_FAIL_DELETE_CONFIRM_READ: '1',
+    };
+    const result = spawnSync(process.execPath, args(), {
+      cwd: repoRoot,
+      env,
+      encoding: 'utf8',
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(String(result.stderr), /HTTP 503/);
+    assert.match(readFileSync(testFixture.log, 'utf8'), /-X DELETE repos\/test\/test\/releases\/1/);
+
+    writeFileSync(testFixture.log, '');
+    execFileSync(process.execPath, args(), { cwd: repoRoot, env, encoding: 'utf8' });
+    assert.equal(existsSync(testFixture.backupRef), false);
+    assert.equal(existsSync(testFixture.stagingRef), false);
+  } finally {
+    rmSync(testFixture.root, { recursive: true, force: true });
+  }
+});
+
+test('retry restores a predecessor stranded under the deterministic backup tag before staging again', () => {
+  const testFixture = fixture();
+  try {
+    writeFileSync(testFixture.release1Tag, 'happier-rolling-backup-cli-preview');
+    writeFileSync(
+      join(testFixture.root, 'release-1-name'),
+      '[backup:happier-rolling-backup-cli-preview] Previous CLI Preview',
+    );
+    writeFileSync(testFixture.backupRef, oldSha);
+    writeFileSync(testFixture.channelRef, targetSha);
+    const result = spawnSync(process.execPath, args(), {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${testFixture.bin}:${process.env.PATH ?? ''}`,
+        HAPPIER_TEST_FAIL_UPLOAD_NUMBER: '1',
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(testFixture.release1Tag, 'utf8'), 'cli-preview');
+    assert.equal(readFileSync(testFixture.channelRef, 'utf8'), oldSha);
+    assert.equal(existsSync(testFixture.backupRef), false);
+    assert.deepEqual(readdirSync(testFixture.rolling), ['old-asset']);
+  } finally {
+    rmSync(testFixture.root, { recursive: true, force: true });
+  }
+});
+
+test('an initially missing rolling release retries one private draft before publishing the complete replacement', () => {
   const testFixture = fixture({ missingRolling: true });
   try {
     const failed = spawnSync(process.execPath, args(), {
@@ -351,37 +577,14 @@ test('an initially missing rolling release uses one native draft on the real tag
     });
     assert.notEqual(failed.status, 0);
     const failedLog = readFileSync(testFixture.log, 'utf8');
-    assert.match(failedLog, /POST repos\/test\/test\/releases .*tag_name=cli-preview .*target_commitish=/);
+    assert.match(failedLog, /POST repos\/test\/test\/releases .*tag_name=happier-rolling-staging-cli-preview-/);
     assert.doesNotMatch(failedLog, /PATCH repos\/test\/test\/releases\/77/);
-    assert.doesNotMatch(failedLog, /happier-rolling-staging/);
-    assert.equal(
-      existsSync(testFixture.channelRef),
-      true,
-      'GitHub native draft creation owns the real rolling tag from the start',
-    );
+    assert.match(failedLog, /happier-rolling-staging/);
+    assert.equal(existsSync(testFixture.channelRef), false);
+    assert.equal(existsSync(testFixture.stagingRef), true);
     assert.equal(existsSync(testFixture.draftState), true);
     assert.equal(existsSync(testFixture.publishedState), false);
 
-    writeFileSync(testFixture.channelRef, oldSha);
-    writeFileSync(testFixture.uploadCounter, '0');
-    writeFileSync(testFixture.log, '');
-    const mismatchedRetry = spawnSync(process.execPath, args(), {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PATH: `${testFixture.bin}:${process.env.PATH ?? ''}`,
-        HAPPIER_TEST_FAIL_UPLOAD_NUMBER: '0',
-      },
-      encoding: 'utf8',
-    });
-    assert.equal(mismatchedRetry.status, 1);
-    assert.doesNotMatch(
-      readFileSync(testFixture.log, 'utf8'),
-      /DELETE repos\/test\/test\/releases\/assets/,
-      'retry must validate the native draft tag target before replacing assets',
-    );
-
-    writeFileSync(testFixture.channelRef, targetSha);
     writeFileSync(testFixture.uploadCounter, '0');
     writeFileSync(testFixture.log, '');
     execFileSync(process.execPath, args(), {
@@ -397,10 +600,10 @@ test('an initially missing rolling release uses one native draft on the real tag
     const findExistingDraft = successLog.indexOf('releases?per_page=100');
     const stagedAssetDownload = successLog.lastIndexOf('Accept: application/octet-stream');
     const publishDraft = successLog.lastIndexOf('PATCH repos/test/test/releases/77');
-    assert.ok(findExistingDraft >= 0, 'same-version retry must find the existing draft by real rolling tag');
+    assert.ok(findExistingDraft >= 0, 'same-version retry must find the private draft by staging tag');
     assert.ok(stagedAssetDownload > findExistingDraft);
     assert.ok(publishDraft > stagedAssetDownload, 'native draft publication must follow exact asset audit');
-    assert.doesNotMatch(successLog, /happier-rolling-staging|git\/refs\/tags\/cli-preview.*(?:POST|PATCH|DELETE)/);
+    assert.match(successLog, /happier-rolling-staging/);
     assert.equal(existsSync(testFixture.channelRef), true);
     assert.equal(existsSync(testFixture.draftState), false);
     assert.equal(existsSync(testFixture.publishedState), true);

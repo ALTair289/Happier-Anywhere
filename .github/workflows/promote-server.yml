@@ -90,14 +90,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  trusted_ref_guard:
+    name: Trusted workflow ref guard
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Admit trusted workflow control ref
+        env:
+          CALLER_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_REF: ${{ job.workflow_ref }}
+          WORKFLOW_FILE: promote-server.yml
+        run: |
+          set -euo pipefail
+          test "$CALLER_REPOSITORY" = "$WORKFLOW_REPOSITORY"
+          case "$WORKFLOW_REF" in
+            "$WORKFLOW_REPOSITORY/.github/workflows/$WORKFLOW_FILE@refs/heads/dev"|\
+            "$WORKFLOW_REPOSITORY/.github/workflows/$WORKFLOW_FILE@refs/heads/preview"|\
+            "$WORKFLOW_REPOSITORY/.github/workflows/$WORKFLOW_FILE@refs/heads/main") ;;
+            *) echo "Untrusted workflow control ref: $WORKFLOW_REF" >&2; exit 1 ;;
+          esac
+
   release_actor_guard:
+    needs: [trusted_ref_guard]
     name: Release actor guard
     permissions:
       contents: read
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -121,7 +144,7 @@ jobs:
       RUNTIME_ACTIVITY_R2_DRAINED_SHA: ${{ inputs.environment == 'production' && vars.HAPPIER_PRODUCTION_SERVER_SESSION_SYNC_R2_DRAINED_SHA || vars.HAPPIER_PREVIEW_SERVER_SESSION_SYNC_R2_DRAINED_SHA }}
     steps:
       - name: Checkout trusted workflow policy
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -129,7 +152,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22.x
 
@@ -196,7 +219,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - name: Checkout exact authorized source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ steps.candidate.outputs.authorized_sha }}
@@ -226,7 +249,7 @@ jobs:
       candidate_sha: ${{ steps.select.outputs.candidate_sha }}
     steps:
       - name: Checkout trusted bump policy
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -237,7 +260,7 @@ jobs:
         run: cp scripts/pipeline/github/prepare-server-release-bump.mjs "$RUNNER_TEMP/prepare-server-release-bump.mjs"
 
       - name: Checkout exact pre-bump source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ needs.resolve_source.outputs.candidate_sha }}
@@ -247,7 +270,7 @@ jobs:
       - name: Create bump GitHub App token
         if: inputs.bump != 'none'
         id: bump_token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
         with:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
@@ -286,7 +309,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout trusted candidate validation policy
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -297,7 +320,7 @@ jobs:
         run: cp scripts/pipeline/github/prepare-server-release-bump.mjs "$RUNNER_TEMP/prepare-server-release-bump.mjs"
 
       - name: Checkout exact authorized candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ needs.resolve_source.outputs.candidate_sha }}
@@ -317,7 +340,7 @@ jobs:
             --push false
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22.x
           cache: yarn
@@ -354,7 +377,7 @@ jobs:
       authorized_sha: ${{ steps.bind.outputs.authorized_sha }}
     steps:
       - name: Checkout independently resolved source head
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ needs.resolve_source.outputs.source_ref }}
@@ -407,7 +430,7 @@ jobs:
       RUNTIME_ACTIVITY_R2_DRAINED_SHA: ${{ inputs.environment == 'production' && vars.HAPPIER_PRODUCTION_SERVER_SESSION_SYNC_R2_DRAINED_SHA || vars.HAPPIER_PREVIEW_SERVER_SESSION_SYNC_R2_DRAINED_SHA }}
     steps:
       - name: Checkout trusted server promotion policy
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -455,7 +478,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - name: Checkout exact authorized server release SHA
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ steps.trusted_resolve.outputs.source_ref }}
@@ -478,7 +501,7 @@ jobs:
 
       - name: Create trusted promotion GitHub App token
         id: promotion_token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
         with:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}

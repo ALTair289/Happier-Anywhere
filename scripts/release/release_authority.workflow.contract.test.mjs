@@ -48,7 +48,7 @@ test('the full hosted release binds one server SHA and publishes runtime before 
   const deploy = release.jobs.deploy_server;
   assert.ok(needs(publisher).includes('bind_server_source'));
   assert.ok(needs(deploy).includes('bind_server_source'));
-  assert.ok(needs(deploy).includes('publish_server_runtime'));
+  assert.ok(needs(deploy).includes('promote_server_runtime'));
   assert.equal(
     publisher.with.authorized_sha,
     '${{ needs.bind_server_source.outputs.authorized_sha }}',
@@ -65,7 +65,7 @@ test('every GitHub App token reachable from full or nightly release declares rep
     const parsed = workflow(name);
     for (const [jobName, job] of Object.entries(parsed.jobs)) {
       for (const step of job.steps ?? []) {
-        if (step.uses !== 'actions/create-github-app-token@v1') continue;
+        if (step.uses !== 'actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547') continue;
         assert.ok(step.with?.owner, `${name}/${jobName}/${step.name} must scope owner`);
         assert.ok(step.with?.repositories, `${name}/${jobName}/${step.name} must scope repositories`);
         const permissions = Object.keys(step.with ?? {}).filter((key) => key.startsWith('permission-'));
@@ -97,7 +97,7 @@ test('previously broad release-path tokens use the minimum current-repository co
         const key = `${name}/${jobName}/${step.name}`;
         if (!expected.has(key)) continue;
         observed.add(key);
-        assert.equal(step.uses, 'actions/create-github-app-token@v1');
+        assert.equal(step.uses, 'actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547');
         assert.equal(step.with.owner, '${{ github.repository_owner }}');
         assert.equal(step.with.repositories, '${{ github.event.repository.name }}');
         assert.equal(step.with['permission-contents'], expected.get(key));
@@ -189,7 +189,7 @@ test('every publish-server-runtime job sets up Node before its first repository 
     const steps = job.steps ?? [];
     const firstScript = steps.findIndex((step) => typeof step.run === 'string' && /node scripts\/pipeline\//.test(step.run));
     if (firstScript < 0) continue;
-    const setupNode = steps.findIndex((step) => step.uses === 'actions/setup-node@v4');
+    const setupNode = steps.findIndex((step) => step.uses === 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
     assert.ok(setupNode >= 0 && setupNode < firstScript, `${jobName} runs a repository script before setup-node`);
   }
 });
@@ -222,7 +222,17 @@ for (const [workflowName, leafScript] of [
     const parsed = workflow(workflowName);
     assert.ok(parsed.on.workflow_dispatch.inputs.retry_version);
     assert.ok(parsed.on.workflow_call.inputs.retry_version);
-    assert.equal(parsed.jobs.publish.if, "${{ inputs.retry_version == '' }}");
+    if (workflowName === 'publish-ui-web.yml') {
+      assert.equal(parsed.jobs.publish.if, "${{ inputs.retry_version == '' }}");
+    } else {
+      for (const jobName of ['prepare', 'build_candidate', 'finalize_darwin', 'finalize_publish']) {
+        assert.equal(
+          parsed.jobs[jobName].if,
+          "${{ inputs.retry_version == '' }}",
+          `${workflowName} ${jobName} must be unreachable during rolling recovery`,
+        );
+      }
+    }
     assert.equal(parsed.jobs.promote_existing.if, "${{ inputs.retry_version != '' }}");
     const recoverySteps = parsed.jobs.promote_existing.steps;
     const recoveryRun = recoverySteps
@@ -242,15 +252,15 @@ for (const [workflowName, leafScript] of [
       .map((step) => String(step.run ?? ''))
       .find((run) => run.includes('resolve-authorized-release-source.mjs'));
     assert.ok(identityRun, 'recovery must use the trusted remote source resolver');
-    assert.match(identityRun, new RegExp(`refs/tags/${prefix}\\$RETRY_VERSION`));
+    assert.match(identityRun, new RegExp(`refs/tags/${prefix}\\$\\{?RETRY_VERSION\\}?`));
     assert.equal(
-      recoverySteps.filter((step) => step.uses === 'actions/checkout@v4').length,
+      recoverySteps.filter((step) => step.uses === 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262').length,
       1,
       'recovery must execute only trusted workflow control bytes, not version-tag source bytes',
     );
     assert.ok(
       recoverySteps
-        .filter((step) => step.uses === 'actions/checkout@v4')
+        .filter((step) => step.uses === 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262')
         .every((step) => step.with?.['persist-credentials'] === false),
     );
   });

@@ -7,36 +7,41 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 
-test('nightly-dev workflow runs reusable release verification against the dev channel', async () => {
+test('nightly-dev verifies exact immutable candidates before promoting rolling references', async () => {
   const raw = await readFile(join(repoRoot, '.github', 'workflows', 'nightly-dev.yml'), 'utf8');
+  const releaseVerifyBlock = raw.slice(raw.indexOf('\n  release_verify:'), raw.indexOf('\n  promote_server:'));
 
-  assert.match(
-    raw,
-    /release_verify:[\s\S]*?needs:\s*\[cli, hstack, server_runtime, ui_web, ui_mobile, ui_desktop, docker\][\s\S]*?uses:\s*\.\/\.github\/workflows\/release-verify\.yml/,
-    'nightly-dev should invoke the reusable release-verify workflow after publish lanes finish',
-  );
-  assert.match(
-    raw,
-    /release_verify:[\s\S]*?channel:\s*dev/,
-    'nightly-dev should validate the dev channel through release-verify',
-  );
-  assert.match(
-    raw,
-    /permissions:\s*[\s\S]*?actions:\s*read/,
-    'nightly-dev should grant actions: read because the reusable release-verify workflow requires it',
-  );
+  assert.match(raw, /prepare_release_candidate:[\s\S]*?source_sha:/);
 
-  for (const inputName of [
-    'run_installers_smoke',
-    'run_binary_smoke',
-    'run_cli_update_continuity',
-    'run_daemon_continuity',
-    'run_session_continuity',
-  ]) {
+  for (const job of ['cli', 'hstack', 'server_runtime', 'ui_web']) {
     assert.match(
       raw,
-      new RegExp(`release_verify:[\\s\\S]*?${inputName}:\\s*true`),
-      `nightly-dev should explicitly enable ${inputName} when invoking release-verify`,
+      new RegExp(`${job}:[\\s\\S]*?needs:\\s*\\[prepare_release_candidate\\][\\s\\S]*?publish_rolling:\\s*false`),
+      `${job} should publish an immutable candidate without moving its rolling reference`,
     );
   }
+
+  assert.match(
+    raw,
+    /release_verify:[\s\S]*?needs:\s*\[prepare_release_candidate, cli, hstack, server_runtime, ui_web\][\s\S]*?candidate_source_sha:\s*\$\{\{ needs\.prepare_release_candidate\.outputs\.source_sha \}\}[\s\S]*?candidate_cli_version:\s*\$\{\{ needs\.cli\.outputs\.version \}\}[\s\S]*?candidate_stack_version:\s*\$\{\{ needs\.hstack\.outputs\.version \}\}[\s\S]*?candidate_server_version:\s*\$\{\{ needs\.server_runtime\.outputs\.version \}\}[\s\S]*?candidate_ui_web_version:\s*\$\{\{ needs\.ui_web\.outputs\.version \}\}/,
+    'release verification should consume the exact SHA and immutable versions produced by candidate jobs',
+  );
+
+  assert.match(raw, /promote_server:[\s\S]*?needs:\s*\[server_runtime, release_verify\]/);
+  assert.match(raw, /promote_hstack:[\s\S]*?needs:\s*\[hstack, promote_server\]/);
+  assert.match(raw, /promote_cli:[\s\S]*?needs:\s*\[cli, promote_hstack\]/);
+  assert.match(raw, /promote_ui_web:[\s\S]*?needs:\s*\[ui_web, promote_cli\]/);
+  assert.match(
+    raw,
+    /docker:[\s\S]*?needs:\s*\[prepare_release_candidate, cli, server_runtime, promote_ui_web\][\s\S]*?server_version:\s*\$\{\{ needs\.server_runtime\.outputs\.version \}\}[\s\S]*?cli_version:\s*\$\{\{ needs\.cli\.outputs\.version \}\}/,
+    'Docker should wait for promotion and consume the exact verified CLI and server candidate versions',
+  );
+  assert.match(raw, /verify_promoted:[\s\S]*?for tag in server-dev stack-dev cli-dev ui-web-dev/);
+  assert.match(raw, /resolve_tag_commit\(\)/, 'rolling verification should dereference annotated as well as lightweight tags');
+
+  assert.doesNotMatch(
+    releaseVerifyBlock,
+    /needs:\s*\[[^\]]*(?:ui_mobile|ui_desktop|docker)/,
+    'candidate verification must not depend on jobs that already publish user-consumed mobile, desktop, or Docker outputs',
+  );
 });

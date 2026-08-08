@@ -86,6 +86,38 @@ test('publish-ui-web rejects an invalid MINISIGN_SECRET_KEY before Metro without
   assert.doesNotMatch(output, /Starting Metro Bundler/i, 'should fail before running the heavy build');
 });
 
+test('trusted UI-web publication consumes prepared source/version-bound bytes without rebuilding candidate code', () => {
+  const version = '1.2.3-preview.41';
+  const authorizedSha = '0123456789abcdef0123456789abcdef01234567';
+  const out = execFileSync(
+    process.execPath,
+    [
+      resolve(repoRoot, 'scripts', 'pipeline', 'release', 'publish-ui-web.mjs'),
+      '--channel', 'preview',
+      '--allow-stable', 'false',
+      '--base-version', '1.2.3',
+      '--version', version,
+      '--authorized-sha', authorizedSha,
+      '--prepared-artifacts',
+      '--run-contracts', 'false',
+      '--check-installers', 'false',
+      '--dry-run',
+    ],
+    {
+      cwd: repoRoot,
+      env: { ...process.env, GH_REPO: 'example/happier' },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
+    },
+  );
+
+  assert.doesNotMatch(out, /build-ui-web-bundle\.mjs/);
+  assert.match(out, new RegExp(`happier-ui-web-v${version.replaceAll('.', '\\.')}\\-web-any\\.tar\\.gz`));
+  assert.match(out, new RegExp(`--target-sha\\s+${authorizedSha}`));
+  assert.match(out, /publish-release\.mjs/);
+});
+
 for (const { channel, version, allowStable } of [
   { channel: 'preview', version: '0.2.1-preview.41', allowStable: 'false' },
   { channel: 'stable', version: '0.2.1', allowStable: 'true' },

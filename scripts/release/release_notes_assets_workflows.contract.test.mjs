@@ -39,7 +39,7 @@ for (const [workflow, jobName] of releaseNotesAssetCallers) {
     const steps = Array.isArray(job.steps) ? job.steps : [];
     const tokenStep = steps.find((step) => step?.id === 'release_notes_assets_token');
     assert.ok(tokenStep, `${workflow} should mint a dedicated release-notes assets token`);
-    assert.equal(tokenStep.uses, 'actions/create-github-app-token@v1');
+    assert.equal(tokenStep.uses, 'actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547');
     assert.equal(tokenStep.with?.['app-id'], '${{ secrets.RELEASE_BOT_APP_ID }}');
     assert.equal(tokenStep.with?.['private-key'], '${{ secrets.RELEASE_BOT_PRIVATE_KEY }}');
     assert.equal(tokenStep.with?.owner, '${{ github.repository_owner }}');

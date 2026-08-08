@@ -340,7 +340,7 @@ test('every promotion and runtime publisher checkout explicitly disables credent
     for (const [jobId, job] of Object.entries(workflow.jobs ?? {})) {
       if (!Array.isArray(job?.steps)) continue;
       for (const step of job.steps) {
-        if (step?.uses !== 'actions/checkout@v4') continue;
+        if (step?.uses !== 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262') continue;
         assert.equal(
           step?.with?.['persist-credentials'],
           false,
