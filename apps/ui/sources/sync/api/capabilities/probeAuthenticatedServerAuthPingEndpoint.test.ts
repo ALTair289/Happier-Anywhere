@@ -71,6 +71,25 @@ describe('probeAuthenticatedServerAuthPingEndpoint', () => {
         });
     });
 
+    it('sanitizes credentials out of transport error messages', async () => {
+        setRuntimeFetch(vi.fn(async () => {
+            throw new Error('Failed to fetch https://admin:secret@custom.example.test:9443/path/?token=abc#frag (Bearer hdr.eyJzdWIiOiJ0ZXN0In0.sig)');
+        }));
+
+        const result = await probeAuthenticatedServerAuthPingEndpoint({
+            endpoint: 'https://custom.example.test:9443',
+            token: 'token-a',
+        });
+
+        expect(result.status).toBe('server_unreachable');
+        if (result.status !== 'server_unreachable') {
+            throw new Error('Expected server_unreachable');
+        }
+        expect(result.errorMessage).not.toContain('admin:secret@');
+        expect(result.errorMessage).not.toContain('token=abc');
+        expect(result.errorMessage).toContain('Bearer [REDACTED]');
+    });
+
     it('preserves retry_later classification (and Retry-After) for server-side backpressure', async () => {
         stubAuthPing(new Response('Server reload in progress', {
             status: 503,

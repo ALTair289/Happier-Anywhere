@@ -1,10 +1,11 @@
 import type { ReadinessProbeResult } from '@happier-dev/connection-supervisor';
 
+import { probeAuthenticatedServerAuthPingEndpoint } from '@/sync/api/capabilities/probeAuthenticatedServerAuthPingEndpoint';
+import { isRuntimeActive } from '@/utils/runtime/isRuntimeActive';
 import { runtimeFetch } from '@/utils/system/runtimeFetch';
 
 import { buildRetryLaterProbeResultFromResponse } from './retryLaterProbeResult';
 import { sanitizeEndpointErrorMessage } from './sanitizeEndpointErrorMessage';
-import { isRuntimeActive } from '@/utils/runtime/isRuntimeActive';
 
 function normalizeAbsoluteHttpBaseUrl(raw: string): string | null {
     const value = String(raw ?? '').trim();
@@ -28,28 +29,80 @@ function joinBaseAndPath(baseUrl: string, path: string): string {
     return `${base}${normalizedPath}`;
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+/**
+ * Bounds one probe attempt: aborts after `timeoutMs`, and stays linked to the caller's signal so a
+ * released supervisor cancels the in-flight probe instead of leaking it.
+ */
+function createProbeAbort(timeoutMs: number, upstream: AbortSignal | undefined): {
+    signal: AbortSignal | undefined;
+    dispose: () => void;
+} {
+    if (typeof AbortController !== 'function') {
+        return { signal: upstream, dispose: () => {} };
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(0, timeoutMs));
-    const upstreamSignal = init.signal;
     let removeListener = () => {};
-    if (upstreamSignal) {
-        if (upstreamSignal.aborted) {
+    if (upstream) {
+        if (upstream.aborted) {
             controller.abort();
         } else {
             const onAbort = () => controller.abort();
-            upstreamSignal.addEventListener('abort', onAbort, { once: true });
-            removeListener = () => upstreamSignal.removeEventListener('abort', onAbort);
+            upstream.addEventListener('abort', onAbort, { once: true });
+            removeListener = () => upstream.removeEventListener('abort', onAbort);
         }
     }
+
+    return {
+        signal: controller.signal,
+        dispose: () => {
+            clearTimeout(timer);
+            removeListener();
+        },
+    };
+}
+
+/**
+ * Unauthenticated fallback for the case the authenticated owner cannot serve: no credentials are
+ * available for this endpoint yet. It proves transport reachability only — never token acceptance.
+ */
+async function probeUnauthenticatedHealth(
+    endpoint: string,
+    signal: AbortSignal | undefined,
+): Promise<ReadinessProbeResult> {
     try {
-        return await runtimeFetch(url, { ...init, signal: controller.signal });
-    } finally {
-        clearTimeout(timer);
-        removeListener();
+        const response = await runtimeFetch(joinBaseAndPath(endpoint, '/health'), {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            ...(signal ? { signal } : {}),
+        });
+
+        if (response.status === 429 || response.status >= 500) {
+            return buildRetryLaterProbeResultFromResponse(response, `Health probe returned ${response.status}`);
+        }
+        if (!response.ok) {
+            return {
+                status: 'server_unreachable',
+                errorMessage: `Health probe returned ${response.status}`,
+            };
+        }
+        return { status: 'ready' };
+    } catch (error) {
+        return {
+            status: 'server_unreachable',
+            errorMessage: sanitizeEndpointErrorMessage(error) ?? 'Network request failed',
+        };
     }
 }
 
+/**
+ * Readiness for the HTTP endpoint supervisor. The readiness *decision* is not made here: it is
+ * delegated to `probeAuthenticatedServerAuthPingEndpoint`, the single owner shared with the socket
+ * reachability lane, so both lanes classify a 404 from a foreign host and a captive-portal HTML 200
+ * identically. This adapter owns only what is specific to the supervisor pool: the background/hidden
+ * runtime gate, fail-closed endpoint validation, the per-probe timeout, and lazy token resolution.
+ */
 export function createEndpointReadinessProbe(params: Readonly<{
     endpoint: string;
     token: string | null | (() => string | null) | (() => Promise<string | null>);
@@ -84,105 +137,20 @@ export function createEndpointReadinessProbe(params: Readonly<{
                 errorMessage: 'Invalid endpoint URL',
             };
         }
-        try {
-            const versionResponse = await fetchWithTimeout(
-                joinBaseAndPath(endpoint, '/v1/version'),
-                {
-                    method: 'GET',
-                    headers: { Accept: 'application/json' },
-                    ...(params.signal ? { signal: params.signal } : {}),
-                },
-                timeoutMs,
-            );
-            if (versionResponse.status !== 200) {
-                if (versionResponse.status === 429 || versionResponse.status === 503) {
-                    return buildRetryLaterProbeResultFromResponse(versionResponse, `Version probe returned ${versionResponse.status}`);
-                }
-                return {
-                    status: 'server_unreachable',
-                    errorMessage: `Version probe returned ${versionResponse.status}`,
-                };
-            }
-        } catch (error) {
-            return {
-                status: 'server_unreachable',
-                errorMessage: sanitizeEndpointErrorMessage(error) ?? 'Network request failed',
-            };
-        }
-
-        try {
-            const healthResponse = await fetchWithTimeout(
-                joinBaseAndPath(endpoint, '/health'),
-                {
-                    method: 'GET',
-                    headers: { Accept: 'application/json' },
-                    ...(params.signal ? { signal: params.signal } : {}),
-                },
-                timeoutMs,
-            );
-
-            if (healthResponse.status === 429) {
-                return buildRetryLaterProbeResultFromResponse(healthResponse, `Health probe returned ${healthResponse.status}`);
-            }
-
-            if (healthResponse.status === 503 || healthResponse.status >= 500) {
-                return buildRetryLaterProbeResultFromResponse(healthResponse, `Health probe returned ${healthResponse.status}`);
-            }
-        } catch (error) {
-            return {
-                status: 'server_unreachable',
-                errorMessage: sanitizeEndpointErrorMessage(error) ?? 'Network request failed',
-            };
-        }
 
         const token = await resolveToken();
-        if (!token) {
-            return { status: 'ready' };
-        }
-
+        const abort = createProbeAbort(timeoutMs, params.signal);
         try {
-            const authResponse = await fetchWithTimeout(
-                joinBaseAndPath(endpoint, '/v1/auth/ping'),
-                {
-                    method: 'GET',
-                    headers: {
-                        Accept: 'application/json',
-                        Authorization: `Bearer ${token}`,
-                    },
-                    ...(params.signal ? { signal: params.signal } : {}),
-                },
-                timeoutMs,
-            );
-
-            if (authResponse.status === 401 || authResponse.status === 403) {
-                return {
-                    status: 'auth_failed',
-                    statusCode: authResponse.status,
-                    errorMessage: `Authenticated probe returned ${authResponse.status}`,
-                };
+            if (!token) {
+                return await probeUnauthenticatedHealth(endpoint, abort.signal);
             }
-
-            if (authResponse.status === 429) {
-                return buildRetryLaterProbeResultFromResponse(authResponse, `Authenticated probe returned ${authResponse.status}`);
-            }
-
-            if (authResponse.status >= 500) {
-                return buildRetryLaterProbeResultFromResponse(authResponse, `Authenticated probe returned ${authResponse.status}`);
-            }
-
-            if (authResponse.status !== 200) {
-                return {
-                    status: 'server_unreachable',
-                    errorMessage: `Authenticated probe returned ${authResponse.status}`,
-                };
-            }
-
-            return { status: 'ready' };
-        } catch (error) {
-            return {
-                status: 'server_unreachable',
-                errorMessage: sanitizeEndpointErrorMessage(error) ?? 'Network request failed',
-            };
+            return await probeAuthenticatedServerAuthPingEndpoint({
+                endpoint,
+                token,
+                ...(abort.signal ? { signal: abort.signal } : {}),
+            });
+        } finally {
+            abort.dispose();
         }
     };
 }

@@ -1,6 +1,7 @@
 import type { ReadinessProbeResult } from '@happier-dev/connection-supervisor';
 
 import { buildRetryLaterProbeResultFromResponse } from '@/sync/runtime/connectivity/retryLaterProbeResult';
+import { sanitizeEndpointErrorMessage } from '@/sync/runtime/connectivity/sanitizeEndpointErrorMessage';
 import { runtimeFetch } from '@/utils/system/runtimeFetch';
 
 export type AuthenticatedServerAuthPingProbeResult =
@@ -90,9 +91,11 @@ export async function probeAuthenticatedServerAuthPingEndpoint(params: Readonly<
 
         return { status: 'ready' };
     } catch (error) {
+        // Transport errors routinely embed the request URL (userinfo/query) and the Authorization
+        // header. This result reaches supervisor state and logs on both lanes, so redact once here.
         return {
             status: 'server_unreachable',
-            errorMessage: error instanceof Error ? error.message : String(error),
+            errorMessage: sanitizeEndpointErrorMessage(error) ?? 'Network request failed',
         };
     }
 }
