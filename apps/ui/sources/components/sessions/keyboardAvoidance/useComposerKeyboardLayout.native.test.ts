@@ -7,6 +7,7 @@ import { renderHook, standardCleanup } from '@/dev/testkit';
 const nativeHookState = vi.hoisted(() => ({
     keyboardHandlers: null as null | {
         onEnd?: (event: { height: number; progress: number }) => void;
+        onInteractive?: (event: { height: number; progress: number }) => void;
         onMove?: (event: { height: number; progress: number }) => void;
         onStart?: (event: { height: number; progress: number }) => void;
     },
@@ -821,5 +822,98 @@ describe('useComposerKeyboardLayout native', () => {
 
         nativeHookState.reanimatedKeyboardHeight = 0;
         expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(168);
+    });
+
+    // The interactive-dismiss freeze is what makes the transcript hold still while the keyboard
+    // is dragged down under the finger: the composer follows the finger, the list does not
+    // reflow 60x/s beneath it. It had no coverage at this owner, so the guard below pins the
+    // contract that the freeze is REAL, and the test after it pins that the freeze is not a
+    // LATCH. Both are needed: a fix that simply deletes the freeze passes the second and fails
+    // this one.
+    it('holds the transcript inset while an interactive dismissal is still in flight', async () => {
+        nativeHookState.platformOS = 'ios';
+        const { useComposerKeyboardLayout } = await import('./useComposerKeyboardLayout.native');
+        const hook = await renderHook(() => useComposerKeyboardLayout({ safeAreaBottom: 34 }));
+
+        act(() => {
+            hook.getCurrent().setComposerMeasuredHeight(110);
+        });
+        act(() => {
+            nativeHookState.reanimatedKeyboardHeight = -292;
+            nativeHookState.keyboardHandlers?.onEnd?.({ height: 292, progress: 1 });
+        });
+        act(() => {
+            nativeHookState.keyboardHandlers?.onInteractive?.({ height: 292, progress: 1 });
+        });
+        act(() => {
+            nativeHookState.reanimatedKeyboardHeight = -150;
+            nativeHookState.keyboardHandlers?.onMove?.({ height: 150, progress: 0.51 });
+        });
+
+        // The composer seat follows the finger...
+        expect(hook.getCurrent().bottomInset.value).toBe(150);
+        // ...while the transcript inset stays where the keyboard left it.
+        expect(hook.getCurrent().keyboardHeightForInset.value).toBe(292);
+        expect(hook.getCurrent().listBottomInset.value).toBe(110 + 292);
+        expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(110 + 292);
+    });
+
+    // MEASURED 2026-08-08 (`.project/reviews/2026-08-08-sigsegv/evidence/raw/raw_WD02r.json` and
+    // three siblings): in 4/32 graded device sends the transcript's bottom spacer collapsed
+    // correctly and then RE-EXPANDED by exactly 258 px (the keyboard height minus the safe area)
+    // and stayed there, with the composer provably docked and motionless across the whole window.
+    // That is this shape: the interactive-dismiss freeze outliving the keyboard.
+    //
+    // `keyboardDidHide` is the one signal that says the keyboard is GONE, and retention discards
+    // it wholesale. Retention's job is to keep the composer at the lifted SEAT across a hide; it
+    // is not a reason to keep believing an interactive dismissal is still under way. Once the
+    // freeze survives the hide nothing can release it — `onStart`/`onEnd` only arrive while the
+    // keyboard is moving, and it has stopped — so the transcript keeps a keyboard-sized inset
+    // with the composer docked, permanently, until the composer is refocused.
+    it('releases the interactive-dismiss inset freeze when the keyboard hides behind a retained lift', async () => {
+        nativeHookState.platformOS = 'ios';
+        const { useComposerKeyboardLayout } = await import('./useComposerKeyboardLayout.native');
+        const hook = await renderHook(() => useComposerKeyboardLayout({ safeAreaBottom: 34 }));
+
+        act(() => {
+            hook.getCurrent().setComposerMeasuredHeight(110);
+        });
+        act(() => {
+            nativeHookState.reanimatedKeyboardHeight = -292;
+            nativeHookState.keyboardHandlers?.onEnd?.({ height: 292, progress: 1 });
+        });
+
+        // A composer chip popover opens and takes the lift (useAgentInputSelectionOverlayController).
+        const release = hook.getCurrent().retainKeyboardLift?.();
+
+        // The keyboard is dismissed interactively and ends up gone. `onInteractive` never reports
+        // a zero position — react-native-keyboard-controller returns early on `position == 0`
+        // (ios/observers/movement/observer/KeyboardMovementObserver+Interactive.swift:41) — so the
+        // last frame this handler ever sees is a small non-zero one.
+        act(() => {
+            nativeHookState.keyboardHandlers?.onInteractive?.({ height: 292, progress: 1 });
+        });
+        act(() => {
+            nativeHookState.reanimatedKeyboardHeight = -5;
+            nativeHookState.keyboardHandlers?.onInteractive?.({ height: 5, progress: 0.02 });
+        });
+        act(() => {
+            nativeHookState.reanimatedKeyboardHeight = 0;
+            nativeHookState.keyboardListeners.get('keyboardDidHide')?.();
+        });
+
+        // The mirror shape: the composer is correctly docked at the safe area...
+        expect(hook.getCurrent().bottomInset.value).toBe(34);
+        // ...so the transcript must be too, on both readings of the same quantity.
+        expect(hook.getCurrent().listBottomInset.value).toBe(110 + 34);
+        expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(110 + 34);
+
+        act(() => {
+            release?.();
+        });
+
+        expect(hook.getCurrent().bottomInset.value).toBe(34);
+        expect(hook.getCurrent().listBottomInset.value).toBe(110 + 34);
+        expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(110 + 34);
     });
 });

@@ -23,11 +23,16 @@ type KeyboardFinalFrameCoordinates = Readonly<{
     screenY?: number;
 }>;
 
-// Complete input set for a static layout recompute. Guest-runtime (JS-thread) shared-value
-// writes are async in Reanimated 4, so a caller that writes a value and then recomputes in the
-// same pass must hand the recompute its freshly computed local — reading the shared value back
-// would observe the PREVIOUS value. Passing the whole set (rather than a partial override bag)
-// keeps that obligation explicit at every call site.
+// Complete input set for a static layout recompute. The recompute runs on the JS thread, so the
+// set is OWNED there, in `staticLayoutInputsRef`. Shared-value reads return the last synchronized
+// value (guest-runtime writes are async in Reanimated 4 — see
+// `useComposerKeyboardLayout.native.sharedValueLag.test.ts`), so reading the set back from the
+// shared values is a lost update whenever the JS thread is behind the keyboard: a composer or
+// scaffold measurement processed after a dismissal replays the keyboard-raised geometry and
+// re-seats the composer over the transcript. It never heals, because
+// `ignoreKeyboardFramesUntilComposerFocus` stops every keyboard worklet from re-deriving the
+// layout until the composer is refocused. (Measured 2026-08-08: ~36% of sends on device.)
+// Callers therefore pass only the fields they own; everything else comes from the record.
 type ComposerStaticLayoutInputs = Readonly<{
     availablePanelMaxHeight: number | undefined;
     composerHeight: number;
@@ -40,6 +45,18 @@ type ComposerStaticLayoutInputs = Readonly<{
     safeAreaBottom: number;
     scaffoldHeight: number;
     viewportHeight: number;
+}>;
+
+// The keyboard-owned slice of that record. These fields are written by the keyboard worklets on
+// the UI thread, so the JS record cannot observe them any other way. The worklets already cross
+// to JS once per frame to notify the keyboard height; that same crossing carries the slice, so
+// keeping the record authoritative costs no additional UI-thread work.
+type KeyboardFrameState = Readonly<{
+    absoluteHeight: number;
+    insetHeight: number;
+    interactiveDismissActive: boolean;
+    lastEventHeight: number;
+    liveHeight: number;
 }>;
 
 function resolveAndroidFinalFrameKeyboardHeight(
@@ -113,7 +130,6 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
     const keyboardHeightAbsolute = useSharedValue(0);
     const keyboardHeightLive = useSharedValue(0);
     const keyboardProgress = useSharedValue(0);
-    const lastKeyboardEventHeightAbsolute = useSharedValue(0);
     const listBottomInset = useSharedValue(resolveListBottomInset({
         composerHeight: 0,
         keyboardHeightForInset: 0,
@@ -186,42 +202,49 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         };
     }, [listBottomInset]);
 
-    // Snapshot of the last synchronized shared-value state. A caller that writes a value in the
-    // current pass must override the matching field with its own local before recomputing.
-    const readStaticLayoutInputs = React.useCallback((): ComposerStaticLayoutInputs => ({
-        availablePanelMaxHeight: availablePanelMaxHeightValue.value,
-        composerHeight: composerHeight.value,
-        headerHeight: headerHeightValue.value,
-        isInteractiveDismissActive: isInteractiveDismissActive.value,
-        isKeyboardLiftSuppressed: isKeyboardLiftSuppressed.value,
-        keyboardHeightAbsolute: keyboardHeightAbsolute.value,
-        keyboardHeightForInset: keyboardHeightForInset.value,
-        layoutBottomInset: layoutBottomInsetValue.value,
-        safeAreaBottom: safeAreaBottomValue.value,
-        scaffoldHeight: scaffoldMeasuredHeight.value,
-        viewportHeight: viewportHeight.value,
-    }), [
-        availablePanelMaxHeightValue,
-        composerHeight,
-        headerHeightValue,
-        isInteractiveDismissActive,
-        isKeyboardLiftSuppressed,
-        keyboardHeightAbsolute,
-        keyboardHeightForInset,
-        layoutBottomInsetValue,
-        safeAreaBottomValue,
-        scaffoldMeasuredHeight,
-        viewportHeight,
-    ]);
+    // Authoritative JS-thread record of the static layout inputs — see ComposerStaticLayoutInputs
+    // for why this cannot be read back from the shared values.
+    const staticLayoutInputsRef = React.useRef<ComposerStaticLayoutInputs>({
+        availablePanelMaxHeight,
+        composerHeight: 0,
+        headerHeight,
+        isInteractiveDismissActive: false,
+        isKeyboardLiftSuppressed: keyboardLiftSuppressed,
+        keyboardHeightAbsolute: 0,
+        keyboardHeightForInset: 0,
+        layoutBottomInset,
+        safeAreaBottom,
+        scaffoldHeight: 0,
+        viewportHeight: dimensions.height,
+    });
 
-    const recomputeStaticLayout = React.useCallback((inputs: ComposerStaticLayoutInputs) => {
+    // Raw height of the last keyboard event, before retention substitutes the held lift. Owned on
+    // the UI thread and mirrored here for the same reason as the record above: the retention
+    // release reads it to decide whether the keyboard is genuinely gone, and a stale read there
+    // holds the composer at the retained lift for good.
+    const lastKeyboardEventHeightAbsoluteRef = React.useRef(0);
+
+    const applyKeyboardFrameFromUI = React.useCallback((frame: KeyboardFrameState) => {
+        lastKeyboardEventHeightAbsoluteRef.current = frame.lastEventHeight;
+        staticLayoutInputsRef.current = {
+            ...staticLayoutInputsRef.current,
+            isInteractiveDismissActive: frame.interactiveDismissActive,
+            keyboardHeightAbsolute: frame.absoluteHeight,
+            keyboardHeightForInset: frame.insetHeight,
+        };
+        notifyKeyboardHeight(frame.liveHeight);
+    }, [notifyKeyboardHeight]);
+
+    const recomputeStaticLayout = React.useCallback((overrides: Partial<ComposerStaticLayoutInputs> = {}) => {
         // Guest-runtime (JS-thread) shared-value writes are async in Reanimated 4: a read
         // immediately after a write observes the PREVIOUS value. Every value that is written
         // and then consumed within this pass must therefore flow through a local, and every
         // subscriber notification must carry the freshly computed local — never a `.value`
         // read-back. (Live-diagnosed 2026-07-09: read-back notifies left the transcript
         // composer inset one growth step behind, rendering rows under the composer.) This
-        // recompute therefore reads nothing back: every input arrives from its writer.
+        // recompute therefore reads nothing back: every input comes from the JS-owned record,
+        // which each writer updates in the same pass as its shared-value write.
+        const inputs: ComposerStaticLayoutInputs = { ...staticLayoutInputsRef.current, ...overrides };
         const effectiveComposerHeight = Math.max(0, Math.round(inputs.composerHeight));
         const effectiveScaffoldHeight = Math.max(0, Math.round(inputs.scaffoldHeight));
         const effectiveViewportHeight = resolveMeasuredViewportHeight(effectiveScaffoldHeight, inputs.viewportHeight);
@@ -234,6 +257,9 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         if (shouldRefreshInsetKeyboardHeight) {
             keyboardHeightForInset.value = liveKeyboardHeight;
         }
+        staticLayoutInputsRef.current = shouldRefreshInsetKeyboardHeight
+            ? { ...inputs, keyboardHeightForInset: liveKeyboardHeight }
+            : inputs;
         notifyKeyboardHeight(liveKeyboardHeight);
         const insetKeyboardHeight = inputs.isKeyboardLiftSuppressed
             ? 0
@@ -271,72 +297,50 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         notifyAvailablePanelHeight,
     ]);
 
+    // The settled keyboard height reported by the platform's own hide/show event. This is the
+    // authority on where the keyboard ended up, so it writes the record and then runs the one
+    // recompute rather than carrying a second copy of the same geometry.
     const applyFinalKeyboardHeightFromJS = React.useCallback((height: number) => {
-        // See recomputeStaticLayout: consume locals, never `.value` read-backs, and notify
-        // subscribers with the freshly computed values (guest-runtime writes are async).
         const absoluteKeyboardHeight = Number.isFinite(height) ? Math.max(0, height) : 0;
+        const liftIsSuppressed = staticLayoutInputsRef.current.isKeyboardLiftSuppressed;
+        const effectiveAbsoluteKeyboardHeight = liftIsSuppressed ? 0 : absoluteKeyboardHeight;
+        lastKeyboardEventHeightAbsoluteRef.current = absoluteKeyboardHeight;
         isInteractiveDismissActive.value = false;
-        lastKeyboardEventHeightAbsolute.value = absoluteKeyboardHeight;
-        const effectiveAbsoluteKeyboardHeight = isKeyboardLiftSuppressed.value ? 0 : absoluteKeyboardHeight;
         keyboardHeightAbsolute.value = effectiveAbsoluteKeyboardHeight;
-        const liveKeyboardHeight = isKeyboardLiftSuppressed.value
-            ? 0
-            : resolveKeyboardHeightWithinScaffold(effectiveAbsoluteKeyboardHeight, layoutBottomInsetValue.value);
-        keyboardHeightLive.value = liveKeyboardHeight;
-        keyboardHeightForInset.value = liveKeyboardHeight;
-        notifyKeyboardHeight(liveKeyboardHeight);
-        keyboardProgress.value = liveKeyboardHeight > 0 ? 1 : 0;
-        bottomInset.value = resolveComposerBottomOffset({
-            keyboardHeight: liveKeyboardHeight,
-            safeAreaBottom: safeAreaBottomValue.value,
+        keyboardProgress.value = resolveKeyboardHeightWithinScaffold(
+            effectiveAbsoluteKeyboardHeight,
+            staticLayoutInputsRef.current.layoutBottomInset,
+        ) > 0 ? 1 : 0;
+        recomputeStaticLayout({
+            isInteractiveDismissActive: false,
+            keyboardHeightAbsolute: effectiveAbsoluteKeyboardHeight,
         });
-        const effectiveViewportHeight = resolveMeasuredViewportHeight(scaffoldMeasuredHeight.value, viewportHeight.value);
-        const effectiveHeaderHeight = resolveMeasuredHeaderHeight(scaffoldMeasuredHeight.value, headerHeightValue.value);
-        const nextListBottomInset = resolveListBottomInset({
-            composerHeight: composerHeight.value,
-            keyboardHeightForInset: isKeyboardLiftSuppressed.value ? 0 : liveKeyboardHeight,
-            safeAreaBottom: safeAreaBottomValue.value,
-        });
-        listBottomInset.value = nextListBottomInset;
-        notifyListBottomInset(nextListBottomInset);
-        const nextAvailablePanelHeight = resolveAvailablePanelHeight({
-            viewportHeight: effectiveViewportHeight,
-            headerHeight: effectiveHeaderHeight,
-            keyboardHeight: isKeyboardLiftSuppressed.value ? 0 : absoluteKeyboardHeight,
-            maxHeight: availablePanelMaxHeightValue.value,
-            reservedHeight: absoluteKeyboardHeight > 0 ? 0 : layoutBottomInsetValue.value,
-            safeAreaBottom: safeAreaBottomValue.value,
-        });
-        availablePanelHeight.value = nextAvailablePanelHeight;
-        notifyAvailablePanelHeight(nextAvailablePanelHeight);
     }, [
-        availablePanelHeight,
-        availablePanelMaxHeightValue,
-        bottomInset,
-        composerHeight,
-        headerHeightValue,
         isInteractiveDismissActive,
-        isKeyboardLiftSuppressed,
         keyboardHeightAbsolute,
-        keyboardHeightForInset,
-        keyboardHeightLive,
         keyboardProgress,
-        lastKeyboardEventHeightAbsolute,
-        layoutBottomInsetValue,
-        listBottomInset,
-        notifyAvailablePanelHeight,
-        notifyListBottomInset,
-        notifyKeyboardHeight,
-        safeAreaBottomValue,
-        scaffoldMeasuredHeight,
-        viewportHeight,
+        recomputeStaticLayout,
     ]);
 
     React.useEffect(() => {
         if (Platform.OS === 'android') return undefined;
 
         const hideSubscription = Keyboard.addListener('keyboardDidHide', () => {
-            if (keyboardRetentionCountRef.current > 0) return;
+            if (keyboardRetentionCountRef.current > 0) {
+                // Retention holds the composer at the lifted SEAT across a hide so focus can
+                // transfer; it is not a reason to keep believing the keyboard is still there.
+                // Recording the settled hide is what releases the interactive-dismiss freeze,
+                // which otherwise outlives the keyboard: `onStart`/`onEnd` only arrive while the
+                // keyboard is moving, and it has stopped, so nothing else can release it. The
+                // freeze holds `keyboardHeightForInset` — read by the transcript inset on both
+                // threads and by nothing that seats the composer — so a stuck freeze leaves the
+                // composer correctly docked and the transcript stranded at a keyboard-sized
+                // inset until the composer is refocused. (Measured 2026-08-08: the transcript
+                // spacer re-expanded 258 px after a correct collapse in 4/32 device sends.)
+                isInteractiveDismissActive.value = false;
+                recomputeStaticLayout({ isInteractiveDismissActive: false });
+                return;
+            }
             ignoreKeyboardFramesUntilComposerFocus.value = true;
             applyFinalKeyboardHeightFromJS(0);
         });
@@ -344,7 +348,12 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         return () => {
             hideSubscription.remove();
         };
-    }, [applyFinalKeyboardHeightFromJS, ignoreKeyboardFramesUntilComposerFocus]);
+    }, [
+        applyFinalKeyboardHeightFromJS,
+        ignoreKeyboardFramesUntilComposerFocus,
+        isInteractiveDismissActive,
+        recomputeStaticLayout,
+    ]);
 
     React.useEffect(() => {
         if (Platform.OS !== 'android') return undefined;
@@ -366,11 +375,10 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
     }, [applyFinalKeyboardHeightFromJS, dimensions.height]);
 
     React.useEffect(() => {
-        // Every value written below is consumed by the recompute in this same pass, so the
-        // recompute receives the freshly computed locals; reading them back would replay the
-        // previous safe area / header / viewport / suppression state and leave the transcript
-        // inset one growth step behind.
-        const previousInputs = readStaticLayoutInputs();
+        // Every value written below is consumed by the recompute in this same pass, so it is
+        // handed to the recompute directly; reading it back would replay the previous safe area /
+        // header / viewport / suppression state and leave the transcript inset a growth step
+        // behind.
         safeAreaBottomValue.value = safeAreaBottom;
         layoutBottomInsetValue.value = layoutBottomInset;
         availablePanelMaxHeightValue.value = availablePanelMaxHeight;
@@ -385,16 +393,15 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             keyboardProgress.value = 0;
         }
         recomputeStaticLayout({
-            ...previousInputs,
             availablePanelMaxHeight,
             headerHeight,
-            isInteractiveDismissActive: keyboardLiftSuppressed ? false : previousInputs.isInteractiveDismissActive,
             isKeyboardLiftSuppressed: keyboardLiftSuppressed,
-            keyboardHeightAbsolute: keyboardLiftSuppressed ? 0 : previousInputs.keyboardHeightAbsolute,
-            keyboardHeightForInset: keyboardLiftSuppressed ? 0 : previousInputs.keyboardHeightForInset,
             layoutBottomInset,
             safeAreaBottom,
             viewportHeight: dimensions.height,
+            ...(keyboardLiftSuppressed
+                ? { isInteractiveDismissActive: false, keyboardHeightAbsolute: 0, keyboardHeightForInset: 0 }
+                : {}),
         });
     }, [
         dimensions.height,
@@ -412,7 +419,6 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         keyboardLiftSuppressed,
         keyboardProgress,
         listBottomInset,
-        readStaticLayoutInputs,
         recomputeStaticLayout,
         layoutBottomInset,
         layoutBottomInsetValue,
@@ -437,19 +443,25 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
                 && nextHeight === 0
                 && nextProgress <= 0
                 && keyboardHeightAbsolute.value > 0;
-            lastKeyboardEventHeightAbsolute.value = nextHeight;
             const retainedHeight = !isKeyboardLiftSuppressed.value
                 && (isKeyboardLiftRetained.value || shouldRetainOpenKeyboardStartFrame)
                 && nextHeight === 0
                 ? keyboardHeightAbsolute.value
                 : nextHeight;
-            keyboardHeightAbsolute.value = isKeyboardLiftSuppressed.value ? 0 : retainedHeight;
+            const absoluteHeight = isKeyboardLiftSuppressed.value ? 0 : retainedHeight;
+            keyboardHeightAbsolute.value = absoluteHeight;
             const storedHeight = isKeyboardLiftSuppressed.value
                 ? 0
                 : resolveKeyboardHeightWithinScaffold(retainedHeight, layoutBottomInsetValue.value);
             keyboardHeightLive.value = storedHeight;
             keyboardHeightForInset.value = storedHeight;
-            runOnJS(notifyKeyboardHeight)(storedHeight);
+            runOnJS(applyKeyboardFrameFromUI)({
+                absoluteHeight,
+                insetHeight: storedHeight,
+                interactiveDismissActive: false,
+                lastEventHeight: nextHeight,
+                liveHeight: storedHeight,
+            });
             keyboardProgress.value = isKeyboardLiftSuppressed.value ? 0 : nextProgress;
             const effectiveLiveHeight = storedHeight;
             const startFrameLiveHeight = nextProgress <= 0 && !shouldRetainOpenKeyboardStartFrame
@@ -487,24 +499,31 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             const rawAbsoluteLiveHeight = eventReportsClosedFrame
                 ? 0
                 : Math.max(eventHeight, reanimatedHeight);
-            lastKeyboardEventHeightAbsolute.value = rawAbsoluteLiveHeight;
             const absoluteLiveHeight = !keyboardLiftIsSuppressed
                 && isKeyboardLiftRetained.value
                 && rawAbsoluteLiveHeight === 0
                 ? keyboardHeightAbsolute.value
                 : rawAbsoluteLiveHeight;
-            keyboardHeightAbsolute.value = keyboardLiftIsSuppressed ? 0 : absoluteLiveHeight;
+            const absoluteHeight = keyboardLiftIsSuppressed ? 0 : absoluteLiveHeight;
+            keyboardHeightAbsolute.value = absoluteHeight;
             const liveHeight = keyboardLiftIsSuppressed
                 ? 0
                 : resolveKeyboardHeightWithinScaffold(absoluteLiveHeight, layoutBottomInsetValue.value);
-            const insetHeight = isInteractiveDismissActive.value ? keyboardHeightForInset.value : liveHeight;
+            const interactiveDismissActive = !keyboardLiftIsSuppressed && isInteractiveDismissActive.value;
+            const insetHeight = interactiveDismissActive ? keyboardHeightForInset.value : liveHeight;
             const effectiveLiveHeight = liveHeight;
             const effectiveInsetHeight = keyboardLiftIsSuppressed ? 0 : insetHeight;
             keyboardHeightLive.value = liveHeight;
-            if (keyboardLiftIsSuppressed || !isInteractiveDismissActive.value) {
+            if (!interactiveDismissActive) {
                 keyboardHeightForInset.value = insetHeight;
             }
-            runOnJS(notifyKeyboardHeight)(liveHeight);
+            runOnJS(applyKeyboardFrameFromUI)({
+                absoluteHeight,
+                insetHeight,
+                interactiveDismissActive,
+                lastEventHeight: rawAbsoluteLiveHeight,
+                liveHeight,
+            });
             keyboardProgress.value = keyboardLiftIsSuppressed ? 0 : eventProgress;
             bottomInset.value = Math.max(safeAreaBottomValue.value, effectiveLiveHeight);
             const nextListBottomInset = composerHeight.value + Math.max(safeAreaBottomValue.value, effectiveInsetHeight);
@@ -526,15 +545,16 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             'worklet';
             if (ignoreKeyboardFramesUntilComposerFocus.value) return;
             const keyboardLiftIsSuppressed = isKeyboardLiftSuppressed.value;
-            isInteractiveDismissActive.value = !keyboardLiftIsSuppressed;
+            const interactiveDismissActive = !keyboardLiftIsSuppressed;
+            isInteractiveDismissActive.value = interactiveDismissActive;
             const eventHeight = Math.max(0, Math.abs(event.height));
-            lastKeyboardEventHeightAbsolute.value = eventHeight;
             const liveHeight = !keyboardLiftIsSuppressed
                 && isKeyboardLiftRetained.value
                 && eventHeight === 0
                 ? keyboardHeightAbsolute.value
                 : eventHeight;
-            keyboardHeightAbsolute.value = keyboardLiftIsSuppressed ? 0 : liveHeight;
+            const absoluteHeight = keyboardLiftIsSuppressed ? 0 : liveHeight;
+            keyboardHeightAbsolute.value = absoluteHeight;
             const effectiveLiveHeight = keyboardLiftIsSuppressed
                 ? 0
                 : resolveKeyboardHeightWithinScaffold(liveHeight, layoutBottomInsetValue.value);
@@ -542,7 +562,13 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             if (keyboardLiftIsSuppressed) {
                 keyboardHeightForInset.value = 0;
             }
-            runOnJS(notifyKeyboardHeight)(effectiveLiveHeight);
+            runOnJS(applyKeyboardFrameFromUI)({
+                absoluteHeight,
+                insetHeight: keyboardLiftIsSuppressed ? 0 : keyboardHeightForInset.value,
+                interactiveDismissActive,
+                lastEventHeight: eventHeight,
+                liveHeight: effectiveLiveHeight,
+            });
             keyboardProgress.value = keyboardLiftIsSuppressed ? 0 : event.progress;
             bottomInset.value = Math.max(safeAreaBottomValue.value, effectiveLiveHeight);
             const nextListBottomInset = composerHeight.value + Math.max(
@@ -568,19 +594,25 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             if (ignoreKeyboardFramesUntilComposerFocus.value) return;
             isInteractiveDismissActive.value = false;
             const nextHeight = Math.max(0, Math.abs(event.height));
-            lastKeyboardEventHeightAbsolute.value = nextHeight;
             const retainedHeight = !isKeyboardLiftSuppressed.value
                 && isKeyboardLiftRetained.value
                 && nextHeight === 0
                 ? keyboardHeightAbsolute.value
                 : nextHeight;
-            keyboardHeightAbsolute.value = isKeyboardLiftSuppressed.value ? 0 : retainedHeight;
+            const absoluteHeight = isKeyboardLiftSuppressed.value ? 0 : retainedHeight;
+            keyboardHeightAbsolute.value = absoluteHeight;
             const effectiveHeight = isKeyboardLiftSuppressed.value
                 ? 0
                 : resolveKeyboardHeightWithinScaffold(retainedHeight, layoutBottomInsetValue.value);
             keyboardHeightLive.value = effectiveHeight;
             keyboardHeightForInset.value = effectiveHeight;
-            runOnJS(notifyKeyboardHeight)(effectiveHeight);
+            runOnJS(applyKeyboardFrameFromUI)({
+                absoluteHeight,
+                insetHeight: effectiveHeight,
+                interactiveDismissActive: false,
+                lastEventHeight: nextHeight,
+                liveHeight: effectiveHeight,
+            });
             keyboardProgress.value = isKeyboardLiftSuppressed.value ? 0 : event.progress;
             bottomInset.value = Math.max(safeAreaBottomValue.value, effectiveHeight);
             const nextListBottomInset = composerHeight.value + Math.max(safeAreaBottomValue.value, effectiveHeight);
@@ -599,10 +631,10 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             runOnJS(notifyAvailablePanelHeight)(nextAvailablePanelHeight);
         },
     }, [
+        applyKeyboardFrameFromUI,
         ignoreKeyboardFramesUntilComposerFocus,
         keyboardAnimation.height,
         notifyAvailablePanelHeight,
-        notifyKeyboardHeight,
         notifyListBottomInset,
         scaffoldMeasuredHeight,
         shouldRetainAndroidZeroProgressStartFrame,
@@ -656,9 +688,8 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             released = true;
             keyboardRetentionCountRef.current = Math.max(0, keyboardRetentionCountRef.current - 1);
             isKeyboardLiftRetained.value = keyboardRetentionCountRef.current > 0;
-            const previousInputs = readStaticLayoutInputs();
             const shouldReleaseKeyboardLift = keyboardRetentionCountRef.current === 0
-                && lastKeyboardEventHeightAbsolute.value === 0;
+                && lastKeyboardEventHeightAbsoluteRef.current === 0;
             if (shouldReleaseKeyboardLift) {
                 isInteractiveDismissActive.value = false;
                 keyboardHeightAbsolute.value = 0;
@@ -670,12 +701,11 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
             // would replay the retained keyboard height for one more step.
             recomputeStaticLayout(shouldReleaseKeyboardLift
                 ? {
-                    ...previousInputs,
                     isInteractiveDismissActive: false,
                     keyboardHeightAbsolute: 0,
                     keyboardHeightForInset: 0,
                 }
-                : previousInputs);
+                : {});
         };
     }, [
         isInteractiveDismissActive,
@@ -684,8 +714,6 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         keyboardHeightForInset,
         keyboardHeightLive,
         keyboardProgress,
-        lastKeyboardEventHeightAbsolute,
-        readStaticLayoutInputs,
         recomputeStaticLayout,
     ]);
 
@@ -704,8 +732,8 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         if (lastMeasuredComposerHeightRef.current === nextHeight) return;
         lastMeasuredComposerHeightRef.current = nextHeight;
         composerHeight.value = nextHeight;
-        recomputeStaticLayout({ ...readStaticLayoutInputs(), composerHeight: nextHeight });
-    }, [composerHeight, readStaticLayoutInputs, recomputeStaticLayout]);
+        recomputeStaticLayout({ composerHeight: nextHeight });
+    }, [composerHeight, recomputeStaticLayout]);
 
     const lastMeasuredScaffoldHeightRef = React.useRef<number | null>(null);
     const setScaffoldMeasuredHeight = React.useCallback((height: number) => {
@@ -713,8 +741,8 @@ export function useComposerKeyboardLayout(options: ComposerKeyboardLayoutOptions
         if (lastMeasuredScaffoldHeightRef.current === nextHeight) return;
         lastMeasuredScaffoldHeightRef.current = nextHeight;
         scaffoldMeasuredHeight.value = nextHeight;
-        recomputeStaticLayout({ ...readStaticLayoutInputs(), scaffoldHeight: nextHeight });
-    }, [readStaticLayoutInputs, recomputeStaticLayout, scaffoldMeasuredHeight]);
+        recomputeStaticLayout({ scaffoldHeight: nextHeight });
+    }, [recomputeStaticLayout, scaffoldMeasuredHeight]);
 
     return React.useMemo(() => ({
         availablePanelHeight,

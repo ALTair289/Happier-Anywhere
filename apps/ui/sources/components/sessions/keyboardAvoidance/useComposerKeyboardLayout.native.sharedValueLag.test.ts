@@ -22,6 +22,7 @@ const lagState = vi.hoisted(() => ({
     },
     keyboardListeners: new Map<string, (event?: { endCoordinates?: { height?: number; screenY?: number } }) => void>(),
     laggingValues: [] as Array<{ commit: () => void }>,
+    platformOS: 'android' as 'android' | 'ios',
 }));
 
 function flushSharedValues(): void {
@@ -44,9 +45,13 @@ vi.mock('react-native', async () => {
             },
         },
         Platform: {
-            OS: 'android',
+            get OS() {
+                return lagState.platformOS;
+            },
             select: <T,>(options: { android?: T; default?: T; native?: T; ios?: T; web?: T }) => (
-                options.android ?? options.native ?? options.default ?? options.ios ?? options.web
+                lagState.platformOS === 'ios'
+                    ? options.ios ?? options.native ?? options.default ?? options.android ?? options.web
+                    : options.android ?? options.native ?? options.default ?? options.ios ?? options.web
             ),
         },
         useWindowDimensions: () => ({ width: 390, height: 800, scale: 1, fontScale: 1 }),
@@ -109,6 +114,7 @@ describe('useComposerKeyboardLayout native (guest-runtime shared-value write lag
         lagState.keyboardHandlers = null;
         lagState.keyboardListeners.clear();
         lagState.laggingValues.length = 0;
+        lagState.platformOS = 'android';
     });
 
     afterEach(() => {
@@ -269,5 +275,109 @@ describe('useComposerKeyboardLayout native (guest-runtime shared-value write lag
         });
 
         expect(received[0]).toBe(700 - 34);
+    });
+
+    // Measured 2026-08-08 across a 25-send device QA: ~36% of sends left the composer drawn
+    // over the transcript at the keyboard-raised seat, permanently. It reproduces with no send
+    // and never with the keyboard already down, so the trigger is the DISMISSAL, and the send
+    // only supplies the JS-thread stall (2-4.5 s) that keeps the hide writes unsynchronized.
+    it('seats the composer at the safe area when a composer measurement lands before the hide writes synchronize', async () => {
+        lagState.platformOS = 'ios';
+        const { useComposerKeyboardLayout } = await import('./useComposerKeyboardLayout.native');
+        const hook = await renderHook(() => useComposerKeyboardLayout({ safeAreaBottom: 34 }));
+        const notifiedInsets: number[] = [];
+
+        act(() => {
+            hook.getCurrent().setComposerMeasuredHeight(137);
+        });
+        flushSharedValues();
+        act(() => {
+            lagState.keyboardHandlers?.onStart?.({ height: 267, progress: 1 });
+        });
+        flushSharedValues();
+        act(() => {
+            lagState.keyboardHandlers?.onEnd?.({ height: 267, progress: 1 });
+        });
+        flushSharedValues();
+
+        expect(hook.getCurrent().bottomInset.value).toBe(267);
+
+        hook.getCurrent().subscribeListBottomInset?.((height) => {
+            notifiedInsets.push(height);
+        });
+        notifiedInsets.length = 0;
+
+        // The keyboard dismisses: its hide frames run on the UI thread and `keyboardDidHide`
+        // settles the layout to a closed keyboard. The JS thread is behind, so NONE of those
+        // writes has synchronized when the composer's own layout pass — it shrinks as the draft
+        // clears — is processed next.
+        act(() => {
+            lagState.keyboardHandlers?.onStart?.({ height: 0, progress: 0 });
+            lagState.keyboardHandlers?.onEnd?.({ height: 0, progress: 0 });
+            lagState.keyboardListeners.get('keyboardDidHide')?.();
+        });
+        act(() => {
+            hook.getCurrent().setComposerMeasuredHeight(120);
+        });
+        flushSharedValues();
+
+        expect(hook.getCurrent().bottomInset.value).toBe(34);
+        expect(notifiedInsets[notifiedInsets.length - 1]).toBe(120 + 34);
+        expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(120 + 34);
+
+        // And it must stay seated: the post-hide latch stops every keyboard worklet until the
+        // composer is refocused, so a wrong seat written here is never re-derived away.
+        act(() => {
+            lagState.keyboardHandlers?.onEnd?.({ height: 0, progress: 0 });
+        });
+        flushSharedValues();
+
+        expect(hook.getCurrent().bottomInset.value).toBe(34);
+    });
+
+    // The mirror shape of the same root: when the stale input set carries the interactive-dismiss
+    // freeze instead of the raised height, the composer docks correctly but the SETTLED inset
+    // reported to the transcript viewport owner keeps the keyboard-sized gap.
+    it('notifies the docked transcript inset when an interactive dismiss settles before its writes synchronize', async () => {
+        lagState.platformOS = 'ios';
+        const { useComposerKeyboardLayout } = await import('./useComposerKeyboardLayout.native');
+        const hook = await renderHook(() => useComposerKeyboardLayout({ safeAreaBottom: 34 }));
+        const notifiedInsets: number[] = [];
+
+        act(() => {
+            hook.getCurrent().setComposerMeasuredHeight(137);
+        });
+        flushSharedValues();
+        act(() => {
+            lagState.keyboardHandlers?.onStart?.({ height: 267, progress: 1 });
+        });
+        flushSharedValues();
+        act(() => {
+            lagState.keyboardHandlers?.onEnd?.({ height: 267, progress: 1 });
+        });
+        flushSharedValues();
+
+        // Swipe-to-dismiss: the gesture freezes the settled inset at the raised height while the
+        // live height follows the finger to zero.
+        act(() => {
+            lagState.keyboardHandlers?.onInteractive?.({ height: 0, progress: 0 });
+        });
+        flushSharedValues();
+
+        hook.getCurrent().subscribeListBottomInset?.((height) => {
+            notifiedInsets.push(height);
+        });
+        notifiedInsets.length = 0;
+
+        act(() => {
+            lagState.keyboardListeners.get('keyboardDidHide')?.();
+        });
+        act(() => {
+            hook.getCurrent().setComposerMeasuredHeight(120);
+        });
+        flushSharedValues();
+
+        expect(hook.getCurrent().bottomInset.value).toBe(34);
+        expect(notifiedInsets[notifiedInsets.length - 1]).toBe(120 + 34);
     });
 });
