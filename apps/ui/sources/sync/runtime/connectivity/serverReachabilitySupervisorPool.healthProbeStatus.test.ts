@@ -23,7 +23,43 @@ afterEach(async () => {
 });
 
 describe('serverReachabilitySupervisorPool (health probe status)', () => {
-    it('treats a non-ok /health response as unreachable (prevents wrong-server loops)', async () => {
+    it('spends a single round trip on readiness when a token is available', async () => {
+        vi.useFakeTimers();
+
+        const runtimeFetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+            if (url.endsWith('/v1/auth/ping')) {
+                return new Response('{"ok":true}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+            }
+            if (url.endsWith('/health')) {
+                return new Response('{"ok":true}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+            }
+            throw new Error(`Unexpected probe URL: ${url}`);
+        });
+
+        setRuntimeFetch(runtimeFetchSpy);
+
+        let lastStatePhase: string | null = null;
+        const unsubscribe = subscribeServerReachabilityState('https://example.test', (state) => {
+            lastStatePhase = state.phase;
+        });
+
+        try {
+            await startServerReachabilitySupervisor({
+                serverUrl: 'https://example.test',
+                token: 'token',
+            });
+        } finally {
+            unsubscribe();
+        }
+
+        expect(lastStatePhase).toBe('online');
+        // The authenticated ping proves reachability AND authentication; the unauthenticated health check
+        // adds a second sequential round trip to every cold boot and every resume without adding evidence.
+        expect(runtimeFetchSpy.mock.calls.map(([input]) => String(input))).toEqual(['https://example.test/v1/auth/ping']);
+    });
+
+    it('treats a non-ok /health response as unreachable when there is no token (prevents wrong-server loops)', async () => {
         vi.useFakeTimers();
 
         const runtimeFetchSpy = vi.fn(async (input: RequestInfo | URL) => {
@@ -49,7 +85,7 @@ describe('serverReachabilitySupervisorPool (health probe status)', () => {
         try {
             await startServerReachabilitySupervisor({
                 serverUrl: 'https://example.test',
-                token: 'token',
+                token: null,
             });
         } finally {
             unsubscribe();
@@ -60,20 +96,20 @@ describe('serverReachabilitySupervisorPool (health probe status)', () => {
         expect(runtimeFetchSpy.mock.calls.map(([input]) => String(input))).toEqual(['https://example.test/health']);
     });
 
-    it('treats a 429 /health response as retry_later (respects Retry-After)', async () => {
+    it('treats a 429 probe response as retry_later (respects Retry-After)', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(0);
 
         const runtimeFetchSpy = vi.fn(async (input: RequestInfo | URL) => {
             const url = String(input);
-            if (url.endsWith('/health')) {
+            if (url.endsWith('/v1/auth/ping')) {
                 return new Response('rate limited', {
                     status: 429,
                     headers: { 'Retry-After': '1' },
                 });
             }
-            if (url.endsWith('/v1/auth/ping')) {
-                throw new Error('Unexpected /v1/auth/ping probe call');
+            if (url.endsWith('/health')) {
+                throw new Error('Unexpected /health probe call');
             }
             throw new Error(`Unexpected probe URL: ${url}`);
         });
@@ -101,16 +137,16 @@ describe('serverReachabilitySupervisorPool (health probe status)', () => {
         expect(lastStatePhase).toBe('offline');
         expect(lastStateReason).toBe('probe_failed');
         expect(lastNextRetryAt).toBe(1000);
-        expect(runtimeFetchSpy.mock.calls.map(([input]) => String(input))).toEqual(['https://example.test/health']);
+        expect(runtimeFetchSpy.mock.calls.map(([input]) => String(input))).toEqual(['https://example.test/v1/auth/ping']);
     });
 
-    it('preserves planned restart reason from proxy maintenance health responses', async () => {
+    it('preserves planned restart reason from proxy maintenance probe responses', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(0);
 
         const runtimeFetchSpy = vi.fn(async (input: RequestInfo | URL) => {
             const url = String(input);
-            if (url.endsWith('/health')) {
+            if (url.endsWith('/v1/auth/ping')) {
                 return new Response('Server reload in progress', {
                     status: 503,
                     headers: {
@@ -119,8 +155,8 @@ describe('serverReachabilitySupervisorPool (health probe status)', () => {
                     },
                 });
             }
-            if (url.endsWith('/v1/auth/ping')) {
-                throw new Error('Unexpected /v1/auth/ping probe call');
+            if (url.endsWith('/health')) {
+                throw new Error('Unexpected /health probe call');
             }
             throw new Error(`Unexpected probe URL: ${url}`);
         });
@@ -148,7 +184,7 @@ describe('serverReachabilitySupervisorPool (health probe status)', () => {
         expect(lastStatePhase).toBe('offline');
         expect(lastStateReason).toBe('server_restarting');
         expect(lastNextRetryAt).toBe(2000);
-        expect(runtimeFetchSpy.mock.calls.map(([input]) => String(input))).toEqual(['https://example.test/health']);
+        expect(runtimeFetchSpy.mock.calls.map(([input]) => String(input))).toEqual(['https://example.test/v1/auth/ping']);
     });
 
     it('uses a fast probe delay for socket-originated planned restart reports', async () => {

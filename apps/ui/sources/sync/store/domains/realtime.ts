@@ -35,7 +35,12 @@ export function mergeNativeUpdateStatus(
   return next;
 }
 
-export type EndpointConnectivityStatus = 'idle' | 'offline' | 'connecting' | 'online' | 'auth_failed' | 'shutting_down';
+/**
+ * User-visible endpoint connectivity. Deliberately narrower than the connection supervisor's phase union:
+ * the supervisor's `shutting_down` teardown phase describes our own lifecycle, not the endpoint, and is
+ * resolved away by `bindManagedConnectionStateToRealtimeStore` before it can reach a connection indicator.
+ */
+export type EndpointConnectivityStatus = 'idle' | 'offline' | 'connecting' | 'online' | 'auth_failed';
 
 export type EndpointConnectivitySnapshot = Readonly<{
   status: EndpointConnectivityStatus;

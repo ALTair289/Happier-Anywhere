@@ -320,6 +320,10 @@ export const V2SessionRecordSchema = z
     agentState: z.string().nullable(),
     agentStateVersion: z.number().int().nonnegative(),
     lastViewedSessionSeq: z.number().int().nonnegative().nullable().optional(),
+    // Server-materialized instant the session entered the unread state (cleared on read).
+    // Declared rather than left to passthrough so it is typed for readers and so the
+    // consumers that derive their coverage from this shape can catch it being dropped.
+    unreadSince: z.number().int().nonnegative().nullable().optional(),
     pendingPermissionRequestCount: z.number().int().min(0).optional(),
     pendingUserActionRequestCount: z.number().int().min(0).optional(),
     pendingRequestObservedAt: z.number().int().nonnegative().nullable().optional(),

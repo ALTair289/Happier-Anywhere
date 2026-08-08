@@ -44,6 +44,7 @@ vi.mock('../../domains/state/persistence', async (importOriginal) => {
 vi.mock('../../domains/state/warmCachePersistence', () => ({
     resolveWarmCacheAccountScope: () => null,
     saveSessionListWarmCacheEntries: () => {},
+    readPersistedSessionListWarmCacheEntries: () => undefined,
 }));
 
 vi.mock('../../domains/state/warmCacheAdapters', async (importOriginal) => {

@@ -52,6 +52,7 @@ function mockSessionPersistenceBoundaries(): void {
     vi.doMock('../../domains/state/warmCachePersistence', () => ({
         resolveWarmCacheAccountScope: vi.fn((fallback: string | null | undefined) => fallback ?? null),
         saveSessionListWarmCacheEntries: vi.fn(),
+        readPersistedSessionListWarmCacheEntries: vi.fn(() => undefined),
     }));
     vi.doMock('@/sync/domains/models/modelOptions', () => ({
         isModelSelectableForSession: vi.fn(() => true),

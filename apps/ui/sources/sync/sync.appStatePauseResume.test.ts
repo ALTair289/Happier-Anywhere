@@ -1,7 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ManagedEndpointSupervisor, ManagedEndpointSupervisorState } from '@happier-dev/connection-supervisor';
-
 import type { PauseController } from '@/utils/timing/pauseController';
 import type { ServerAccountScope } from './domains/scope/serverAccountScope';
 import { createAccountSettingsScope } from './domains/settings/scope/accountSettingsScope';
@@ -74,6 +72,18 @@ vi.mock('@/sync/api/session/apiSocket', () => ({
     },
 }));
 
+const invalidateAllServerReachabilitySupervisorsMock = vi.hoisted(() => vi.fn(async () => {}));
+const stopServerReachabilitySupervisorsMock = vi.hoisted(() => vi.fn(async () => {}));
+
+vi.mock('@/sync/runtime/connectivity/serverReachabilitySupervisorPool', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/sync/runtime/connectivity/serverReachabilitySupervisorPool')>();
+    return {
+        ...actual,
+        invalidateAllServerReachabilitySupervisors: invalidateAllServerReachabilitySupervisorsMock,
+        stopServerReachabilitySupervisors: stopServerReachabilitySupervisorsMock,
+    };
+});
+
 vi.mock('@/log', () => ({
     log: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
@@ -92,6 +102,8 @@ describe('sync AppState pause/resume', () => {
         appStateAddListener.mockClear();
         apiSocketDisconnect.mockClear();
         apiSocketConnect.mockClear();
+        invalidateAllServerReachabilitySupervisorsMock.mockClear();
+        stopServerReachabilitySupervisorsMock.mockClear();
         isTauriDesktopState.value = false;
     });
 
@@ -188,37 +200,16 @@ describe('sync AppState pause/resume', () => {
         await (sync as any).bootstrapSync();
         expect(rearm).toHaveBeenCalledTimes(1);
 
-        vi.spyOn(sync as any, 'resumeViaChanges').mockResolvedValue('aborted');
+        vi.spyOn(sync as any, 'resumeViaChanges').mockResolvedValue({
+            status: 'aborted',
+            refreshedByCatchUp: { sessions: false, machines: false },
+        });
         await sync.resumeSync('app-foreground');
         expect(rearm).toHaveBeenCalledTimes(2);
     });
 
-    it('pauses on background and resumes on active (disconnect/connect socket + invalidate endpoint)', async () => {
+    it('pauses on background and resumes on active (disconnect/connect socket + invalidate reachability)', async () => {
         const { sync } = await import('./sync');
-
-        const onlineState: ManagedEndpointSupervisorState = {
-            phase: 'online',
-            reason: null,
-            attempt: 0,
-            nextRetryAt: null,
-            lastConnectedAt: Date.now(),
-            lastDisconnectedAt: null,
-            lastErrorMessage: null,
-            lastProbe: { status: 'ready' },
-        };
-
-        const invalidate = vi.fn();
-        const supervisor: ManagedEndpointSupervisor = {
-            start: vi.fn(async () => {}),
-            stop: vi.fn(async () => {}),
-            invalidate,
-            reportFailure: vi.fn(),
-            waitUntilOnline: vi.fn(async () => {}),
-            getState: () => onlineState,
-            subscribe: () => () => {},
-        };
-
-        sync.setActiveEndpointSupervisor(supervisor);
 
         expect(appStateAddListener).toHaveBeenCalled();
         const handler = Array.from(appStateHandlers)[0];
@@ -229,11 +220,12 @@ describe('sync AppState pause/resume', () => {
 
         handler!('background');
         expect(apiSocketDisconnect).toHaveBeenCalledTimes(1);
+        expect(stopServerReachabilitySupervisorsMock).toHaveBeenCalledTimes(1);
         expect(pauseController.isPaused()).toBe(true);
 
         handler!('active');
         expect(apiSocketConnect).toHaveBeenCalledTimes(1);
-        expect(invalidate).toHaveBeenCalledTimes(1);
+        expect(invalidateAllServerReachabilitySupervisorsMock).toHaveBeenCalledTimes(1);
         expect(pauseController.isPaused()).toBe(false);
     });
 
@@ -466,30 +458,6 @@ describe('sync AppState pause/resume', () => {
             const { sync } = await import('./sync');
             const scope = resolveTestSettingsScope();
 
-            const onlineState: ManagedEndpointSupervisorState = {
-                phase: 'online',
-                reason: null,
-                attempt: 0,
-                nextRetryAt: null,
-                lastConnectedAt: Date.now(),
-                lastDisconnectedAt: null,
-                lastErrorMessage: null,
-                lastProbe: { status: 'ready' },
-            };
-
-            const invalidate = vi.fn();
-            const supervisor: ManagedEndpointSupervisor = {
-                start: vi.fn(async () => {}),
-                stop: vi.fn(async () => {}),
-                invalidate,
-                reportFailure: vi.fn(),
-                waitUntilOnline: vi.fn(async () => {}),
-                getState: () => onlineState,
-                subscribe: () => () => {},
-            };
-
-            sync.setActiveEndpointSupervisor(supervisor);
-
             const pauseController = (sync as unknown as { pauseController: PauseController }).pauseController;
             expect(pauseController.isPaused()).toBe(false);
             expect(apiSocketDisconnect).toHaveBeenCalledTimes(0);
@@ -511,7 +479,7 @@ describe('sync AppState pause/resume', () => {
                 handler();
             }
             expect(apiSocketConnect).toHaveBeenCalledTimes(1);
-            expect(invalidate).toHaveBeenCalledTimes(1);
+            expect(invalidateAllServerReachabilitySupervisorsMock).toHaveBeenCalledTimes(1);
             expect(pauseController.isPaused()).toBe(false);
         } finally {
             globalWithDocument.document = originalDocument;
@@ -548,29 +516,7 @@ describe('sync AppState pause/resume', () => {
         }) as typeof globalThis.removeEventListener;
 
         try {
-            const { sync } = await import('./sync');
-
-            const onlineState: ManagedEndpointSupervisorState = {
-                phase: 'online',
-                reason: null,
-                attempt: 0,
-                nextRetryAt: null,
-                lastConnectedAt: Date.now(),
-                lastDisconnectedAt: null,
-                lastErrorMessage: null,
-                lastProbe: { status: 'ready' },
-            };
-
-            const invalidate = vi.fn();
-            sync.setActiveEndpointSupervisor({
-                start: vi.fn(async () => {}),
-                stop: vi.fn(async () => {}),
-                invalidate,
-                reportFailure: vi.fn(),
-                waitUntilOnline: vi.fn(async () => {}),
-                getState: () => onlineState,
-                subscribe: () => () => {},
-            });
+            await import('./sync');
 
             expect(windowHandlers.has('pageshow')).toBe(true);
             for (const handler of windowHandlers.get('pageshow') ?? []) {
@@ -578,7 +524,7 @@ describe('sync AppState pause/resume', () => {
             }
 
             expect(apiSocketConnect).toHaveBeenCalledTimes(1);
-            expect(invalidate).toHaveBeenCalledTimes(1);
+            expect(invalidateAllServerReachabilitySupervisorsMock).toHaveBeenCalledTimes(1);
         } finally {
             globalWithDocument.document = originalDocument;
             globalThis.addEventListener = originalAddEventListener;
@@ -621,34 +567,15 @@ describe('sync AppState pause/resume', () => {
         globalWithDocument.document = documentStub;
 
         try {
-            const { sync } = await import('./sync');
-
-            const invalidate = vi.fn();
-            sync.setActiveEndpointSupervisor({
-                start: vi.fn(async () => {}),
-                stop: vi.fn(async () => {}),
-                invalidate,
-                reportFailure: vi.fn(),
-                waitUntilOnline: vi.fn(async () => {}),
-                getState: () => ({
-                    phase: 'online',
-                    reason: null,
-                    attempt: 0,
-                    nextRetryAt: null,
-                    lastConnectedAt: Date.now(),
-                    lastDisconnectedAt: null,
-                    lastErrorMessage: null,
-                    lastProbe: { status: 'ready' },
-                }),
-                subscribe: () => () => {},
-            });
+            await import('./sync');
             apiSocketConnect.mockClear();
+            invalidateAllServerReachabilitySupervisorsMock.mockClear();
 
             vi.setSystemTime(91_000);
             await vi.advanceTimersByTimeAsync(30_000);
 
             expect(apiSocketConnect).toHaveBeenCalledTimes(1);
-            expect(invalidate).toHaveBeenCalledTimes(1);
+            expect(invalidateAllServerReachabilitySupervisorsMock).toHaveBeenCalledTimes(1);
         } finally {
             globalWithDocument.document = originalDocument;
             vi.useRealTimers();

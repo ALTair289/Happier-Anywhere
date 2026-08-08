@@ -17,8 +17,8 @@ import { getActiveServerSnapshot } from '../../domains/server/serverRuntime';
 import { areServerProfileIdentifiersEquivalent } from '../../domains/server/serverProfiles';
 import { projectManager } from '../../runtime/orchestration/projectManager';
 import {
+    readPersistedMachineDisplayWarmCacheEntries,
     resolveWarmCacheAccountScope,
-    type MachineDisplayCacheEntryV1,
     saveMachineDisplayWarmCacheEntries,
 } from '../../domains/state/warmCachePersistence';
 import { buildMachineDisplayCacheEntriesFromRenderables } from '../../domains/state/warmCacheAdapters';
@@ -217,13 +217,19 @@ function resolveProjectMachineGroupSubtitle(
     return 'unknown';
 }
 
+/**
+ * Diffs against what the warm-cache key is known to hold rather than against a
+ * reconstruction of the previous renderables. Boot hydration therefore produces the
+ * record that is already on disk and writes nothing, and steady-state saves skip both
+ * the serialization and the storage write when nothing the cache keeps has changed.
+ */
 function saveWarmMachineCacheForState(
     state: MachinesDomain & MachinesDomainDependencies,
-    previousEntries?: Record<string, MachineDisplayCacheEntryV1>,
 ): void {
     const activeServerId = String(getActiveServerSnapshot().serverId ?? '').trim();
     const accountId = resolveWarmCacheAccountScope(state.profile?.id);
     if (!activeServerId || !accountId) return;
+    const previousEntries = readPersistedMachineDisplayWarmCacheEntries(activeServerId, accountId);
     const nextEntries = buildMachineDisplayCacheEntriesFromRenderables(state.machineDisplayById ?? {}, previousEntries);
     if (previousEntries && nextEntries === previousEntries) return;
     saveMachineDisplayWarmCacheEntries(activeServerId, accountId, nextEntries);
@@ -263,14 +269,12 @@ export function createMachinesDomain<S extends MachinesDomain & MachinesDomainDe
     get: StoreGet<S>;
 }): MachinesDomain {
     let warmCacheSaveScheduler: ReturnType<typeof createWarmCacheSaveScheduler<
-        MachinesDomain & MachinesDomainDependencies,
-        Record<string, MachineDisplayCacheEntryV1>
+        MachinesDomain & MachinesDomainDependencies
     >> | null = null;
     const getWarmCacheSaveScheduler = () => {
         if (!warmCacheSaveScheduler) {
             warmCacheSaveScheduler = createWarmCacheSaveScheduler<
-                MachinesDomain & MachinesDomainDependencies,
-                Record<string, MachineDisplayCacheEntryV1>
+                MachinesDomain & MachinesDomainDependencies
             >({
                 get,
                 save: saveWarmMachineCacheForState,

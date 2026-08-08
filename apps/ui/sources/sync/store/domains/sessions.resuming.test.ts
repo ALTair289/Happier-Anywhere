@@ -47,6 +47,7 @@ function mockSessionsDomainBoundaries() {
     vi.doMock('../../domains/state/warmCachePersistence', () => ({
         resolveWarmCacheAccountScope: vi.fn(() => null),
         saveSessionListWarmCacheEntries: vi.fn(),
+        readPersistedSessionListWarmCacheEntries: vi.fn(() => undefined),
     }));
     vi.doMock('../../domains/state/warmCacheAdapters', async () => {
         const actual = await vi.importActual<typeof import('../../domains/state/warmCacheAdapters')>('../../domains/state/warmCacheAdapters');

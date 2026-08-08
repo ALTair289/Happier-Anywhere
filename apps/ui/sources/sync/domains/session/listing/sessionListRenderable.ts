@@ -25,6 +25,7 @@ import type { SessionListAttentionPromotionReason } from './attentionPromotion/s
 import {
     didSessionListPlacementProjectionDiverge,
     projectSessionListPlacement,
+    resolveSessionListUnreadEntryActivityAt,
 } from './placement/sessionListPlacementProjection';
 import { didSessionListWorkingRetentionInputsChange } from './placement/sessionListWorkingRetention';
 import {
@@ -103,6 +104,14 @@ export interface SessionListRenderableSession {
     hasPendingUserActionRequests?: boolean;
     pendingRequestObservedAt?: number | null;
     hasUnreadMessages?: boolean;
+    /**
+     * When this session entered its current unread state. Stable for as long
+     * as the session stays unread, so the attention lane can order unread rows
+     * without re-sorting on every incoming message. Server-materialized when
+     * the server reports it; otherwise stamped once by the merge owner
+     * (`resolveSessionListRenderableUnreadSince`). Always null when read.
+     */
+    unreadSince?: number | null;
     keepVisibleWhenInactive?: boolean;
     metadataUnavailable?: boolean;
 }
@@ -214,25 +223,27 @@ export function buildSessionListRenderableFromSession(
     const pending = derivePendingRequestFlagsFromSession(session, messages, statesCache);
     const latestCommittedMessageCreatedAt = aggregate ? aggregate.latestCommittedMessageCreatedAt : null;
     const latestTurnStatus = readSessionLatestTurnStatus(session);
-    const latestTurnStatusObservedAt = readSessionReadyEventNumber(session, 'latestTurnStatusObservedAt');
+    const latestTurnStatusObservedAt = readSessionNumericField(session, 'latestTurnStatusObservedAt');
     const runtimePresence = resolveSessionRuntimePresenceFields({
         thinking: session.thinking,
         thinkingAt: session.thinkingAt,
         latestTurnStatus,
         latestTurnStatusObservedAt,
     });
+    const meaningfulActivityAt = deriveSessionListMeaningfulActivityAt({
+        sessionCreatedAt: session.createdAt,
+        sessionMeaningfulActivityAt: session.meaningfulActivityAt ?? null,
+        latestCommittedMessageCreatedAt,
+        latestThinkingActivityAt: null,
+        latestPendingMessageCreatedAt: null,
+    });
+    const hasUnreadMessages = deriveSessionListRenderableHasUnreadMessagesFromSession(session, messages, aggregate);
     return {
         id: session.id,
         seq: session.seq,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
-        meaningfulActivityAt: deriveSessionListMeaningfulActivityAt({
-            sessionCreatedAt: session.createdAt,
-            sessionMeaningfulActivityAt: session.meaningfulActivityAt ?? null,
-            latestCommittedMessageCreatedAt,
-            latestThinkingActivityAt: null,
-            latestPendingMessageCreatedAt: null,
-        }),
+        meaningfulActivityAt,
         active: session.active,
         activeAt: session.activeAt,
         archivedAt: session.archivedAt ?? null,
@@ -255,8 +266,8 @@ export function buildSessionListRenderableFromSession(
         runtimeActivityRevision: session.runtimeActivityRevision ?? null,
         lastRuntimeIssue: readSessionLastRuntimeIssue(session),
         rollbackEligibleTurnStarts: readRollbackEligibleTurnStarts(session.rollbackEligibleTurnStarts),
-        latestReadyEventSeq: readSessionReadyEventNumber(session, 'latestReadyEventSeq'),
-        latestReadyEventAt: readSessionReadyEventNumber(session, 'latestReadyEventAt'),
+        latestReadyEventSeq: readSessionNumericField(session, 'latestReadyEventSeq'),
+        latestReadyEventAt: readSessionNumericField(session, 'latestReadyEventAt'),
         optimisticThinkingAt: session.optimisticThinkingAt ?? null,
         resumingAt: session.resumingAt ?? null,
         thinkingGraceUntil: session.thinkingGraceUntil ?? null,
@@ -266,8 +277,55 @@ export function buildSessionListRenderableFromSession(
         hasPendingPermissionRequests: pending.hasPendingPermissionRequests,
         hasPendingUserActionRequests: pending.hasPendingUserActionRequests,
         pendingRequestObservedAt: deriveLatestPendingRequestObservedAtFromSession(session, messages, statesCache),
-        hasUnreadMessages: deriveSessionListRenderableHasUnreadMessagesFromSession(session, messages, aggregate),
+        hasUnreadMessages,
+        // Server-materialized entry fact only, never a client guess: a built
+        // renderable carrying a value is what tells the merge owner it holds an
+        // authoritative one. Stamping the fallback here would make an older
+        // server's rows indistinguishable from a materialized value, and the
+        // fallback would then re-derive itself from moving activity on every
+        // message. The merge owner stamps it once instead.
+        unreadSince: hasUnreadMessages ? readSessionNumericField(session, 'unreadSince') : null,
     };
+}
+
+/**
+ * Single owner of the unread entry fact across every renderable ingestion
+ * path. Unread membership is a boolean edge: while a session stays unread its
+ * entry time must not move, otherwise the attention lane re-sorts and the
+ * committed session list is invalidated on every incoming message.
+ *
+ * Precedence: the server-materialized value on the incoming row wins, because
+ * it is the only value that is the same on every device and across boots. It
+ * is stable by construction (stamped at the read -> unread edge, cleared on
+ * the way back), so preferring it cannot move the row while it stays unread.
+ * Only when the server supplies none — an older server, or a warm row that has
+ * not met the network yet — does the row keep the stamp it already carries,
+ * and only a row with no stamp at all gets a fresh one.
+ */
+function resolveSessionListRenderableUnreadSince(
+    previous: SessionListRenderableSession | undefined,
+    next: SessionListRenderableSession,
+): number | null {
+    if (next.hasUnreadMessages !== true) return null;
+    const incoming = normalizeUnreadSince(next.unreadSince);
+    if (incoming !== null) return incoming;
+    if (previous?.hasUnreadMessages === true) {
+        const carried = normalizeUnreadSince(previous.unreadSince);
+        if (carried !== null) return carried;
+        // The row was already unread but predates the entry fact (raw
+        // warm-cache rehydration): adopt ITS activity time so the row keeps
+        // the exact position it is already rendered at.
+        const previousEntryActivityAt = resolveSessionListUnreadEntryActivityAt(previous);
+        if (previousEntryActivityAt !== null) return previousEntryActivityAt;
+    }
+    // Read -> unread edge (or a row with no usable history): stamp once from the
+    // incoming activity time. `next.unreadSince` is provably absent here, so the
+    // only remaining source is the activity fallback.
+    return resolveSessionListUnreadEntryActivityAt(next);
+}
+
+function normalizeUnreadSince(value: number | null | undefined): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 export function preserveSessionListRenderableTransientState(
@@ -277,6 +335,7 @@ export function preserveSessionListRenderableTransientState(
     return {
         ...next,
         keepVisibleWhenInactive: previous?.keepVisibleWhenInactive === true,
+        unreadSince: resolveSessionListRenderableUnreadSince(previous, next),
     };
 }
 
@@ -418,6 +477,7 @@ export function areSessionListRenderablesEqual(
         && (previous.hasPendingUserActionRequests ?? null) === (next.hasPendingUserActionRequests ?? null)
         && (previous.pendingRequestObservedAt ?? null) === (next.pendingRequestObservedAt ?? null)
         && (previous.hasUnreadMessages === true) === (next.hasUnreadMessages === true)
+        && (previous.unreadSince ?? null) === (next.unreadSince ?? null)
         && (previous.keepVisibleWhenInactive === true) === (next.keepVisibleWhenInactive === true)
         && (previous.metadataUnavailable === true) === (next.metadataUnavailable === true)
         && areSessionListRenderableMetadataEqual(previous.metadata, next.metadata);
@@ -427,11 +487,16 @@ export function applySessionListRenderablePatch(
     renderable: SessionListRenderableSession,
     patch: SessionListRenderablePatchFields,
 ): SessionListRenderableSession {
-    return {
+    const patched = {
         ...renderable,
         ...patch,
         id: renderable.id,
     };
+    // Streaming patches carry whole freshly-built renderables whose unread
+    // entry fact is re-stamped from the latest activity; keep the row's
+    // existing entry time so an unread row does not move on every message.
+    patched.unreadSince = resolveSessionListRenderableUnreadSince(renderable, patched);
+    return patched;
 }
 
 export function isSessionListRenderablePatchNoop(
@@ -493,9 +558,9 @@ function readSessionLastRuntimeIssue(session: Session): SessionRuntimeIssueV1 | 
     return isSessionRuntimeIssueV1(value) ? value : null;
 }
 
-function readSessionReadyEventNumber(
+function readSessionNumericField(
     session: Session,
-    key: 'latestReadyEventSeq' | 'latestReadyEventAt' | 'latestTurnStatusObservedAt',
+    key: 'latestReadyEventSeq' | 'latestReadyEventAt' | 'latestTurnStatusObservedAt' | 'unreadSince',
 ): number | null {
     const value = (session as unknown as Record<string, unknown>)[key];
     return typeof value === 'number' && Number.isFinite(value)

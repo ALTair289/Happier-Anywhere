@@ -5,8 +5,7 @@ import { resolveSessionRowForIndexItem, type ResolveSessionListIndexRow } from '
 import type { SessionListRenderableSession } from '../sessionListRenderable';
 import {
     projectSessionListPlacement,
-    resolveSessionListActionRequiredPlacementTimestamp,
-    resolveSessionListUnreadPlacementTimestamp,
+    resolveSessionListPlacementTimestampForReason,
 } from '../placement/sessionListPlacementProjection';
 import {
     normalizeSessionListPlacementKey,
@@ -132,27 +131,6 @@ function comparePlacementCandidatesByTimestamp<Reason extends PlacementReason>(
     return left.key.localeCompare(right.key);
 }
 
-function resolveAttentionCandidateFallbackTimestamp(
-    row: SessionListRenderableSession,
-    reason: SessionListAttentionPromotionReason,
-): number {
-    if (reason === 'action_required' || reason === 'permission_required') {
-        return resolveSessionListActionRequiredPlacementTimestamp(row) ?? 0;
-    }
-    if (reason === 'unread') {
-        return resolveSessionListUnreadPlacementTimestamp(row) ?? 0;
-    }
-    const candidates = reason === 'failed'
-        ? [row.lastRuntimeIssue?.occurredAt, row.latestTurnStatusObservedAt]
-        : [row.latestReadyEventAt, row.latestTurnStatusObservedAt];
-    for (const candidate of candidates) {
-        if (typeof candidate === 'number' && Number.isFinite(candidate)) {
-            return candidate;
-        }
-    }
-    return 0;
-}
-
 function resolveAttentionCandidate(params: Readonly<{
     item: SessionIndexItem;
     originalIndex: number;
@@ -190,7 +168,7 @@ function resolveAttentionCandidate(params: Readonly<{
         reason: resolvedReason,
         timestamp: placement.kind === resolvedReason && placement.timestamp !== null
             ? placement.timestamp
-            : resolveAttentionCandidateFallbackTimestamp(row, resolvedReason),
+            : resolveSessionListPlacementTimestampForReason(row, resolvedReason) ?? 0,
         originalIndex: params.originalIndex,
         retainedIndex: params.retainedKeyRanks.get(key) ?? null,
     };

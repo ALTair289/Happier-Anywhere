@@ -233,11 +233,8 @@ describe('apiSocket reachability supervision', () => {
 
         const runtimeFetchMock = vi.fn(async (input: RequestInfo | URL) => {
             const url = typeof input === 'string' ? input : String(input);
-            if (url.endsWith('/health')) {
+            if (url.endsWith('/health') || url.endsWith('/v1/auth/ping')) {
                 throw new TypeError('Network request failed');
-            }
-            if (url.endsWith('/v1/auth/ping')) {
-                return new Response(null, { status: 200, headers: new Headers() });
             }
             return new Response(null, { status: 200, headers: new Headers() });
         });
@@ -339,6 +336,63 @@ describe('apiSocket reachability supervision', () => {
         expect(reportServerUnreachableSpy).not.toHaveBeenCalled();
     });
 
+    it('stops claiming the endpoint is online after an intentional disconnect', async () => {
+        const fakeSocket = createSocketStub();
+
+        vi.doMock('@/sync/runtime/connectivity/serverReachabilitySupervisorPool', async (importOriginal) => {
+            const actual = await importOriginal<typeof import('@/sync/runtime/connectivity/serverReachabilitySupervisorPool')>();
+            return {
+                ...actual,
+                subscribeServerReachabilityState: (_serverUrl: string, listener: (state: any) => void) => {
+                    listener({
+                        phase: 'online',
+                        reason: null,
+                        attempt: 0,
+                        nextRetryAt: null,
+                        lastConnectedAt: Date.now(),
+                        lastDisconnectedAt: null,
+                        lastErrorMessage: null,
+                    });
+                    return () => {};
+                },
+                startServerReachabilitySupervisor: vi.fn(async () => {}),
+                stopServerReachabilitySupervisor: vi.fn(async () => {}),
+            };
+        });
+
+        vi.doMock('@/sync/api/session/connection/createSyncSocketTransport', () => ({
+            createSyncSocketTransport: () => ({
+                socket: fakeSocket,
+                transport: {
+                    async connect() {},
+                    async disconnect() {},
+                    async destroy() {},
+                    isConnected: () => false,
+                    onConnected: () => () => {},
+                    onDisconnected: () => () => {},
+                    onError: () => () => {},
+                },
+            }),
+        }));
+
+        const { apiSocket } = await import('./apiSocket');
+        const encryption = { getSessionEncryption: () => null } as unknown as Encryption;
+
+        const phases: string[] = [];
+        apiSocket.onConnectionStateChange((state) => {
+            phases.push(state.phase);
+        });
+
+        apiSocket.initialize({ endpoint: 'https://api.example.test', token: 'token-a' }, encryption);
+        expect(phases.at(-1)).toBe('online');
+
+        // Backgrounding tears the connection down on purpose. Leaving `online` as the last published state
+        // makes the next foreground read "endpoint online, socket down", which surfaces as a server outage.
+        apiSocket.disconnect();
+
+        expect(phases.at(-1)).not.toBe('online');
+    });
+
     it('gates apiSocket.request when server reachability cannot be established', async () => {
         process.env.EXPO_PUBLIC_HAPPIER_SERVER_REACHABILITY_WAIT_TIMEOUT_MS = '5';
 
@@ -362,7 +416,7 @@ describe('apiSocket reachability supervision', () => {
 
         const runtimeFetchMock = vi.fn(async (input: RequestInfo | URL) => {
             const url = typeof input === 'string' ? input : String(input);
-            if (url.endsWith('/health')) {
+            if (url.endsWith('/health') || url.endsWith('/v1/auth/ping')) {
                 throw new TypeError('Network request failed');
             }
             if (url.endsWith('/v1/account/profile')) {

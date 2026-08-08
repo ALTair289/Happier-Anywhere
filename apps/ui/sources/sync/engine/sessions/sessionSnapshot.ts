@@ -155,7 +155,12 @@ function normalizeSessionListSeq(value: number | null | undefined): number | nul
         : null;
 }
 
-function normalizeSessionListTimestamp(value: number | null | undefined): number | null {
+/**
+ * Accepts `unknown` because session-list rows are a `.passthrough()` protocol
+ * shape: fields the schema does not declare (see `rowRecord` below) arrive
+ * typed as `unknown` and are validated here rather than at each call site.
+ */
+function normalizeSessionListTimestamp(value: unknown): number | null {
     return typeof value === 'number' && Number.isFinite(value)
         ? Math.max(0, Math.trunc(value))
         : null;
@@ -376,6 +381,14 @@ function buildRenderableFromRowAndCache(
         latestReadyEventAt,
         pendingRequestObservedAt,
         hasUnreadMessages,
+        // Warm first paint must already hold the stable ordering key. Dropping
+        // it here would order this row by its (moving) activity time until
+        // hydration lands and supplies the server value — the exact reorder the
+        // materialized entry fact exists to remove. Server value only, same as
+        // `buildSessionListRenderableFromSession`: a client stamp here would be
+        // indistinguishable from a materialized one, and the renderable merge
+        // owner is the single place allowed to stamp the fallback.
+        unreadSince: hasUnreadMessages ? normalizeSessionListTimestamp(rowRecord.unreadSince) : null,
     };
 }
 

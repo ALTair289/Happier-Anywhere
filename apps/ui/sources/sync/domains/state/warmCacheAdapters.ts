@@ -10,6 +10,51 @@ import type {
     SessionListCacheEntryV1,
 } from './warmCachePersistence';
 
+/**
+ * The warm cache exists to paint the first screens of the session list before the
+ * network answers; it is not a mirror of the account. An uncapped blob makes every cold
+ * boot parse (and every save re-serialize) one entry per session the account has ever
+ * had, on the boot critical path. Bound it to the rows the list can plausibly show
+ * before the first fetch lands.
+ *
+ * The retention policy lives here rather than with storage because both the entry
+ * projection and the persistence layer apply it, and it must not depend on MMKV.
+ */
+export const SESSION_LIST_WARM_CACHE_MAX_ENTRIES = 200;
+
+export type WarmCacheSessionOrderingFields = Readonly<{
+    meaningfulActivityAt?: number | null;
+    createdAt: number;
+}>;
+
+function resolveWarmCacheOrderingActivityAt(row: WarmCacheSessionOrderingFields): number {
+    return typeof row.meaningfulActivityAt === 'number' ? row.meaningfulActivityAt : row.createdAt;
+}
+
+/**
+ * Single owner of the warm-cache size bound. Selects the most recent ids using the
+ * server list ordering key (`meaningfulActivityAt desc, id desc`) so the cached head of
+ * the list matches the head the server would return.
+ *
+ * Returns `null` when every id fits, so callers keep their record-identity fast paths
+ * instead of rebuilding an equivalent record on every fetch.
+ */
+export function selectMostRecentWarmCacheSessionIds(
+    rows: Readonly<Record<string, WarmCacheSessionOrderingFields>>,
+    limit: number = SESSION_LIST_WARM_CACHE_MAX_ENTRIES,
+): readonly string[] | null {
+    const ids = Object.keys(rows);
+    if (ids.length <= limit) return null;
+    return ids
+        .sort((leftId, rightId) => {
+            const left = resolveWarmCacheOrderingActivityAt(rows[leftId]);
+            const right = resolveWarmCacheOrderingActivityAt(rows[rightId]);
+            if (left !== right) return right - left;
+            return leftId < rightId ? 1 : leftId > rightId ? -1 : 0;
+        })
+        .slice(0, limit);
+}
+
 const EMPTY_WARM_CACHE_ENTRIES: Record<string, never> = {};
 const EMPTY_SESSION_LIST_CACHE_ENTRIES = EMPTY_WARM_CACHE_ENTRIES as Record<string, SessionListCacheEntryV1>;
 const EMPTY_MACHINE_DISPLAY_CACHE_ENTRIES = EMPTY_WARM_CACHE_ENTRIES as Record<string, MachineDisplayCacheEntryV1>;
@@ -124,10 +169,10 @@ function areSessionListCacheEntriesEqual(
         && nextEntry.flavor === previousEntry.flavor
         && areDirectSessionCacheEntriesEqual(nextEntry.directSessionV1, previousEntry.directSessionV1)
         && nextEntry.hiddenSystemSession === previousEntry.hiddenSystemSession
-        && nextEntry.keepVisibleWhenInactive === previousEntry.keepVisibleWhenInactive
         && nextEntry.hasPendingPermissionRequests === previousEntry.hasPendingPermissionRequests
         && nextEntry.hasPendingUserActionRequests === previousEntry.hasPendingUserActionRequests
         && nextEntry.hasUnreadMessages === previousEntry.hasUnreadMessages
+        && (nextEntry.unreadSince ?? null) === (previousEntry.unreadSince ?? null)
     );
 }
 
@@ -199,11 +244,19 @@ export function buildSessionListRenderableFromCacheEntry(entry: SessionListCache
         latestReadyEventAt: normalizeNonNegativeNumber(entry.latestReadyEventAt),
         accessLevel: entry.accessLevel,
         canApprovePermissions: entry.canApprovePermissions,
-        keepVisibleWhenInactive: entry.keepVisibleWhenInactive === true,
-        hasPendingPermissionRequests: entry.hasPendingPermissionRequests === true,
-        hasPendingUserActionRequests: entry.hasPendingUserActionRequests === true,
+        // `keepVisibleWhenInactive` is transient client placement state: every commit
+        // re-derives it from the previous renderable, so a cached value can never
+        // survive hydration. It is therefore not persisted at all.
+        // Pending flags stay verbatim (including absent) so a warm row reports
+        // "not hydrated yet" rather than claiming there are no pending requests,
+        // and so entry -> renderable -> entry is lossless.
+        hasPendingPermissionRequests: entry.hasPendingPermissionRequests,
+        hasPendingUserActionRequests: entry.hasPendingUserActionRequests,
         pendingRequestObservedAt: normalizeNonNegativeNumber(entry.pendingRequestObservedAt),
         hasUnreadMessages: normalizeBoolean(entry.hasUnreadMessages),
+        // Restoring the unread entry fact is what keeps the attention lane ordered
+        // by a durable server fact instead of a per-boot, per-device one.
+        unreadSince: entry.unreadSince ?? null,
         metadataUnavailable: !metadataUsable,
     };
 }
@@ -286,30 +339,60 @@ export function buildSessionListCacheEntryFromRenderable(
         hiddenSystemSession: preserveMetadata
             ? previousEntry.hiddenSystemSession === true
             : session.metadata?.hiddenSystemSession === true,
-        keepVisibleWhenInactive: session.keepVisibleWhenInactive === true,
         hasPendingPermissionRequests: preserveAgentState
-            ? previousEntry.hasPendingPermissionRequests === true
+            ? previousEntry.hasPendingPermissionRequests
             : typeof session.hasPendingPermissionRequests === 'boolean'
                 ? session.hasPendingPermissionRequests
                 : undefined,
         hasPendingUserActionRequests: preserveAgentState
-            ? previousEntry.hasPendingUserActionRequests === true
+            ? previousEntry.hasPendingUserActionRequests
             : typeof session.hasPendingUserActionRequests === 'boolean'
                 ? session.hasPendingUserActionRequests
                 : undefined,
         hasUnreadMessages: preserveReadState
             ? normalizeBoolean(previousEntry.hasUnreadMessages)
             : normalizeBoolean(session.hasUnreadMessages),
+        // Part of read state: it must travel with `hasUnreadMessages`, or a
+        // not-yet-hydrated row would drop the entry fact of the unread state it
+        // is still reporting.
+        unreadSince: preserveReadState
+            ? previousEntry.unreadSince ?? null
+            : normalizeNonNegativeNumber(session.unreadSince),
     };
 
     return previousEntry && areSessionListCacheEntriesEqual(nextEntry, previousEntry) ? previousEntry : nextEntry;
 }
 
+/**
+ * Projects every renderable into its cache entry. Used both as the in-memory metadata
+ * fallback for a session-list fetch and, through
+ * `buildPersistedSessionListCacheEntriesFromRenderables`, as the persisted warm cache.
+ */
 export function buildSessionListCacheEntriesFromRenderables(
     sessions: Record<string, SessionListRenderableSession>,
     previousEntries?: Record<string, SessionListCacheEntryV1>,
 ): Record<string, SessionListCacheEntryV1> {
-    const sessionIds = Object.keys(sessions);
+    return buildSessionListCacheEntries(sessions, previousEntries, null);
+}
+
+/**
+ * The persisted warm cache keeps only the most recent rows by the server list ordering
+ * key, so a long-lived account cannot grow an unbounded blob that every boot must parse
+ * and every save must re-serialize. The in-memory projection above stays complete.
+ */
+export function buildPersistedSessionListCacheEntriesFromRenderables(
+    sessions: Record<string, SessionListRenderableSession>,
+    previousEntries?: Record<string, SessionListCacheEntryV1>,
+): Record<string, SessionListCacheEntryV1> {
+    return buildSessionListCacheEntries(sessions, previousEntries, selectMostRecentWarmCacheSessionIds(sessions));
+}
+
+function buildSessionListCacheEntries(
+    sessions: Record<string, SessionListRenderableSession>,
+    previousEntries: Record<string, SessionListCacheEntryV1> | undefined,
+    cappedSessionIds: readonly string[] | null,
+): Record<string, SessionListCacheEntryV1> {
+    const sessionIds = cappedSessionIds ?? Object.keys(sessions);
     if (sessionIds.length === 0) {
         return previousEntries && countOwnEntries(previousEntries) === 0 ? previousEntries : EMPTY_SESSION_LIST_CACHE_ENTRIES;
     }
@@ -325,10 +408,14 @@ export function buildSessionListCacheEntriesFromRenderables(
 
     let nextEntries = previousEntries;
     let didChange = false;
+    let addedCount = 0;
 
     for (const sessionId of sessionIds) {
         const session = sessions[sessionId];
         const previousEntry = previousEntries[sessionId];
+        if (!previousEntry) {
+            addedCount += 1;
+        }
         const nextEntry = buildSessionListCacheEntryFromRenderable(session, previousEntry);
         if (!previousEntry || nextEntry !== previousEntry) {
             if (!didChange) {
@@ -339,19 +426,23 @@ export function buildSessionListCacheEntriesFromRenderables(
         }
     }
 
-    if (countOwnEntries(previousEntries) !== sessionIds.length) {
-        if (!didChange) {
-            nextEntries = { ...previousEntries };
-            didChange = true;
-        }
-
+    // Equal counts alone do not imply equal membership once entries can both enter and
+    // leave the retained window, so only skip the eviction scan when nothing was added
+    // AND the counts already match — which together prove the previous record is exactly
+    // the retained set.
+    if (addedCount > 0 || countOwnEntries(previousEntries) !== sessionIds.length) {
+        const retainedSessionIds = cappedSessionIds ? new Set(cappedSessionIds) : null;
         for (const previousSessionId in previousEntries) {
-            if (
-                Object.prototype.hasOwnProperty.call(previousEntries, previousSessionId)
-                && sessions[previousSessionId] === undefined
-            ) {
-                delete nextEntries[previousSessionId];
+            if (!Object.prototype.hasOwnProperty.call(previousEntries, previousSessionId)) continue;
+            const isRetained = retainedSessionIds
+                ? retainedSessionIds.has(previousSessionId)
+                : sessions[previousSessionId] !== undefined;
+            if (isRetained) continue;
+            if (!didChange) {
+                nextEntries = { ...previousEntries };
+                didChange = true;
             }
+            delete nextEntries[previousSessionId];
         }
     }
 

@@ -53,6 +53,7 @@ function mockSessionPersistenceBoundaries(): void {
     vi.doMock('../../domains/state/warmCachePersistence', () => ({
         resolveWarmCacheAccountScope: vi.fn((fallback: string | null | undefined) => fallback ?? null),
         saveSessionListWarmCacheEntries: vi.fn(),
+        readPersistedSessionListWarmCacheEntries: vi.fn(() => undefined),
     }));
     vi.doMock('@/sync/domains/models/modelOptions', () => ({
         isModelSelectableForSession: vi.fn(() => true),
@@ -897,6 +898,160 @@ describe('sessions domain: sessionListViewData rebuild gating', () => {
         ]);
 
         expect(get().sessionListViewData).not.toBe(initial);
+    });
+
+    it('KEYSTONE: does not rebuild sessionListViewData when an already-unread session receives new activity', async () => {
+        vi.doMock('../../runtime/orchestration/projectManager', () => ({
+            projectManager: { updateSessions: vi.fn() },
+        }));
+        mockSessionPersistenceBoundaries();
+
+        const { resolveSessionListRenderableAttentionPromotionPlacement } = await import(
+            '../../domains/session/listing/sessionListRenderable'
+        );
+        const { createSessionsDomain } = await import('./sessions');
+        const { get, domain } = createHarness(createSessionsDomain, {
+            settings: {
+                // The attention lane must be LIVE, otherwise unread rows never reach a
+                // promotion placement and this assertion could not discriminate.
+                sessionListAttentionPromotionModeV1: 'global',
+                // Project grouping keeps the date-bucket gate out of the way, so the only
+                // thing left that can rebuild the list here is the attention placement key.
+                groupInactiveSessionsByProject: true,
+            },
+        });
+
+        const row = (overrides: Record<string, unknown>) => ({
+            id: 's1',
+            seq: 10,
+            // Read: the view cursor is level with the readable seq.
+            lastViewedSessionSeq: 10,
+            createdAt: 1_000,
+            updatedAt: 5_000,
+            meaningfulActivityAt: 5_000,
+            active: false,
+            activeAt: 5_000,
+            metadata: { machineId: 'm1', path: '/home/u/repo', homeDir: '/home/u' },
+            metadataVersion: 1,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0,
+            presence: 5_000,
+            // A terminal turn makes the session seq readable, which is what makes the
+            // row unread against `lastViewedSessionSeq`. It must NOT be 'completed'
+            // and must carry no ready event, or the row is ready-for-review and lands
+            // in the 'ready' lane (whose key is not the unread entry fact) instead.
+            latestTurnStatus: 'cancelled',
+            latestReadyEventSeq: null,
+            latestReadyEventAt: null,
+            ...overrides,
+        } as any);
+
+        domain.applySessions([row({})]);
+        expect(get().sessionListRenderables.s1.hasUnreadMessages).toBe(false);
+        const beforeEdge = get().sessionListViewData;
+        expect(Array.isArray(beforeEdge)).toBe(true);
+
+        // Read -> unread membership edge: this one MUST rebuild. It is the positive
+        // control that proves the assertion below is not simply unreachable.
+        domain.applySessions([row({ seq: 12, updatedAt: 6_000, meaningfulActivityAt: 6_000 })]);
+
+        expect(get().sessionListRenderables.s1.hasUnreadMessages).toBe(true);
+        const entryFact = get().sessionListRenderables.s1.unreadSince;
+        expect(entryFact).toBe(6_000);
+        const afterEdge = get().sessionListViewData;
+        expect(afterEdge).not.toBe(beforeEdge);
+        // The row must really be sitting in the 'unread' attention lane keyed on the
+        // entry fact — otherwise the no-rebuild assertion below would hold for the
+        // wrong reason (e.g. a lane whose key never depended on activity at all).
+        expect(resolveSessionListRenderableAttentionPromotionPlacement(get().sessionListRenderables.s1))
+            .toEqual({ kind: 'unread', timestamp: 6_000 });
+
+        // New activity lands while the row STAYS unread: membership is unchanged, so
+        // the entry fact must not move and the list must not be rebuilt.
+        domain.applySessions([row({ seq: 13, updatedAt: 9_000, meaningfulActivityAt: 9_000 })]);
+
+        // The update really was ingested — without this the identity assertion below
+        // would pass vacuously for a dropped update.
+        expect(get().sessionListRenderables.s1.seq).toBe(13);
+        expect(get().sessionListRenderables.s1.meaningfulActivityAt).toBe(9_000);
+        expect(get().sessionListRenderables.s1.hasUnreadMessages).toBe(true);
+        expect(get().sessionListRenderables.s1.unreadSince).toBe(entryFact);
+        expect(get().sessionListViewData).toBe(afterEdge);
+    });
+
+    it('stamps the unread entry fact on the FIRST applySessions that ingests an unread row', async () => {
+        vi.doMock('../../runtime/orchestration/projectManager', () => ({
+            projectManager: { updateSessions: vi.fn() },
+        }));
+        mockSessionPersistenceBoundaries();
+
+        const { resolveSessionListRenderableAttentionPromotionPlacement } = await import(
+            '../../domains/session/listing/sessionListRenderable'
+        );
+        const warmCache = await import('../../domains/state/warmCachePersistence');
+        const { createSessionsDomain } = await import('./sessions');
+        const { get, domain } = createHarness(createSessionsDomain, {
+            settings: {
+                sessionListAttentionPromotionModeV1: 'global',
+                groupInactiveSessionsByProject: true,
+            },
+        });
+
+        // A row the client considers unread on arrival and for which the server
+        // carries NO materialized entry fact: local read state (`lastViewedSessionSeq`)
+        // is behind the readable seq, which is exactly the foreground case where a
+        // freshly-arrived row must still get a stable ordering key immediately.
+        const row = (overrides: Record<string, unknown>) => ({
+            id: 's1',
+            seq: 12,
+            lastViewedSessionSeq: 4,
+            createdAt: 1_000,
+            updatedAt: 5_000,
+            meaningfulActivityAt: 5_000,
+            active: false,
+            activeAt: 5_000,
+            metadata: { machineId: 'm1', path: '/home/u/repo', homeDir: '/home/u' },
+            metadataVersion: 1,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0,
+            presence: 5_000,
+            latestTurnStatus: 'cancelled',
+            latestReadyEventSeq: null,
+            latestReadyEventAt: null,
+            ...overrides,
+        } as any);
+
+        domain.applySessions([row({})]);
+
+        // Positive control: the row really is unread on its first ingest, so the
+        // entry-fact assertions below cannot pass for the trivial read-row reason.
+        expect(get().sessionListRenderables.s1.hasUnreadMessages).toBe(true);
+        // The stable ordering key must exist after ONE apply, not after the next one.
+        expect(get().sessionListRenderables.s1.unreadSince).toBe(5_000);
+        // And the row must really be ordered by it in the unread attention lane.
+        expect(resolveSessionListRenderableAttentionPromotionPlacement(get().sessionListRenderables.s1))
+            .toEqual({ kind: 'unread', timestamp: 5_000 });
+
+        // First ingest writes the warm cache immediately; a null entry fact persisted
+        // here is what a cold boot would order this unread row by.
+        const saveWarmCache = warmCache.saveSessionListWarmCacheEntries as unknown as ReturnType<typeof vi.fn>;
+        expect(saveWarmCache).toHaveBeenCalledTimes(1);
+        expect(saveWarmCache.mock.calls[0]![2].s1).toEqual(expect.objectContaining({
+            hasUnreadMessages: true,
+            unreadSince: 5_000,
+        }));
+
+        // New activity while the row stays unread must not move the key it was
+        // stamped with on arrival.
+        domain.applySessions([row({ seq: 13, updatedAt: 9_000, meaningfulActivityAt: 9_000 })]);
+
+        expect(get().sessionListRenderables.s1.seq).toBe(13);
+        expect(get().sessionListRenderables.s1.meaningfulActivityAt).toBe(9_000);
+        expect(get().sessionListRenderables.s1.unreadSince).toBe(5_000);
     });
 
     it('preserves local ready metadata when hydrated rows do not carry a fresher ready event', async () => {

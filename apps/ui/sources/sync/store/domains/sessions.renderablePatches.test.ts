@@ -58,6 +58,7 @@ function mockSessionsDomainBoundaries() {
     vi.doMock('../../domains/state/warmCachePersistence', () => ({
         resolveWarmCacheAccountScope: vi.fn((fallback: string | null | undefined) => fallback ?? null),
         saveSessionListWarmCacheEntries: vi.fn(),
+        readPersistedSessionListWarmCacheEntries: vi.fn(() => undefined),
     }));
     vi.doMock('../sessionListCache', () => ({
         getActiveServerIdForSessionListCache: vi.fn(() => 'server_1'),

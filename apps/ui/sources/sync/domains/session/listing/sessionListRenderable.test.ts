@@ -1,13 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+    applySessionListRenderablePatch,
     areSessionListRenderablesEqual,
     buildSessionListRenderableFromSession,
     derivePendingRequestFlagsFromAgentState,
     didSessionListRenderableAttentionPromotionFieldsChange,
     didSessionListRenderablePlacementRelevantTimingChange,
     didSessionListRenderableReachabilityPeerFieldsChange,
+    didSessionListRenderableStructuralFieldsChange,
     preserveSessionListRenderableStaleFields,
+    preserveSessionListRenderableTransientState,
+    resolveSessionListRenderableAttentionPromotionPlacement,
 } from './sessionListRenderable';
 import type { SessionListRenderableSession } from './sessionListRenderable';
 import { resolveSessionReadStateAction } from '../readState/sessionReadState';
@@ -1223,5 +1227,202 @@ describe('buildSessionListRenderableFromSession with transcript aggregate', () =
 
         expect(fromAggregate.hasPendingPermissionRequests).toBe(true);
         expect(fromAggregate.pendingRequestObservedAt).toBe(2_000);
+    });
+});
+
+describe('unread attention membership is a boolean edge', () => {
+    const NOW_MS = 1_000_000;
+
+    function buildUnreadRenderable(overrides: Partial<SessionListRenderableSession> = {}): SessionListRenderableSession {
+        // Materialize through the canonical ingest merge owner so the row
+        // carries whatever unread-entry fact production would have stamped.
+        return preserveSessionListRenderableTransientState(undefined, buildRenderable({
+            id: 's_unread_edge',
+            seq: 10,
+            lastViewedSessionSeq: 5,
+            hasUnreadMessages: true,
+            createdAt: NOW_MS - 600_000,
+            updatedAt: NOW_MS - 300_000,
+            meaningfulActivityAt: NOW_MS - 300_000,
+            ...overrides,
+        }));
+    }
+
+    it('KEYSTONE: advancing unread activity time changes nothing structurally and never rebuilds or re-sorts', () => {
+        const previous = buildUnreadRenderable();
+        const next = preserveSessionListRenderableTransientState(previous, {
+            ...previous,
+            seq: previous.seq + 1,
+            updatedAt: NOW_MS - 1_000,
+            meaningfulActivityAt: NOW_MS - 1_000,
+        });
+
+        // Still unread: membership did not move.
+        expect(next.hasUnreadMessages).toBe(true);
+        // No structural change.
+        expect(didSessionListRenderableStructuralFieldsChange(previous, next)).toBe(false);
+        // No index rebuild (this gate drives needsSessionListViewDataRebuild).
+        expect(didSessionListRenderableAttentionPromotionFieldsChange(previous, next, NOW_MS)).toBe(false);
+        // No list notification (this gate drives the committed row refresh).
+        expect(didSessionListRenderablePlacementRelevantTimingChange(previous, next, NOW_MS)).toBe(false);
+        // No re-sort: the attention ordering key is unchanged.
+        expect(resolveSessionListRenderableAttentionPromotionPlacement(next, NOW_MS))
+            .toEqual(resolveSessionListRenderableAttentionPromotionPlacement(previous, NOW_MS));
+    });
+
+    it('keeps the unread ordering key stable across a full-renderable patch that omits it', () => {
+        const previous = buildUnreadRenderable();
+        const incoming = buildRenderable({
+            ...previous,
+            unreadSince: null,
+            seq: previous.seq + 1,
+            updatedAt: NOW_MS - 1_000,
+            meaningfulActivityAt: NOW_MS - 1_000,
+        });
+        const next = applySessionListRenderablePatch(previous, incoming);
+
+        expect(next.unreadSince).toBe(previous.unreadSince);
+        expect(didSessionListRenderableAttentionPromotionFieldsChange(previous, next, NOW_MS)).toBe(false);
+        expect(didSessionListRenderablePlacementRelevantTimingChange(previous, next, NOW_MS)).toBe(false);
+    });
+
+    it('enters and leaves attention on the read/unread membership edges', () => {
+        const unread = buildUnreadRenderable();
+        const read = preserveSessionListRenderableTransientState(unread, {
+            ...unread,
+            lastViewedSessionSeq: unread.seq,
+            hasUnreadMessages: false,
+        });
+
+        expect(resolveSessionListRenderableAttentionPromotionPlacement(unread, NOW_MS).kind).toBe('unread');
+        expect(resolveSessionListRenderableAttentionPromotionPlacement(read, NOW_MS).kind).toBe('none');
+        expect(didSessionListRenderableAttentionPromotionFieldsChange(unread, read, NOW_MS)).toBe(true);
+        expect(didSessionListRenderableAttentionPromotionFieldsChange(read, unread, NOW_MS)).toBe(true);
+        expect(read.unreadSince ?? null).toBeNull();
+    });
+
+    it('stamps a fresh unread entry time when a read session becomes unread again', () => {
+        const unread = buildUnreadRenderable();
+        const read = preserveSessionListRenderableTransientState(unread, {
+            ...unread,
+            lastViewedSessionSeq: unread.seq,
+            hasUnreadMessages: false,
+        });
+        const unreadAgain = preserveSessionListRenderableTransientState(read, {
+            ...read,
+            seq: read.seq + 5,
+            hasUnreadMessages: true,
+            updatedAt: NOW_MS - 2_000,
+            meaningfulActivityAt: NOW_MS - 2_000,
+        });
+
+        expect(unreadAgain.unreadSince).toBe(NOW_MS - 2_000);
+        expect(didSessionListRenderableAttentionPromotionFieldsChange(read, unreadAgain, NOW_MS)).toBe(true);
+    });
+
+    it('consumes a server-materialized unread entry time when the client has none', () => {
+        const renderable = preserveSessionListRenderableTransientState(undefined, buildRenderable({
+            id: 's_unread_server',
+            seq: 10,
+            lastViewedSessionSeq: 5,
+            hasUnreadMessages: true,
+            createdAt: NOW_MS - 600_000,
+            updatedAt: NOW_MS - 10_000,
+            meaningfulActivityAt: NOW_MS - 10_000,
+            unreadSince: NOW_MS - 450_000,
+        }));
+
+        expect(renderable.unreadSince).toBe(NOW_MS - 450_000);
+        expect(resolveSessionListRenderableAttentionPromotionPlacement(renderable, NOW_MS)).toEqual({
+            kind: 'unread',
+            timestamp: NOW_MS - 450_000,
+        });
+    });
+
+    it('KEYSTONE: a warm-hydrated unread row adopts the server entry fact and holds it across activity', async () => {
+        const { buildSessionListRenderableFromCacheEntry } = await import('@/sync/domains/state/warmCacheAdapters');
+        const serverUnreadSince = NOW_MS - 450_000;
+
+        // Cold boot: the row is painted from the warm cache before the network
+        // answers, from an entry written before the entry fact existed.
+        const hydrated = buildSessionListRenderableFromCacheEntry({
+            sessionId: 's_warm_unread',
+            seq: 12,
+            metadataVersion: 2,
+            agentStateVersion: 4,
+            createdAt: NOW_MS - 600_000,
+            updatedAt: NOW_MS - 10_000,
+            meaningfulActivityAt: NOW_MS - 10_000,
+            active: false,
+            activeAt: NOW_MS - 10_000,
+            archivedAt: null,
+            lastViewedSessionSeq: 5,
+            path: '/home/u/repo',
+            hasUnreadMessages: true,
+        });
+
+        expect(hydrated.unreadSince ?? null).toBeNull();
+
+        // The server row carries the materialized entry fact; it is authoritative
+        // over anything the client would derive from the warm row's activity.
+        const merged = preserveSessionListRenderableTransientState(hydrated, buildRenderable({
+            ...hydrated,
+            unreadSince: serverUnreadSince,
+        }));
+
+        expect(merged.unreadSince).toBe(serverUnreadSince);
+        expect(resolveSessionListRenderableAttentionPromotionPlacement(merged, NOW_MS)).toEqual({
+            kind: 'unread',
+            timestamp: serverUnreadSince,
+        });
+
+        // Activity-only update while the row stays unread: the entry fact is
+        // unchanged, so the attention lane must not re-sort.
+        const afterActivity = preserveSessionListRenderableTransientState(merged, buildRenderable({
+            ...merged,
+            seq: merged.seq + 1,
+            updatedAt: NOW_MS - 1_000,
+            meaningfulActivityAt: NOW_MS - 1_000,
+            unreadSince: serverUnreadSince,
+        }));
+
+        expect(afterActivity.unreadSince).toBe(serverUnreadSince);
+        expect(didSessionListRenderableAttentionPromotionFieldsChange(merged, afterActivity, NOW_MS)).toBe(false);
+    });
+
+    it('carries only the server entry fact out of the renderable builder and leaves the stamp to the merge owner', () => {
+        const legacyServerSession = {
+            id: 's_legacy_unread',
+            seq: 12,
+            lastViewedSessionSeq: 5,
+            createdAt: NOW_MS - 600_000,
+            updatedAt: NOW_MS - 10_000,
+            meaningfulActivityAt: NOW_MS - 10_000,
+            active: false,
+            activeAt: NOW_MS - 10_000,
+            archivedAt: null,
+            metadata: null,
+            metadataVersion: 1,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0,
+            presence: NOW_MS - 10_000,
+            latestTurnStatus: 'cancelled',
+        } as unknown as Session;
+
+        // An older server reports no entry fact: the builder must not invent one,
+        // otherwise the merge owner cannot tell a server value from a client guess.
+        const legacy = buildSessionListRenderableFromSession(legacyServerSession);
+        expect(legacy.hasUnreadMessages).toBe(true);
+        expect(legacy.unreadSince ?? null).toBeNull();
+        expect(preserveSessionListRenderableTransientState(undefined, legacy).unreadSince)
+            .toBe(legacy.meaningfulActivityAt);
+
+        const fromServer = buildSessionListRenderableFromSession({
+            ...legacyServerSession,
+            unreadSince: NOW_MS - 450_000,
+        } as unknown as Session);
+        expect(fromServer.unreadSince).toBe(NOW_MS - 450_000);
     });
 });

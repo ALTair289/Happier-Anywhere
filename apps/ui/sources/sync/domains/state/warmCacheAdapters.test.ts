@@ -3,8 +3,12 @@ import { describe, expect, it } from 'vitest';
 import {
     buildMachineDisplayCacheEntryFromRenderable,
     buildSessionListRenderableFromCacheEntry,
+    buildPersistedSessionListCacheEntriesFromRenderables,
     buildSessionListCacheEntryFromRenderable,
+    SESSION_LIST_WARM_CACHE_MAX_ENTRIES,
 } from './warmCacheAdapters';
+import { SessionListCacheEntryV1Schema } from './warmCachePersistence';
+import { resolveSessionListRenderableAttentionPromotionPlacement } from '@/sync/domains/session/listing/sessionListRenderable';
 import type { SessionListRenderableSession } from '@/sync/domains/session/listing/sessionListRenderable';
 
 describe('warmCacheAdapters', () => {
@@ -100,7 +104,7 @@ describe('warmCacheAdapters', () => {
         }));
     });
 
-    it('roundtrips keepVisibleWhenInactive through cache entries', () => {
+    it('does not persist keepVisibleWhenInactive, which every commit re-derives from the previous renderable', () => {
         const entry = buildSessionListCacheEntryFromRenderable({
             id: 's1',
             seq: 1,
@@ -129,8 +133,48 @@ describe('warmCacheAdapters', () => {
             keepVisibleWhenInactive: true,
         } as any);
 
-        expect(entry.keepVisibleWhenInactive).toBe(true);
-        expect(buildSessionListRenderableFromCacheEntry(entry).keepVisibleWhenInactive).toBe(true);
+        expect(entry).not.toHaveProperty('keepVisibleWhenInactive');
+        expect(buildSessionListRenderableFromCacheEntry(entry).keepVisibleWhenInactive).toBeUndefined();
+    });
+
+    it('round-trips a persisted entry back to an identical entry so hydration never rewrites the cache', () => {
+        const persistedEntry = buildSessionListCacheEntryFromRenderable({
+            id: 's1',
+            seq: 7,
+            createdAt: 5,
+            updatedAt: 20,
+            meaningfulActivityAt: 18,
+            active: false,
+            activeAt: 20,
+            archivedAt: null,
+            pendingCount: 2,
+            pendingVersion: 3,
+            metadataVersion: 2,
+            agentStateVersion: 4,
+            metadata: {
+                name: 'Cached title',
+                summaryText: null,
+                path: '/home/u/repo',
+                homeDir: '/home/u',
+                host: 'mbp',
+                machineId: 'm1',
+                flavor: 'codex',
+                directSessionV1: null,
+                hiddenSystemSession: false,
+            },
+            thinking: false,
+            thinkingAt: 0,
+            presence: 20,
+            // Not hydrated yet: the agent-state flags are absent rather than false.
+            keepVisibleWhenInactive: true,
+        });
+
+        // Storage is JSON, so absent optional fields must survive the trip as absent.
+        const reloadedEntry = JSON.parse(JSON.stringify(persistedEntry)) as typeof persistedEntry;
+        const hydratedRenderable = buildSessionListRenderableFromCacheEntry(reloadedEntry);
+        const rewrittenEntry = buildSessionListCacheEntryFromRenderable(hydratedRenderable, reloadedEntry);
+
+        expect(rewrittenEntry).toBe(reloadedEntry);
     });
 
     it('roundtrips session unread state through cache entries', () => {
@@ -173,6 +217,56 @@ describe('warmCacheAdapters', () => {
             lastViewedSessionSeq: 4,
             hasUnreadMessages: true,
         }));
+    });
+
+    it('persists the unread entry fact so a cold boot restores the same attention ordering key', () => {
+        const entry = buildSessionListCacheEntryFromRenderable({
+            id: 's_unread',
+            seq: 12,
+            createdAt: 1_000,
+            updatedAt: 9_000,
+            meaningfulActivityAt: 9_000,
+            active: false,
+            activeAt: 9_000,
+            archivedAt: null,
+            pendingCount: 0,
+            pendingVersion: 0,
+            lastViewedSessionSeq: 4,
+            metadataVersion: 2,
+            agentStateVersion: 4,
+            metadata: {
+                name: 'Unread session',
+                summaryText: null,
+                path: '/home/u/repo',
+                homeDir: '/home/u',
+                host: 'mbp',
+                machineId: 'm1',
+                flavor: 'codex',
+                directSessionV1: null,
+                hiddenSystemSession: false,
+            },
+            thinking: false,
+            thinkingAt: 0,
+            presence: 9_000,
+            hasUnreadMessages: true,
+            unreadSince: 2_000,
+        });
+
+        expect(entry.unreadSince).toBe(2_000);
+
+        // Storage is JSON validated by the persisted schema on load, so a field the
+        // schema does not declare is silently stripped: the round trip has to go
+        // through the schema to prove the entry fact actually survives a cold boot.
+        const reloadedEntry = SessionListCacheEntryV1Schema.parse(JSON.parse(JSON.stringify(entry)));
+        const hydrated = buildSessionListRenderableFromCacheEntry(reloadedEntry);
+
+        expect(hydrated.unreadSince).toBe(2_000);
+        expect(resolveSessionListRenderableAttentionPromotionPlacement(hydrated, 10_000)).toEqual({
+            kind: 'unread',
+            timestamp: 2_000,
+        });
+        // Hydration must not look like new information, or boot rewrites the cache.
+        expect(buildSessionListCacheEntryFromRenderable(hydrated, reloadedEntry)).toBe(reloadedEntry);
     });
 
     it('roundtrips durable session status and attention projection through cache entries', () => {
@@ -281,7 +375,6 @@ describe('warmCacheAdapters', () => {
             flavor: null,
             directSessionV1: null,
             hiddenSystemSession: false,
-            keepVisibleWhenInactive: false,
             hasPendingPermissionRequests: false,
             hasPendingUserActionRequests: false,
             hasUnreadMessages: true,
@@ -313,7 +406,6 @@ describe('warmCacheAdapters', () => {
             flavor: null,
             directSessionV1: null,
             hiddenSystemSession: false,
-            keepVisibleWhenInactive: false,
             hasPendingPermissionRequests: false,
             hasPendingUserActionRequests: false,
             hasUnreadMessages: true,
@@ -341,5 +433,79 @@ describe('warmCacheAdapters', () => {
         expect(entry.metadataVersion).toBe(1);
         expect(entry.path).toBe('');
         expect(entry.name).toBeUndefined();
+    });
+
+    describe('buildPersistedSessionListCacheEntriesFromRenderables', () => {
+        function makeRenderable(id: string, meaningfulActivityAt: number): SessionListRenderableSession {
+            return {
+                id,
+                seq: 1,
+                createdAt: meaningfulActivityAt,
+                updatedAt: meaningfulActivityAt,
+                meaningfulActivityAt,
+                active: false,
+                activeAt: meaningfulActivityAt,
+                archivedAt: null,
+                metadataVersion: 1,
+                agentStateVersion: 1,
+                metadata: null,
+                metadataUnavailable: true,
+                thinking: false,
+                thinkingAt: 0,
+                presence: meaningfulActivityAt,
+            };
+        }
+
+        function makeRenderables(count: number): Record<string, SessionListRenderableSession> {
+            const renderables: Record<string, SessionListRenderableSession> = {};
+            for (let index = 0; index < count; index += 1) {
+                const id = `s${String(index).padStart(4, '0')}`;
+                renderables[id] = makeRenderable(id, index);
+            }
+            return renderables;
+        }
+
+        it('keeps only the most recent rows by the list ordering key', () => {
+            const renderables = makeRenderables(SESSION_LIST_WARM_CACHE_MAX_ENTRIES + 25);
+            const entries = buildPersistedSessionListCacheEntriesFromRenderables(renderables);
+            const cachedIds = Object.keys(entries);
+
+            expect(cachedIds).toHaveLength(SESSION_LIST_WARM_CACHE_MAX_ENTRIES);
+            expect(Math.min(...cachedIds.map((id) => entries[id].meaningfulActivityAt ?? 0))).toBe(25);
+            expect(entries.s0000).toBeUndefined();
+        });
+
+        it('returns the previous record unchanged when the retained rows did not change', () => {
+            const renderables = makeRenderables(SESSION_LIST_WARM_CACHE_MAX_ENTRIES + 25);
+            const previousEntries = buildPersistedSessionListCacheEntriesFromRenderables(renderables);
+
+            expect(buildPersistedSessionListCacheEntriesFromRenderables(renderables, previousEntries)).toBe(previousEntries);
+        });
+
+        it('evicts a row that leaves the retained window even when the entry count is unchanged', () => {
+            const renderables = makeRenderables(SESSION_LIST_WARM_CACHE_MAX_ENTRIES);
+            const previousEntries = buildPersistedSessionListCacheEntriesFromRenderables(renderables);
+            const withNewerRow = { ...renderables, s_newest: makeRenderable('s_newest', 10_000) };
+
+            const nextEntries = buildPersistedSessionListCacheEntriesFromRenderables(withNewerRow, previousEntries);
+
+            expect(Object.keys(nextEntries)).toHaveLength(SESSION_LIST_WARM_CACHE_MAX_ENTRIES);
+            expect(nextEntries.s_newest).toBeDefined();
+            expect(nextEntries.s0000).toBeUndefined();
+        });
+
+        it('evicts a removed row when another row arrives in the same commit', () => {
+            const previousEntries = buildPersistedSessionListCacheEntriesFromRenderables({
+                kept: makeRenderable('kept', 3),
+                gone: makeRenderable('gone', 2),
+            });
+
+            const nextEntries = buildPersistedSessionListCacheEntriesFromRenderables({
+                kept: makeRenderable('kept', 3),
+                added: makeRenderable('added', 1),
+            }, previousEntries);
+
+            expect(Object.keys(nextEntries).sort()).toEqual(['added', 'kept']);
+        });
     });
 });

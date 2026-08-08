@@ -354,3 +354,50 @@ describe('projectSessionListPlacement', () => {
         });
     });
 });
+
+describe('unread placement ordering key', () => {
+    it('orders unread placement by the unread entry time rather than the moving activity time', () => {
+        const session = makeSession({
+            seq: 742,
+            lastViewedSessionSeq: 738,
+            hasUnreadMessages: true,
+            unreadSince: 4_000,
+            meaningfulActivityAt: 9_500,
+            updatedAt: 9_500,
+            latestTurnStatus: 'completed',
+            latestTurnStatusObservedAt: 7_000,
+        });
+
+        expect(projectSessionListPlacement({ nowMs: 10_000, session })).toEqual({
+            kind: 'unread',
+            timestamp: 4_000,
+            retainedWorking: false,
+        });
+
+        // The same row after another message lands: the key must not move.
+        expect(projectSessionListPlacement({
+            nowMs: 10_000,
+            session: { ...session, seq: 743, meaningfulActivityAt: 9_900, updatedAt: 9_900 },
+        })).toEqual({
+            kind: 'unread',
+            timestamp: 4_000,
+            retainedWorking: false,
+        });
+    });
+
+    it('falls back to meaningful activity time when no unread entry time is available', () => {
+        expect(projectSessionListPlacement({
+            nowMs: 10_000,
+            session: makeSession({
+                seq: 742,
+                lastViewedSessionSeq: 738,
+                hasUnreadMessages: true,
+                meaningfulActivityAt: 7_390,
+            }),
+        })).toEqual({
+            kind: 'unread',
+            timestamp: 7_390,
+            retainedWorking: false,
+        });
+    });
+});

@@ -465,6 +465,46 @@ describe('sync.sendMessage optimistic thinking', () => {
         expect(markLiveTailIntent).toHaveBeenCalledTimes(1);
     });
 
+    it('refreshes the exact pending session and surfaces an actionable error when an action loses its mutation race', async () => {
+        const sessionId = 's_pending_action_conflict';
+        const localId = 'pending-action-conflict-local';
+        const outboxScope = storage.getState().profileScope!;
+        const pending = pendingOutboxFixture({ sessionId, localId, text: 'steer me now' });
+        storage.getState().applySessions([{
+            ...createSession({ sessionId }),
+            encryptionMode: 'plain',
+        }]);
+        savePendingOutboxMessage(pending, outboxScope);
+        replayPersistedPendingOutboxForSession(sessionId, outboxScope);
+
+        const { sync } = await import('./sync');
+        sync.encryption = await Encryption.create(new Uint8Array(32).fill(7));
+        const requests: Array<{ path: string; method: string }> = [];
+        vi.spyOn(apiSocket, 'request').mockImplementation(async (path, init) => {
+            requests.push({ path, method: init?.method ?? 'GET' });
+            if (init?.method === 'PATCH') {
+                return Response.json({ error: 'action-conflict' }, { status: 409 });
+            }
+            return Response.json({ pending: [], discarded: [] });
+        });
+
+        await expect(sync.sendPendingMessageNow(sessionId, {
+            localId,
+            createdAt: pending.createdAt,
+            rawRecord: pending.rawRecord,
+            text: pending.text,
+            deliveryIntent: 'steer_now',
+        })).rejects.toMatchObject({
+            code: 'action-conflict',
+            message: expect.stringContaining('changed'),
+        });
+
+        expect(requests).toEqual([
+            { path: `/v2/sessions/${sessionId}/pending/${localId}/action`, method: 'PATCH' },
+            { path: `/v2/sessions/${sessionId}/pending?includeDiscarded=1`, method: 'GET' },
+        ]);
+    });
+
     it('hydrates a missing active session before sending the user message', async () => {
         const sessionId = 's_missing_then_hydrated';
 

@@ -589,6 +589,48 @@ describe('sessionControl contract exports', () => {
     expect(invalidActivityParsed.success).toBe(false);
   });
 
+  it('declares the unread-entry instant on v2 session records instead of passing it through', () => {
+    // `unreadSince` is the server-materialized instant a session entered the unread
+    // state — the stable key the session list orders unread rows by. It was dropped
+    // from two hand-maintained allow-lists (the server row selects and the client
+    // record rebuild) while this schema stayed silent about it, and consumers derive
+    // their drift guards from `V2SessionRecordSchema.shape`. An undeclared field is
+    // therefore invisible to those guards, and reaches readers as an unvalidated
+    // passthrough key typed `unknown`. Declaring it arms the guards and makes an
+    // out-of-contract value fail at the boundary that owns the contract.
+    const schema = protocol.V2SessionRecordSchema;
+    const baseRecord = {
+      id: 'sess_123',
+      seq: 7,
+      createdAt: 1,
+      updatedAt: 2,
+      active: false,
+      activeAt: 0,
+      metadata: '{}',
+      metadataVersion: 1,
+      agentState: null,
+      agentStateVersion: 1,
+      dataEncryptionKey: null,
+    };
+
+    expect(Object.keys(schema.shape)).toContain('unreadSince');
+
+    const stampedParsed = schema.safeParse({ ...baseRecord, unreadSince: 1_700_000_000_000 });
+    expect(stampedParsed.success).toBe(true);
+    expect(stampedParsed.success && stampedParsed.data.unreadSince).toBe(1_700_000_000_000);
+
+    // Cleared (read) rows and older servers that never send the field must both stay valid:
+    // the declaration is additive and optional, so it cannot reject a supported payload.
+    expect(schema.safeParse({ ...baseRecord, unreadSince: null }).success).toBe(true);
+    expect(schema.safeParse(baseRecord).success).toBe(true);
+
+    // Same contract as the sibling date-derived instants (`pendingRequestObservedAt`,
+    // `latestReadyEventAt`): a non-integer, negative or non-numeric value is not a stamp.
+    expect(schema.safeParse({ ...baseRecord, unreadSince: -1 }).success).toBe(false);
+    expect(schema.safeParse({ ...baseRecord, unreadSince: 1.5 }).success).toBe(false);
+    expect(schema.safeParse({ ...baseRecord, unreadSince: 'not-a-number' }).success).toBe(false);
+  });
+
   it('validates a session_wait envelope shape', () => {
     const schema = (protocol as any).SessionWaitEnvelopeSchema;
     const parsed = schema.safeParse({

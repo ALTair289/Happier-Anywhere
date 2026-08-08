@@ -2546,3 +2546,69 @@ describe('computeVisibleSessionListIndex', () => {
         ]);
     });
 });
+
+describe('unread attention ordering stability', () => {
+    it('does not re-sort the attention lane when an unread row only receives newer activity', () => {
+        const groupKey = 'server:s1:day:2026-02-17';
+        const source: SessionListIndexItem[] = [
+            { type: 'header', headerKind: 'date', title: 'Today', serverId: 's1', groupKey },
+            { type: 'session', sessionId: 'older-unread', serverId: 's1', section: 'inactive', groupKey, groupKind: 'date' },
+            { type: 'session', sessionId: 'newer-unread', serverId: 's1', section: 'inactive', groupKey, groupKind: 'date' },
+        ];
+        const olderUnread = makeSessionRow('older-unread', {
+            seq: 742,
+            lastViewedSessionSeq: 738,
+            hasUnreadMessages: true,
+            unreadSince: 1_000,
+            meaningfulActivityAt: 1_000,
+            updatedAt: 1_000,
+        });
+        const newerUnread = makeSessionRow('newer-unread', {
+            seq: 91,
+            lastViewedSessionSeq: 80,
+            hasUnreadMessages: true,
+            unreadSince: 2_000,
+            meaningfulActivityAt: 2_000,
+            updatedAt: 2_000,
+        });
+        const common = {
+            source,
+            hideInactiveSessions: false,
+            pinnedSessionKeysV1: [],
+            sessionListGroupOrderV1: {},
+            sessionListOrderingModeV1: 'custom' as const,
+            presentation: { enabled: false, presentation: 'grouped' as const, selectedServerIds: [] },
+            attentionPromotion: { mode: 'global' as const },
+            nowMs: 10_000,
+        };
+        const attentionOrder = (items: ReadonlyArray<SessionListIndexItem>) => items
+            .filter((item): item is Extract<SessionListIndexItem, { type: 'session' }> =>
+                item.type === 'session' && item.groupKind === 'attention')
+            .map((item) => item.sessionId);
+
+        const initial = computeVisibleSessionListIndex({
+            ...common,
+            resolveSessionRow: makeResolver({
+                's1:older-unread': olderUnread,
+                's1:newer-unread': newerUnread,
+            }),
+        })!;
+        expect(attentionOrder(initial)).toEqual(['newer-unread', 'older-unread']);
+
+        // A new message lands in the still-unread older row. It stays unread,
+        // so its position must not move.
+        const afterActivity = computeVisibleSessionListIndex({
+            ...common,
+            resolveSessionRow: makeResolver({
+                's1:older-unread': {
+                    ...olderUnread,
+                    seq: 743,
+                    meaningfulActivityAt: 9_000,
+                    updatedAt: 9_000,
+                },
+                's1:newer-unread': newerUnread,
+            }),
+        })!;
+        expect(attentionOrder(afterActivity)).toEqual(['newer-unread', 'older-unread']);
+    });
+});

@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { resolveConnectionHealth } from './resolveConnectionHealth';
 
 describe('resolveConnectionHealth', () => {
-    it('treats endpoint shutting_down as server_unreachable even if the socket is connected', () => {
+    it('treats endpoint offline as server_unreachable even if the socket is connected', () => {
         const result = resolveConnectionHealth({
-            endpointStatus: 'shutting_down',
+            endpointStatus: 'offline',
             socketStatus: 'connected',
             machineGroups: [{ machineCount: 2, onlineCount: 2, status: 'idle' }],
         });

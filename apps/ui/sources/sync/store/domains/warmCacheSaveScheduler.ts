@@ -1,18 +1,22 @@
 export const WARM_CACHE_PROGRESS_SAVE_DEBOUNCE_MS = 1_000;
 
-type WarmCacheSaveSchedulerOptions<State, PreviousEntries> = Readonly<{
+type WarmCacheSaveSchedulerOptions<State> = Readonly<{
     get: () => State;
-    save: (state: State, previousEntries?: PreviousEntries) => void;
+    save: (state: State) => void;
     delayMs?: number;
     onSchedule?: (event: Readonly<{ state: State; coalesced: boolean }>) => void;
     onFlush?: (state: State, flush: () => void) => void;
 }>;
 
-export function createWarmCacheSaveScheduler<State, PreviousEntries = never>(
-    options: WarmCacheSaveSchedulerOptions<State, PreviousEntries>,
+/**
+ * The save owner diffs against the persisted warm-cache baseline, so the scheduler never
+ * carries a "previous entries" projection of its own.
+ */
+export function createWarmCacheSaveScheduler<State>(
+    options: WarmCacheSaveSchedulerOptions<State>,
 ): Readonly<{
     clear: () => void;
-    saveImmediately: (state: State, previousEntries?: PreviousEntries) => void;
+    saveImmediately: (state: State) => void;
     schedule: (stateForTelemetry?: State) => void;
 }> {
     let timeout: ReturnType<typeof setTimeout> | null = null;
@@ -26,9 +30,9 @@ export function createWarmCacheSaveScheduler<State, PreviousEntries = never>(
 
     return {
         clear,
-        saveImmediately: (state, previousEntries) => {
+        saveImmediately: (state) => {
             clear();
-            options.save(state, previousEntries);
+            options.save(state);
         },
         schedule: (stateForTelemetry) => {
             const state = stateForTelemetry ?? options.get();

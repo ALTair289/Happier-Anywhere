@@ -84,7 +84,6 @@ import { ActivityUpdateAccumulator, type ActivityUpdateAccumulatorFlushOptions }
 import { MachineActivityAccumulator, type MachineActivityUpdate } from './reducer/machineActivityAccumulator';
 import { randomUUID } from '@/platform/randomUUID';
 import { Platform, AppState } from 'react-native';
-import type { ManagedEndpointSupervisor, ManagedEndpointSupervisorState } from '@happier-dev/connection-supervisor';
 import { resolveSentFrom } from './domains/messages/sentFrom';
 import { NormalizedMessage, normalizeRawMessage, RawRecord, RawRecordSchema } from './typesRaw';
 import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './domains/settings/settings';
@@ -176,8 +175,11 @@ import { createSyncGenerationGuard } from './domains/scope/syncGenerationGuard';
 import {
     clearWarmCacheAccountScope,
     loadMachineDisplayWarmCacheEntries,
+    loadSessionListPinnedSessionIdsWarmCache,
     loadSessionListWarmCacheEntries,
+    readPersistedSessionListWarmCacheEntries,
     resolveWarmCacheAccountScope,
+    saveSessionListPinnedSessionIdsWarmCache,
     setWarmCacheAccountScope,
 } from './domains/state/warmCachePersistence';
 import {
@@ -575,11 +577,17 @@ function isFallbackSafeSessionUserMessageRpcError(error: unknown): boolean {
 }
 
 function createSessionMessageSubmitFailureError(
-    _errorCode: string | undefined,
+    errorCode: string | undefined,
     errorMessage: string | undefined,
     fallbackMessage: string,
 ): Error {
-    return new Error(errorMessage ?? fallbackMessage);
+    const resolvedMessage = errorCode === 'action-conflict'
+        ? t('session.pendingMessages.errors.actionConflict')
+        : errorMessage ?? fallbackMessage;
+    return Object.assign(
+        new Error(resolvedMessage),
+        ...(errorCode ? [{ code: errorCode }] : []),
+    );
 }
 
 async function assertActiveEndpointAuthenticated(options?: Readonly<{ forceProbe?: boolean }>): Promise<void> {
@@ -864,6 +872,19 @@ function requireActivePendingOutboxScope(): ServerAccountScope {
     return scope;
 }
 
+/**
+ * Outcome of the changes-based resume catch-up.
+ *
+ * `refreshedByCatchUp` records which whole-list refreshes the catch-up already completed for this
+ * resume so the resume tail does not issue the same full refresh a second time. Without it a
+ * foreground resume ran two complete catch-up waves: the catch-up's own
+ * `invalidate.sessions`/`invalidate.machines`, and then the socket-offline recovery block below.
+ */
+type ResumeViaChangesOutcome = Readonly<{
+    status: 'ok' | 'fallback' | 'aborted';
+    refreshedByCatchUp: Readonly<{ sessions: boolean; machines: boolean }>;
+}>;
+
 class Sync {
 
         encryption!: Encryption;
@@ -871,9 +892,6 @@ class Sync {
         anonID!: string;
         private credentials!: AuthCredentials;
         private pauseController = new PauseController();
-        private activeEndpointSupervisor: ManagedEndpointSupervisor | null = null;
-        private detachActiveEndpointSupervisorListener: (() => void) | null = null;
-        private lastObservedEndpointPhase: ManagedEndpointSupervisorState['phase'] | null = null;
         private syncTuning: SyncTuning = loadSyncTuning();
         private sessionTranscriptRetention!: SessionTranscriptRetentionController;
       private resumeInFlight: Promise<void> | null = null;
@@ -1172,11 +1190,6 @@ class Sync {
                   setServerReachabilityNetworkAllowed(true);
                   log.log('📱 App became active');
                   this.pauseController.resume();
-                  try {
-                      this.activeEndpointSupervisor?.invalidate();
-                  } catch {
-                      // ignore
-                  }
                   fireAndForget(invalidateAllServerReachabilitySupervisors(), { tag: 'Sync.invalidateAllServerReachabilitySupervisors' });
                   try {
                       apiSocket.connect();
@@ -1228,11 +1241,6 @@ class Sync {
                       this.resumeNativeCryptoWorkerDispatchAfterForeground(`${tag}.nativeCryptoWorkerQueue`);
                       setServerReachabilityNetworkAllowed(true);
                       this.pauseController.resume();
-                      try {
-                          this.activeEndpointSupervisor?.invalidate();
-                      } catch {
-                          // ignore
-                      }
                       fireAndForget(invalidateAllServerReachabilitySupervisors(), { tag: `${tag}.reachability` });
                       try {
                           apiSocket.connect();
@@ -1475,39 +1483,6 @@ class Sync {
           this.detachEncryptionTranscriptCacheClear?.();
           this.detachEncryptionTranscriptCacheClear = registerSessionTranscriptDerivedCacheClear((sessionId) => {
               encryption.clearSessionCache(sessionId);
-          });
-      }
-
-      public setActiveEndpointSupervisor(supervisor: ManagedEndpointSupervisor | null): void {
-          if (this.activeEndpointSupervisor === supervisor) return;
-
-          try {
-              this.detachActiveEndpointSupervisorListener?.();
-          } catch {
-              // ignore
-          }
-          this.detachActiveEndpointSupervisorListener = null;
-          this.lastObservedEndpointPhase = null;
-          this.activeEndpointSupervisor = supervisor;
-
-          if (!supervisor) return;
-
-          // Seed phase and subscribe to online transitions so we can kick off one consolidated resume pipeline.
-          try {
-              this.lastObservedEndpointPhase = supervisor.getState().phase;
-          } catch {
-              this.lastObservedEndpointPhase = null;
-          }
-
-          this.detachActiveEndpointSupervisorListener = supervisor.subscribe((next) => {
-              const prev = this.lastObservedEndpointPhase;
-              this.lastObservedEndpointPhase = next.phase;
-              if (prev && prev !== 'online' && next.phase === 'online') {
-                  // Use a microtask so callers that publish state synchronously don't re-enter.
-                  queueMicrotask(() => {
-                      fireAndForget(this.resumeSync('endpoint-online'), { tag: 'Sync.resumeSync.endpoint-online' });
-                  });
-              }
           });
       }
 
@@ -2612,6 +2587,16 @@ class Sync {
                         );
                 }
             } catch (e) {
+                if (
+                    e
+                    && typeof e === 'object'
+                    && (e as { code?: unknown }).code === 'action-conflict'
+                ) {
+                    // The server row advanced between the user's tap and the PATCH. Reconcile
+                    // this exact session once so the UI immediately presents the authoritative
+                    // action/status instead of leaving a stale menu after the conflict.
+                    await this.fetchPendingMessages(sessionId).catch(() => {});
+                }
                 if (isTerminalAuthError(e)) {
                     recordTerminalAuthSyncError(e);
                 }
@@ -3818,7 +3803,15 @@ class Sync {
         const initialState = storage.getState();
         const activeServerSnapshot = getActiveServerSnapshot();
         const activeServerId = String(activeServerSnapshot.serverId ?? '').trim() || null;
-        const cachedSessionListEntries = buildSessionListCacheEntriesFromRenderables(initialState.sessionListRenderables);
+        const warmCacheAccountId = resolveWarmCacheAccountScope(initialState.profile?.id);
+        // Reuse the entries the warm cache already holds instead of allocating a fresh
+        // projection of every renderable on every fetch (including every resume); rows
+        // outside the persisted window are still projected so metadata coverage is
+        // unchanged.
+        const cachedSessionListEntries = buildSessionListCacheEntriesFromRenderables(
+            initialState.sessionListRenderables,
+            readPersistedSessionListWarmCacheEntries(activeServerId, warmCacheAccountId),
+        );
         const activeViewingSessionId = getActiveViewingSessionId();
         const visibleSessionIds = getVisibleSessionIds();
         const activeHydrationSessionIds = Array.from(new Set([
@@ -3842,6 +3835,13 @@ class Sync {
         const hasLastKnownOrganizationSnapshot = activeServerId
             ? typeof initialState.sessionOrganizationSnapshotVersionByServerId[activeServerId] === 'number'
             : false;
+        // The initial page merges pinned rows server-side from the ids we send, so the
+        // list only has to wait for the organization snapshot when we cannot name the
+        // pinned sessions at all. The persisted id set is what keeps that true on a cold
+        // boot; the snapshot version alone would name nothing and drop pinned hydration.
+        const warmPinnedSessionIds = !isAppend && activeServerId
+            ? loadSessionListPinnedSessionIdsWarmCache(activeServerId, warmCacheAccountId)
+            : [];
         const organizationSnapshotRefresh = !isAppend && activeServerId
             ? fetchAndApplySessionOrganizationSnapshot({
                 credentials: this.credentials,
@@ -3852,15 +3852,24 @@ class Sync {
             })
             : null;
         if (organizationSnapshotRefresh) {
-            if (hasLastKnownOrganizationSnapshot) {
+            if (hasLastKnownOrganizationSnapshot || warmPinnedSessionIds.length > 0) {
                 void organizationSnapshotRefresh.catch(() => undefined);
             } else {
                 await organizationSnapshotRefresh;
             }
         }
+        const stateAfterOrganizationRefresh = storage.getState();
+        const hasOrganizationSnapshot = activeServerId
+            ? typeof stateAfterOrganizationRefresh.sessionOrganizationSnapshotVersionByServerId[activeServerId] === 'number'
+            : false;
         const organizationPinnedSessionIds = isAppend
             ? []
-            : resolveOrganizationPinnedSessionIdsForServer(storage.getState(), activeServerId);
+            : hasOrganizationSnapshot
+                ? resolveOrganizationPinnedSessionIdsForServer(stateAfterOrganizationRefresh, activeServerId)
+                : [...warmPinnedSessionIds];
+        if (!isAppend && activeServerId && hasOrganizationSnapshot) {
+            saveSessionListPinnedSessionIdsWarmCache(activeServerId, warmCacheAccountId, organizationPinnedSessionIds);
+        }
         const requiredHydrationSessionIds = Array.from(new Set([
             ...normalizeSessionListHydrationSessionIds(options?.requiredHydrationSessionIds),
             ...organizationPinnedSessionIds,
@@ -4258,7 +4267,7 @@ class Sync {
           fireAndForget(this.resumeSync('manual'), { tag: 'Sync.resumeSync.manual' });
       }
 
-      public resumeSync = (reason: 'app-foreground' | 'socket-reconnect' | 'manual' | 'endpoint-online' | 'server-reachable'): Promise<void> => {
+      public resumeSync = (reason: 'app-foreground' | 'socket-reconnect' | 'manual' | 'server-reachable'): Promise<void> => {
           return runWithInFlightDedupe(
               {
                   get: () => this.resumeInFlight,
@@ -4268,7 +4277,7 @@ class Sync {
               },
               async () => {
                   const shouldContinue = this.createServerScopeGuard();
-                  if ((reason === 'socket-reconnect' || reason === 'endpoint-online' || reason === 'server-reachable') && !this.isForeground) {
+                  if ((reason === 'socket-reconnect' || reason === 'server-reachable') && !this.isForeground) {
                       return;
                   }
                   if (this.pauseController.isPaused()) {
@@ -4297,7 +4306,7 @@ class Sync {
                       return;
                   }
 
-                  const status = await this.resumeViaChanges({ accountId, shouldContinue });
+                  const { status, refreshedByCatchUp } = await this.resumeViaChanges({ accountId, shouldContinue });
                   if (status === 'aborted') {
                       return;
                   }
@@ -4325,17 +4334,33 @@ class Sync {
                       await syncUnit.awaitQueue({ timeoutMs });
                   };
 
-                  // Activity/presence updates are delivered via ephemerals and are not guaranteed to be recovered
-                  // across socket reconnects. When we reconnect without socket.io recovery, refresh the core
-                  // snapshots so session.active and machine online state can't get stuck.
-                  if (reason === 'socket-reconnect') {
-                      await runTasksWithLimit(
-                          [
+                  // Activity/presence updates are delivered via ephemerals and are not recovered for the
+                  // window in which the socket was down. Gate this on measured socket downtime rather than the
+                  // resume reason: a background→foreground cycle disconnects the socket intentionally, and an
+                  // intentional disconnect resets apiSocket's reconnect bookkeeping, so `socket-reconnect`
+                  // never fires for it. Gating on the reason left a resuming client with stale session.active
+                  // and machine-online state until the next keep-alive ephemeral (0–20s).
+                  //
+                  // Skip whatever the changes catch-up already refreshed in this same resume: it
+                  // runs the identical full refresh (session-organization + sessions/active +
+                  // /v2/sessions?includeAttention, /v1/machines) and its session refresh awaits
+                  // hydration, so repeating it here fired a second complete catch-up wave seconds
+                  // after the first.
+                  if (this.readSocketOfflineDurationMs() > 0) {
+                      const offlineRecoveryTasks: Array<() => Promise<void>> = [];
+                      if (!refreshedByCatchUp.sessions) {
+                          offlineRecoveryTasks.push(
                               () => invalidateBounded(this.sessionsSync, this.syncTuning.resumeQuickInvalidateTimeoutMs),
+                          );
+                      }
+                      if (!refreshedByCatchUp.machines) {
+                          offlineRecoveryTasks.push(
                               () => invalidateBounded(this.machinesSync, this.syncTuning.resumeQuickInvalidateTimeoutMs),
-                          ],
-                          this.syncTuning.resumeConcurrencyLimit
-                      );
+                          );
+                      }
+                      if (offlineRecoveryTasks.length > 0) {
+                          await runTasksWithLimit(offlineRecoveryTasks, this.syncTuning.resumeConcurrencyLimit);
+                      }
                   }
 
                     await runTasksWithLimit(
@@ -6709,12 +6734,18 @@ class Sync {
       private async resumeViaChanges(opts: {
           accountId: string;
           shouldContinue?: () => boolean;
-      }): Promise<'ok' | 'fallback' | 'aborted'> {
+      }): Promise<ResumeViaChangesOutcome> {
           const CHANGES_PAGE_LIMIT = this.syncTuning.changesPageLimit;
           const afterCursor = this.changesCursor ?? '0';
           const shouldContinue = opts.shouldContinue ?? (() => true);
           const cursorScope = this.getChangesCursorScope();
           let aborted = false;
+          // Only a *completed* refresh counts: a failed one must still be retried by the resume tail.
+          const refreshedByCatchUp = { sessions: false, machines: false };
+          const finish = (status: ResumeViaChangesOutcome['status']): ResumeViaChangesOutcome => ({
+              status,
+              refreshedByCatchUp: { ...refreshedByCatchUp },
+          });
 
           const canWriteCursor = (): boolean => {
               if (shouldContinue()) {
@@ -6766,7 +6797,11 @@ class Sync {
                             changes: context.changes,
                             advancedCursor: cursor,
                             isSessionMessagesLoaded: (sessionId) => storage.getState().sessionMessages[sessionId]?.isLoaded === true,
-                            loadSessionMaterializedMaxSeqById: () => loadSessionMaterializedMaxSeqById(this.pendingSettingsScope),
+                            // The in-memory map is the owner this scope's storage record was
+                            // just flushed from, so re-reading and re-parsing the whole record
+                            // per changes page would only reconstruct what we already hold —
+                            // and would be the one reader of this fact that can go stale.
+                            loadSessionMaterializedMaxSeqById: () => this.sessionMaterializedMaxSeqById,
                             telemetry: syncReliabilityTelemetry,
                         });
                     }
@@ -6830,7 +6865,10 @@ class Sync {
                         invalidate: {
                             settings: () => this.settingsSync.invalidateAndAwait(),
                             profile: () => this.profileSync.invalidateAndAwait(),
-                            machines: () => this.machinesSync.invalidateAndAwait(),
+                            machines: async () => {
+                                await this.machinesSync.invalidateAndAwait();
+                                refreshedByCatchUp.machines = true;
+                            },
                             artifacts: () => this.artifactsSync.invalidateAndAwait(),
                             friends: () => this.friendsSync.invalidateAndAwait(),
                             friendRequests: () => this.friendRequestsSync.invalidateAndAwait(),
@@ -6843,12 +6881,15 @@ class Sync {
                                 applyAccountPetsForScope: (scope, pets) =>
                                     storage.getState().applyAccountPetsForScope(scope, pets),
                             }),
-                            sessions: ({ requiredHydrationSessionIds, prioritizeSessionIds }) => this.fetchSessions({
-                                awaitSessionListHydration: true,
-                                requiredHydrationSessionIds,
-                                prioritizeSessionIds,
-                                hydrationTelemetrySource: 'changesCatchUp',
-                            }),
+                            sessions: async ({ requiredHydrationSessionIds, prioritizeSessionIds }) => {
+                                await this.fetchSessions({
+                                    awaitSessionListHydration: true,
+                                    requiredHydrationSessionIds,
+                                    prioritizeSessionIds,
+                                    hydrationTelemetrySource: 'changesCatchUp',
+                                });
+                                refreshedByCatchUp.sessions = true;
+                            },
                             todos: () => this.todosSync.invalidateAndAwait(),
                         },
                         invalidateMessagesForSession: async (sessionId) => {
@@ -6902,15 +6943,15 @@ class Sync {
             });
 
           if (aborted) {
-              return 'aborted';
+              return finish('aborted');
           }
           if (catchUp.status === 'fallback') {
-              return 'fallback';
+              return finish('fallback');
           }
 
           if (catchUp.shouldPersistCursor) {
               if (!canWriteCursor()) {
-                  return 'aborted';
+                  return finish('aborted');
               }
               const checkpoint = decideChangesCursorCheckpoint({
                   currentCursor: this.changesCursor,
@@ -6919,13 +6960,13 @@ class Sync {
                   scope: cursorScope,
               });
               if (checkpoint.status === 'storage-write-failed') {
-                  return 'fallback';
+                  return finish('fallback');
               }
               this.changesCursor = checkpoint.cursor;
               this.safeCursorLagState = null;
           }
 
-          return 'ok';
+          return finish('ok');
       }
 
     private hydrateSessionShellByIdFromSocket(

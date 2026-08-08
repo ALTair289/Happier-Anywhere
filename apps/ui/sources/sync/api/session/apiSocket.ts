@@ -273,6 +273,17 @@ class ApiSocket {
         void transport?.disconnect({ intentional: true });
         void transport?.destroy();
         this.socket = null;
+        // Unsubscribing above means the supervisor's own teardown state can no longer reach our listeners, so
+        // the last state we published would stay `online` for the whole background window. Consumers would then
+        // read "endpoint online, socket down" on resume and surface it as a server outage. A diagnosed problem
+        // (offline / auth_failed) is left untouched: an intentional teardown must not erase it either.
+        if (this.currentConnectionState.phase === 'online' || this.currentConnectionState.phase === 'connecting') {
+            this.applyManagedConnectionState({
+                ...this.currentConnectionState,
+                phase: 'shutting_down',
+                lastDisconnectedAt: Date.now(),
+            });
+        }
         this.updateStatus('disconnected');
     }
 

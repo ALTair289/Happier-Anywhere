@@ -4082,7 +4082,6 @@ describe('fetchAndApplySessions (/v2/sessions snapshot)', () => {
                         flavor: null,
                         directSessionV1: null,
                         hiddenSystemSession: false,
-                        keepVisibleWhenInactive: false,
                         hasPendingPermissionRequests: false,
                         hasPendingUserActionRequests: false,
                         hasUnreadMessages: true,

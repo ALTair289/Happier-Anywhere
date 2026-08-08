@@ -1,7 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ManagedEndpointSupervisor, ManagedEndpointSupervisorState } from '@happier-dev/connection-supervisor';
-
 // Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
 const kvStore = vi.hoisted(() => new Map<string, string>());
 vi.mock('react-native-mmkv', () => {
@@ -83,35 +81,7 @@ vi.mock('@/log', () => ({
     log: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-function createStubEndpointSupervisor(initial: ManagedEndpointSupervisorState) {
-    let state = initial;
-    const listeners = new Set<(next: ManagedEndpointSupervisorState) => void>();
-
-    const publish = (next: ManagedEndpointSupervisorState) => {
-        state = next;
-        for (const listener of Array.from(listeners)) {
-            listener(next);
-        }
-    };
-
-    const supervisor: ManagedEndpointSupervisor = {
-        start: vi.fn(async () => {}),
-        stop: vi.fn(async () => {}),
-        invalidate: vi.fn(),
-        reportFailure: vi.fn(),
-        waitUntilOnline: vi.fn(async () => {}),
-        getState: () => state,
-        subscribe: (listener) => {
-            listeners.add(listener);
-            listener(state);
-            return () => listeners.delete(listener);
-        },
-    };
-
-    return { supervisor, publish };
-}
-
-describe('sync endpoint online resume', () => {
+describe('sync server-reachable resume', () => {
     beforeEach(() => {
         vi.resetModules();
         kvStore.clear();
@@ -120,43 +90,6 @@ describe('sync endpoint online resume', () => {
         apiSocketMock.connect.mockClear();
         apiSocketMock.disconnect.mockClear();
         reachabilityMock.invalidateAllServerReachabilitySupervisors.mockClear();
-    });
-
-    it('triggers one consolidated resume pipeline when endpoint supervision returns online', async () => {
-        const now = Date.now();
-        const offlineState: ManagedEndpointSupervisorState = {
-            phase: 'offline',
-            reason: 'server_unreachable',
-            attempt: 1,
-            nextRetryAt: now + 1000,
-            lastConnectedAt: null,
-            lastDisconnectedAt: now,
-            lastErrorMessage: 'Network request failed',
-            lastProbe: { status: 'server_unreachable', errorMessage: 'Network request failed' },
-        };
-        const onlineState: ManagedEndpointSupervisorState = {
-            phase: 'online',
-            reason: null,
-            attempt: 1,
-            nextRetryAt: null,
-            lastConnectedAt: now,
-            lastDisconnectedAt: null,
-            lastErrorMessage: null,
-            lastProbe: { status: 'ready' },
-        };
-
-        const { supervisor, publish } = createStubEndpointSupervisor(offlineState);
-        const { sync } = await import('./sync');
-
-        const resumeSpy = vi.fn(async () => {});
-        (sync as unknown as { resumeSync: (reason: string) => Promise<void> }).resumeSync = resumeSpy as any;
-
-        sync.setActiveEndpointSupervisor(supervisor);
-        publish(onlineState);
-
-        await new Promise<void>((resolve) => queueMicrotask(resolve));
-
-        expect(resumeSpy).toHaveBeenCalledWith('endpoint-online');
     });
 
     it('stores api socket reachability and resumes sync when the server becomes reachable again', async () => {

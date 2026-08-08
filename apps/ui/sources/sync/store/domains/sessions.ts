@@ -49,13 +49,13 @@ import {
 } from '../../domains/state/persistence';
 import type { ServerAccountScope } from '@/sync/domains/scope/serverAccountScope';
 import {
+    readPersistedSessionListWarmCacheEntries,
     resolveWarmCacheAccountScope,
-    type SessionListCacheEntryV1,
     saveSessionListWarmCacheEntries,
 } from '../../domains/state/warmCachePersistence';
 import {
+    buildPersistedSessionListCacheEntriesFromRenderables,
     buildSessionListCacheEntryFromRenderable,
-    buildSessionListCacheEntriesFromRenderables,
 } from '../../domains/state/warmCacheAdapters';
 import { projectManager } from '../../runtime/orchestration/projectManager';
 import { syncPerformanceTelemetry } from '../../runtime/syncPerformanceTelemetry';
@@ -435,14 +435,18 @@ function resolveSessionOnlineState(session: { active: boolean; activeAt: number 
     return session.active ? "online" : session.activeAt;
 }
 
-function saveWarmSessionCacheForState(
-    state: SessionsDomain & SessionsDomainDependencies,
-    previousEntries?: Record<string, SessionListCacheEntryV1>,
-): void {
+/**
+ * Diffs against what the warm-cache key is known to hold rather than against a
+ * reconstruction of the previous renderables. Boot hydration therefore produces the
+ * record that is already on disk and writes nothing, and steady-state saves skip both
+ * the serialization and the storage write when nothing the cache keeps has changed.
+ */
+function saveWarmSessionCacheForState(state: SessionsDomain & SessionsDomainDependencies): void {
     const activeServerId = String(getActiveServerSnapshot().serverId ?? '').trim();
     const accountId = resolveWarmCacheAccountScope(state.profile?.id);
     if (!activeServerId || !accountId) return;
-    const nextEntries = buildSessionListCacheEntriesFromRenderables(state.sessionListRenderables ?? {}, previousEntries);
+    const previousEntries = readPersistedSessionListWarmCacheEntries(activeServerId, accountId);
+    const nextEntries = buildPersistedSessionListCacheEntriesFromRenderables(state.sessionListRenderables ?? {}, previousEntries);
     if (previousEntries && nextEntries === previousEntries) return;
     saveSessionListWarmCacheEntries(
         activeServerId,
@@ -475,14 +479,12 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
     const emptySessionRepositoryTreeExpandedPaths: string[] = [];
     let actionDraftsBySessionId: Record<string, SessionActionDraft[]> = loadSessionActionDrafts();
     let warmCacheSaveScheduler: ReturnType<typeof createWarmCacheSaveScheduler<
-        SessionsDomain & SessionsDomainDependencies,
-        Record<string, SessionListCacheEntryV1>
+        SessionsDomain & SessionsDomainDependencies
     >> | null = null;
     const getWarmCacheSaveScheduler = () => {
         if (!warmCacheSaveScheduler) {
             warmCacheSaveScheduler = createWarmCacheSaveScheduler<
-                SessionsDomain & SessionsDomainDependencies,
-                Record<string, SessionListCacheEntryV1>
+                SessionsDomain & SessionsDomainDependencies
             >({
                 get,
                 save: saveWarmSessionCacheForState,
@@ -512,9 +514,8 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
 
     const saveWarmSessionCacheImmediately = (
         state: SessionsDomain & SessionsDomainDependencies,
-        previousEntries?: Record<string, SessionListCacheEntryV1>,
     ): void => {
-        getWarmCacheSaveScheduler().saveImmediately(state, previousEntries);
+        getWarmCacheSaveScheduler().saveImmediately(state);
     };
     const scheduleWarmSessionCacheSave = (
         state?: SessionsDomain & SessionsDomainDependencies,
@@ -999,9 +1000,15 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                         : undefined,
                 );
                 const previousRenderable = state.sessionListRenderables?.[session.id];
-                const nextRenderable = previousRenderable
-                    ? preserveSessionListRenderableTransientState(previousRenderable, nextRenderableBase)
-                    : nextRenderableBase;
+                // Unconditional, exactly like the renderable-replacement path: the
+                // merge owner is what stamps the unread entry fact, and it handles
+                // the no-previous case itself. Skipping it for a first ingest would
+                // leave a freshly-arrived unread row keyed on moving activity — and
+                // persist that missing entry fact into the warm cache.
+                const nextRenderable = preserveSessionListRenderableTransientState(
+                    previousRenderable,
+                    nextRenderableBase,
+                );
                 const mergedRenderable = areSessionListRenderablesEqual(previousRenderable, nextRenderable)
                     ? previousRenderable
                     : nextRenderable;
@@ -1283,10 +1290,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                         changed: plan.changedCount,
                         removed: plan.removedCount,
                     }),
-                    () => {
-                        const previousEntries = buildSessionListCacheEntriesFromRenderables(state.sessionListRenderables ?? {});
-                        saveWarmSessionCacheImmediately(next as SessionsDomain & SessionsDomainDependencies, previousEntries);
-                    },
+                    () => saveWarmSessionCacheImmediately(next as SessionsDomain & SessionsDomainDependencies),
                 );
             } else if (plan.didDeferredWarmCacheRelevantRenderableChange) {
                 syncPerformanceTelemetry.count('sync.store.sessions.renderables.replace.warmCache.deferred', {
@@ -1348,10 +1352,7 @@ export function createSessionsDomain<S extends SessionsDomain & SessionsDomainDe
                         incoming: sessions.length,
                         changed: plan.changedCount,
                     }),
-                    () => {
-                        const previousEntries = buildSessionListCacheEntriesFromRenderables(state.sessionListRenderables ?? {});
-                        saveWarmSessionCacheImmediately(next as SessionsDomain & SessionsDomainDependencies, previousEntries);
-                    },
+                    () => saveWarmSessionCacheImmediately(next as SessionsDomain & SessionsDomainDependencies),
                 );
             } else if (plan.didDeferredWarmCacheRelevantRenderableChange) {
                 syncPerformanceTelemetry.count('sync.store.sessions.renderables.merge.warmCache.deferred', {

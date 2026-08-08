@@ -40,40 +40,28 @@ export function projectSessionListPlacement(params: Readonly<{
 }>): SessionListPlacementProjection {
     const runtimeStatus = deriveSessionRuntimePresentationState(params.session, params.nowMs);
     if (runtimeStatus.freshActionRequired) {
-        return createPlacement('action_required', resolveSessionListActionRequiredPlacementTimestamp(params.session));
+        return createPlacement('action_required', resolveSessionListPlacementTimestampForReason(params.session, 'action_required'));
     }
     if (runtimeStatus.freshPermissionRequired) {
-        return createPlacement('permission_required', resolveSessionListActionRequiredPlacementTimestamp(params.session));
+        return createPlacement('permission_required', resolveSessionListPlacementTimestampForReason(params.session, 'permission_required'));
     }
     if ((params.session.pendingBlockedCount ?? 0) > 0) {
-        return createPlacement('action_required', resolveSessionListActionRequiredPlacementTimestamp(params.session));
+        return createPlacement('action_required', resolveSessionListPlacementTimestampForReason(params.session, 'action_required'));
     }
     if (runtimeStatus.working) {
         return createPlacement('working', null);
     }
     if (isPrimarySessionFailure(params.session)) {
-        return createPlacement(
-            'failed',
-            normalizePlacementTimestamp(
-                params.session.lastRuntimeIssue?.occurredAt,
-                params.session.latestTurnStatusObservedAt,
-            ),
-        );
+        return createPlacement('failed', resolveSessionListPlacementTimestampForReason(params.session, 'failed'));
     }
     if (runtimeStatus.isOnline && runtimeStatus.backgroundActive) {
         return createPlacement('working', null);
     }
     if (isSessionListReadyForReview(params.session)) {
-        return createPlacement(
-            'ready',
-            normalizePlacementTimestamp(
-                params.session.latestReadyEventAt,
-                params.session.latestTurnStatusObservedAt,
-            ),
-        );
+        return createPlacement('ready', resolveSessionListPlacementTimestampForReason(params.session, 'ready'));
     }
     if (params.session.hasUnreadMessages === true) {
-        return createPlacement('unread', resolveSessionListUnreadPlacementTimestamp(params.session));
+        return createPlacement('unread', resolveSessionListPlacementTimestampForReason(params.session, 'unread'));
     }
 
     const retainedWorking = shouldRetainSessionListWorkingPlacement({
@@ -137,18 +125,66 @@ export function didSessionListPlacementProjectionDiverge(params: Readonly<{
     return true;
 }
 
-export function resolveSessionListActionRequiredPlacementTimestamp(session: Pick<
+/**
+ * Single owner of the attention-reason → ordering-timestamp rule. Both the
+ * store-side placement projection above and the index promotion lane resolve
+ * candidate order through this table, so a lane can never sort by a different
+ * fact than the one the rebuild gate compared.
+ */
+export function resolveSessionListPlacementTimestampForReason(
+    session: SessionListRenderableSession,
+    reason: SessionListAttentionPromotionReason,
+): number | null {
+    switch (reason) {
+        case 'action_required':
+        case 'permission_required':
+            return normalizePlacementTimestamp(
+                session.pendingRequestObservedAt,
+                session.updatedAt,
+                session.createdAt,
+            );
+        case 'failed':
+            return normalizePlacementTimestamp(
+                session.lastRuntimeIssue?.occurredAt,
+                session.latestTurnStatusObservedAt,
+            );
+        case 'ready':
+            return normalizePlacementTimestamp(
+                session.latestReadyEventAt,
+                session.latestTurnStatusObservedAt,
+            );
+        case 'unread':
+            return resolveSessionListUnreadPlacementTimestamp(session);
+    }
+}
+
+/**
+ * Unread rows are ordered by WHEN THEY BECAME UNREAD, never by their latest
+ * activity: an unread session that keeps receiving messages must not re-sort
+ * the attention lane (and must not invalidate the committed list) while its
+ * membership is unchanged. `unreadSince` is the canonical entry fact — server
+ * materialized when available, otherwise stamped once by the renderable merge
+ * owner. The activity fallback only applies to rows that never passed through
+ * that owner (e.g. raw warm-cache rehydration), and reproduces the previous
+ * ordering exactly for them.
+ */
+function resolveSessionListUnreadPlacementTimestamp(session: Pick<
     SessionListRenderableSession,
-    'pendingRequestObservedAt' | 'updatedAt' | 'createdAt'
+    'unreadSince' | 'meaningfulActivityAt' | 'updatedAt' | 'createdAt'
 >): number | null {
     return normalizePlacementTimestamp(
-        session.pendingRequestObservedAt,
+        session.unreadSince,
+        session.meaningfulActivityAt,
         session.updatedAt,
         session.createdAt,
     );
 }
 
-export function resolveSessionListUnreadPlacementTimestamp(session: Pick<
+/**
+ * Activity time stamped as `unreadSince` when a session first enters the
+ * unread state without a server-materialized entry fact.
+ */
+export function resolveSessionListUnreadEntryActivityAt(session: Pick<
     SessionListRenderableSession,
     'meaningfulActivityAt' | 'updatedAt' | 'createdAt'
 >): number | null {

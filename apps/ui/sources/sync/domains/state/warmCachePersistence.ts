@@ -8,6 +8,7 @@ import {
 import { z } from 'zod';
 
 import { readStorageScopeFromEnv, scopedStorageId } from '@/utils/system/storageScope';
+import { selectMostRecentWarmCacheSessionIds } from './warmCacheAdapters';
 
 const isWebRuntime = typeof window !== 'undefined' && typeof document !== 'undefined';
 
@@ -23,6 +24,7 @@ function getWarmCacheStorage(): MMKV {
 
 const SESSION_LIST_WARM_CACHE_PREFIX = 'session-list-warm-cache-v1';
 const MACHINE_DISPLAY_WARM_CACHE_PREFIX = 'machine-display-warm-cache-v1';
+const SESSION_LIST_PINNED_IDS_WARM_CACHE_PREFIX = 'session-list-pinned-ids-warm-cache-v1';
 
 export const SessionListCacheEntryV1Schema = z.object({
     sessionId: z.string().min(1),
@@ -66,10 +68,13 @@ export const SessionListCacheEntryV1Schema = z.object({
         providerId: z.string().optional(),
     }).nullable().optional(),
     hiddenSystemSession: z.boolean().optional(),
-    keepVisibleWhenInactive: z.boolean().optional(),
     hasPendingPermissionRequests: z.boolean().optional(),
     hasPendingUserActionRequests: z.boolean().optional(),
     hasUnreadMessages: z.boolean().optional(),
+    // The unread entry fact is durable read state, not activity: a cold boot that
+    // dropped it would re-derive a per-boot ordering key for the attention lane
+    // instead of restoring the one the server materialized.
+    unreadSince: z.number().int().nonnegative().nullable().optional(),
 }).superRefine((entry, context) => {
     if (parseSessionRuntimeActivityProjectionFields(entry).kind === 'invalid') {
         context.addIssue({
@@ -97,6 +102,50 @@ export type MachineDisplayCacheEntryV1 = z.infer<typeof MachineDisplayCacheEntry
 
 const SessionListCacheEntriesSchema = z.record(z.string(), SessionListCacheEntryV1Schema);
 const MachineDisplayCacheEntriesSchema = z.record(z.string(), MachineDisplayCacheEntryV1Schema);
+
+function capSessionListCacheEntries(
+    entries: Record<string, SessionListCacheEntryV1>,
+): Record<string, SessionListCacheEntryV1> {
+    const selectedIds = selectMostRecentWarmCacheSessionIds(entries);
+    if (!selectedIds) return entries;
+    const capped: Record<string, SessionListCacheEntryV1> = {};
+    for (const sessionId of selectedIds) {
+        capped[sessionId] = entries[sessionId];
+    }
+    return capped;
+}
+
+/**
+ * What a warm-cache key currently holds, as the record object the app last read from or
+ * wrote to it. Boot hydration reads these bytes and a store immediately projects them
+ * back into cache entries; without a persisted baseline that projection looks like new
+ * information and is re-serialized and rewritten before first paint. Owning "what is on
+ * disk" here also removes the divergent reconstructions of "previous entries" that the
+ * stores used to derive from their own renderables.
+ *
+ * One mechanism, one instance per cache: the session list and the machine displays hold
+ * different entry shapes but share this baseline, so neither domain can drift into its
+ * own answer for what the key already contains.
+ */
+function createPersistedWarmCacheBaseline<TEntry>(): Readonly<{
+    read: (key: string | null) => Record<string, TEntry> | undefined;
+    remember: (key: string, entries: Record<string, TEntry>) => void;
+    forget: (key: string) => void;
+}> {
+    const entriesByKey = new Map<string, Record<string, TEntry>>();
+    return {
+        read: (key) => (key ? entriesByKey.get(key) : undefined),
+        remember: (key, entries) => {
+            entriesByKey.set(key, entries);
+        },
+        forget: (key) => {
+            entriesByKey.delete(key);
+        },
+    };
+}
+
+const persistedSessionListBaseline = createPersistedWarmCacheBaseline<SessionListCacheEntryV1>();
+const persistedMachineDisplayBaseline = createPersistedWarmCacheBaseline<MachineDisplayCacheEntryV1>();
 
 function normalizeScopePart(value: string | null | undefined): string {
     const normalized = String(value ?? '').trim();
@@ -156,7 +205,30 @@ function saveScopedRecord<T extends Record<string, unknown>>(key: string | null,
 }
 
 export function loadSessionListWarmCacheEntries(serverId: string | null | undefined, accountId: string | null | undefined): Record<string, SessionListCacheEntryV1> {
-    return loadScopedRecord(buildScopedKey(SESSION_LIST_WARM_CACHE_PREFIX, serverId, accountId), SessionListCacheEntriesSchema) ?? {};
+    const key = buildScopedKey(SESSION_LIST_WARM_CACHE_PREFIX, serverId, accountId);
+    const loaded = loadScopedRecord(key, SessionListCacheEntriesSchema);
+    if (!key) return loaded ?? {};
+    if (!loaded) {
+        persistedSessionListBaseline.forget(key);
+        return {};
+    }
+    // The baseline is what the KEY holds, not what we hand back. When a pre-cap blob is
+    // trimmed here, that difference is exactly what makes the next save rewrite the key
+    // at its bounded size instead of leaving the oversized blob to be reparsed forever.
+    persistedSessionListBaseline.remember(key, loaded);
+    return capSessionListCacheEntries(loaded);
+}
+
+/**
+ * The record the warm-cache key is currently known to hold, or `undefined` when this
+ * scope has not been read or written in this process. Callers diff against it instead
+ * of reconstructing a "previous entries" projection of their own.
+ */
+export function readPersistedSessionListWarmCacheEntries(
+    serverId: string | null | undefined,
+    accountId: string | null | undefined,
+): Record<string, SessionListCacheEntryV1> | undefined {
+    return persistedSessionListBaseline.read(buildScopedKey(SESSION_LIST_WARM_CACHE_PREFIX, serverId, accountId));
 }
 
 export function saveSessionListWarmCacheEntries(
@@ -164,11 +236,78 @@ export function saveSessionListWarmCacheEntries(
     accountId: string | null | undefined,
     entries: Record<string, SessionListCacheEntryV1>,
 ): void {
-    saveScopedRecord(buildScopedKey(SESSION_LIST_WARM_CACHE_PREFIX, serverId, accountId), entries);
+    const key = buildScopedKey(SESSION_LIST_WARM_CACHE_PREFIX, serverId, accountId);
+    if (!key) return;
+    if (persistedSessionListBaseline.read(key) === entries) return;
+    saveScopedRecord(key, entries);
+    if (Object.keys(entries).length === 0) {
+        persistedSessionListBaseline.forget(key);
+        return;
+    }
+    persistedSessionListBaseline.remember(key, entries);
+}
+
+const SessionListPinnedSessionIdsSchema = z.object({
+    pinnedSessionIds: z.array(z.string().min(1)),
+});
+
+/**
+ * Pinned rows must be hydrated with the first session-list page, and the request carries
+ * the pinned ids so the server can merge those rows into it. Persisting the id *set*
+ * (not merely the organization snapshot version) is what lets a cold boot issue that
+ * request immediately instead of blocking the whole list behind the organization
+ * snapshot round trip; persisting only the version would silently drop pinned hydration
+ * on the first boot after install or cache eviction.
+ */
+export function loadSessionListPinnedSessionIdsWarmCache(
+    serverId: string | null | undefined,
+    accountId: string | null | undefined,
+): readonly string[] {
+    const record = loadScopedRecord(
+        buildScopedKey(SESSION_LIST_PINNED_IDS_WARM_CACHE_PREFIX, serverId, accountId),
+        SessionListPinnedSessionIdsSchema,
+    );
+    return record?.pinnedSessionIds ?? [];
+}
+
+export function saveSessionListPinnedSessionIdsWarmCache(
+    serverId: string | null | undefined,
+    accountId: string | null | undefined,
+    pinnedSessionIds: readonly string[],
+): void {
+    const key = buildScopedKey(SESSION_LIST_PINNED_IDS_WARM_CACHE_PREFIX, serverId, accountId);
+    if (!key) return;
+    const storage = getWarmCacheStorage();
+    if (pinnedSessionIds.length === 0) {
+        storage.delete(key);
+        return;
+    }
+    const serialized = JSON.stringify({ pinnedSessionIds: [...pinnedSessionIds] });
+    if (storage.getString(key) === serialized) return;
+    storage.set(key, serialized);
 }
 
 export function loadMachineDisplayWarmCacheEntries(serverId: string | null | undefined, accountId: string | null | undefined): Record<string, MachineDisplayCacheEntryV1> {
-    return loadScopedRecord(buildScopedKey(MACHINE_DISPLAY_WARM_CACHE_PREFIX, serverId, accountId), MachineDisplayCacheEntriesSchema) ?? {};
+    const key = buildScopedKey(MACHINE_DISPLAY_WARM_CACHE_PREFIX, serverId, accountId);
+    const loaded = loadScopedRecord(key, MachineDisplayCacheEntriesSchema);
+    if (!key) return loaded ?? {};
+    if (!loaded) {
+        persistedMachineDisplayBaseline.forget(key);
+        return {};
+    }
+    persistedMachineDisplayBaseline.remember(key, loaded);
+    return loaded;
+}
+
+/**
+ * The record the machine-display warm-cache key is currently known to hold, or
+ * `undefined` when this scope has not been read or written in this process.
+ */
+export function readPersistedMachineDisplayWarmCacheEntries(
+    serverId: string | null | undefined,
+    accountId: string | null | undefined,
+): Record<string, MachineDisplayCacheEntryV1> | undefined {
+    return persistedMachineDisplayBaseline.read(buildScopedKey(MACHINE_DISPLAY_WARM_CACHE_PREFIX, serverId, accountId));
 }
 
 export function saveMachineDisplayWarmCacheEntries(
@@ -176,5 +315,13 @@ export function saveMachineDisplayWarmCacheEntries(
     accountId: string | null | undefined,
     entries: Record<string, MachineDisplayCacheEntryV1>,
 ): void {
-    saveScopedRecord(buildScopedKey(MACHINE_DISPLAY_WARM_CACHE_PREFIX, serverId, accountId), entries);
+    const key = buildScopedKey(MACHINE_DISPLAY_WARM_CACHE_PREFIX, serverId, accountId);
+    if (!key) return;
+    if (persistedMachineDisplayBaseline.read(key) === entries) return;
+    saveScopedRecord(key, entries);
+    if (Object.keys(entries).length === 0) {
+        persistedMachineDisplayBaseline.forget(key);
+        return;
+    }
+    persistedMachineDisplayBaseline.remember(key, entries);
 }

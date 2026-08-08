@@ -200,6 +200,11 @@ function coerceLegacySessionRecord(raw: unknown): V2SessionRecord | null {
         agentState: coerceStringPayload(raw.agentState),
         agentStateVersion,
         lastViewedSessionSeq: readNullableNumber(raw.lastViewedSessionSeq),
+        // Server-materialized unread entry fact. It is the only value that is
+        // identical on every device and across boots, so the transport must not
+        // drop it: without it every client falls back to a local stamp and the
+        // attention lane re-sorts per device.
+        unreadSince: readNullableNumber(raw.unreadSince),
         pendingPermissionRequestCount: readNumber(raw.pendingPermissionRequestCount) ?? undefined,
         pendingUserActionRequestCount: readNumber(raw.pendingUserActionRequestCount) ?? undefined,
         pendingRequestObservedAt: readNullableNumber(raw.pendingRequestObservedAt),

@@ -84,6 +84,7 @@ function mockMachineDomainBoundaries(): void {
     vi.doMock('../../domains/state/warmCachePersistence', () => ({
         resolveWarmCacheAccountScope: vi.fn((fallback: string | null | undefined) => fallback ?? null),
         saveMachineDisplayWarmCacheEntries: vi.fn(),
+        readPersistedMachineDisplayWarmCacheEntries: vi.fn(() => undefined),
     }));
 }
 
@@ -101,6 +102,7 @@ function mockMachineDomainBoundariesForActiveServer(
     vi.doMock('../../domains/state/warmCachePersistence', () => ({
         resolveWarmCacheAccountScope: vi.fn((fallback: string | null | undefined) => fallback ?? null),
         saveMachineDisplayWarmCacheEntries: vi.fn(),
+        readPersistedMachineDisplayWarmCacheEntries: vi.fn(() => undefined),
     }));
 }
 
