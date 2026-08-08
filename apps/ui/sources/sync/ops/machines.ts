@@ -318,13 +318,29 @@ export async function machineSpawnNewSession(options: SpawnSessionOptions): Prom
             daemonCliVersion,
         });
         spawnSubmitted = true;
-        const result = await machineRpcWithServerScope<unknown, CompatibleSpawnHappySessionRpcParams>({
-            machineId,
-            method: RPC_METHODS.SPAWN_HAPPY_SESSION,
-            payload: params,
-            serverId,
-            timeoutMs: readSpawnSessionRpcTimeoutMsFromEnv(),
-        });
+        const callSpawnRpc = async (method: string) => (
+            await machineRpcWithServerScope<unknown, CompatibleSpawnHappySessionRpcParams>({
+                machineId,
+                method,
+                payload: params,
+                serverId,
+                timeoutMs: readSpawnSessionRpcTimeoutMsFromEnv(),
+            })
+        );
+        const result = await (async () => {
+            try {
+                return await callSpawnRpc(RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE);
+            } catch (error) {
+                const rpcErrorCode = readRpcErrorCode(error);
+                if (
+                    rpcErrorCode !== RPC_ERROR_CODES.METHOD_NOT_AVAILABLE
+                    && rpcErrorCode !== RPC_ERROR_CODES.METHOD_NOT_FOUND
+                ) {
+                    throw error;
+                }
+                return await callSpawnRpc(RPC_METHODS.SPAWN_HAPPY_SESSION);
+            }
+        })();
         const normalized = remapLegacyDirectoryCompatibilityError({
             result: normalizeSpawnSessionResult(result),
             directory: preparedOptions.directory,

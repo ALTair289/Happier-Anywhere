@@ -79,11 +79,13 @@ describe('machineSpawnNewSession error mapping', () => {
   });
 
   it('returns a descriptive error when daemon RPC method is not available', async () => {
-    machineRpcWithServerScopeMock.mockRejectedValueOnce(
-      Object.assign(new Error('RPC method not available'), {
+    machineRpcWithServerScopeMock
+      .mockRejectedValueOnce(Object.assign(new Error('RPC method not available'), {
         rpcErrorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
-      }),
-    );
+      }))
+      .mockRejectedValueOnce(Object.assign(new Error('RPC method not available'), {
+        rpcErrorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
+      }));
 
     const { machineSpawnNewSession } = await import('./machines');
     const result = await machineSpawnNewSession({
@@ -98,6 +100,50 @@ describe('machineSpawnNewSession error mapping', () => {
     expect(result.errorCode).toBe(SPAWN_SESSION_ERROR_CODES.DAEMON_RPC_UNAVAILABLE);
     expect(result.errorMessage.toLowerCase()).toContain('daemon');
     expect(result.errorMessage.toLowerCase()).toContain('rpc');
+  });
+
+  it('prefers provider-safe spawn and falls back to legacy only after definitive method absence', async () => {
+    machineRpcWithServerScopeMock
+      .mockRejectedValueOnce(Object.assign(new Error('RPC method not available'), {
+        rpcErrorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
+      }))
+      .mockResolvedValueOnce({ type: 'success', sessionId: 'session-from-released-daemon' });
+
+    const { machineSpawnNewSession } = await import('./machines');
+    await expect(machineSpawnNewSession({
+      machineId: 'machine-1',
+      directory: '/tmp',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      serverId: 'server-b',
+    })).resolves.toMatchObject({
+      type: 'success',
+      sessionId: 'session-from-released-daemon',
+    });
+
+    expect(machineRpcWithServerScopeMock.mock.calls.map(([call]) => call.method)).toEqual([
+      RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
+      RPC_METHODS.SPAWN_HAPPY_SESSION,
+    ]);
+    expect(machineRpcWithServerScopeMock.mock.calls[0]?.[0]?.payload.spawnNonce)
+      .toBe(machineRpcWithServerScopeMock.mock.calls[1]?.[0]?.payload.spawnNonce);
+  });
+
+  it('does not fall back to legacy spawn after an ambiguous transport timeout', async () => {
+    machineRpcWithServerScopeMock.mockRejectedValueOnce(new Error('RPC acknowledgement timed out'));
+
+    const { machineSpawnNewSession } = await import('./machines');
+    await machineSpawnNewSession({
+      machineId: 'machine-1',
+      directory: '/tmp',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      serverId: 'server-b',
+    });
+
+    const spawnMethods = machineRpcWithServerScopeMock.mock.calls
+      .map(([call]) => call.method)
+      .filter((method) => method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE
+        || method === RPC_METHODS.SPAWN_HAPPY_SESSION);
+    expect(spawnMethods).toEqual([RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE]);
   });
 
   it('uses an extended RPC timeout for spawn session calls', async () => {
@@ -115,7 +161,10 @@ describe('machineSpawnNewSession error mapping', () => {
     expect(result.type).toBe('success');
     expect(machineRpcWithServerScopeMock).toHaveBeenCalledTimes(1);
     const call = machineRpcWithServerScopeMock.mock.calls[0]?.[0];
-    expect(call).toMatchObject({ timeoutMs: expect.any(Number) });
+    expect(call).toMatchObject({
+      method: RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
+      timeoutMs: expect.any(Number),
+    });
     expect(call.timeoutMs).toBe(readSpawnSessionRpcTimeoutMsFromEnv());
   });
 
@@ -327,7 +376,7 @@ describe('machineSpawnNewSession error mapping', () => {
     });
 
     const spawnCalls = machineRpcWithServerScopeMock.mock.calls.filter(
-      ([call]) => call.method === 'spawn-happy-session',
+      ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
     );
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0]?.[0]?.payload?.spawnNonce).toBe('persisted-launch-nonce');
@@ -338,7 +387,7 @@ describe('machineSpawnNewSession error mapping', () => {
     let spawnCallCount = 0;
     let resolveCallCount = 0;
     machineRpcWithServerScopeMock.mockImplementation(async ({ method }: { method: string }) => {
-      if (method === 'spawn-happy-session') {
+      if (method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE) {
         spawnCallCount += 1;
         return spawnCallCount === 1
           ? {
@@ -380,7 +429,7 @@ describe('machineSpawnNewSession error mapping', () => {
       });
 
       const spawnCalls = machineRpcWithServerScopeMock.mock.calls.filter(
-        ([call]) => call.method === 'spawn-happy-session',
+        ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
       );
       expect(spawnCalls).toHaveLength(2);
       expect(spawnCalls.map(([call]) => call.payload.spawnNonce)).toEqual([
@@ -449,7 +498,7 @@ describe('machineSpawnNewSession error mapping', () => {
       },
     });
     const spawnCalls = machineRpcWithServerScopeMock.mock.calls.filter(
-      ([call]) => call.method === 'spawn-happy-session',
+      ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
     );
     expect(spawnCalls.map(([call]) => call.payload.spawnNonce)).toEqual(['nonce-a', 'nonce-b']);
   });
@@ -496,7 +545,7 @@ describe('machineSpawnNewSession error mapping', () => {
     });
 
     const spawnCalls = machineRpcWithServerScopeMock.mock.calls.filter(
-      ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION,
+      ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
     );
     expect(spawnCalls).toHaveLength(1);
     expect(getPersistenceStorage().getString(spawnCustodyStorageKey)).toContain('"phase":"post_spawn"');
@@ -613,7 +662,7 @@ describe('machineSpawnNewSession error mapping', () => {
       directory: 'C:\\Users\\Alice2\\Repo',
     })).resolves.toMatchObject({ type: 'success', sessionId: 'session-distinct' });
     const spawnCalls = machineRpcWithServerScopeMock.mock.calls.filter(
-      ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION,
+      ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
     );
     expect(spawnCalls).toHaveLength(2);
   });
@@ -641,7 +690,7 @@ describe('machineSpawnNewSession error mapping', () => {
       },
     });
     machineRpcWithServerScopeMock.mockImplementation(async ({ method, payload }: { method: string; payload: { spawnNonce?: string } }) => {
-      if (method === 'spawn-happy-session') {
+      if (method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE) {
         return {
           type: 'success',
           sessionId: payload.spawnNonce === 'second-nonce' ? 'session-from-attempt-b' : 'session-from-attempt-a',
@@ -665,7 +714,7 @@ describe('machineSpawnNewSession error mapping', () => {
       const results = await Promise.all([first, second]);
 
       const spawnCalls = machineRpcWithServerScopeMock.mock.calls.filter(
-        ([call]) => call.method === 'spawn-happy-session',
+        ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
       );
       expect(spawnCalls.map(([call]) => call.payload.spawnNonce)).toEqual(['shared-nonce', 'second-nonce']);
       expect(results).toEqual([
@@ -739,7 +788,7 @@ describe('machineSpawnNewSession error mapping', () => {
     });
 
     const spawnCalls = machineRpcWithServerScopeMock.mock.calls.filter(
-      ([call]) => call.method === 'spawn-happy-session',
+      ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
     );
     expect(spawnCalls.map(([call]) => call.payload.spawnNonce)).toEqual(['launch-1', 'launch-2']);
   });
@@ -793,7 +842,7 @@ describe('machineSpawnNewSession error mapping', () => {
       sessionId: 'later-session',
     });
     const spawnCalls = machineRpcWithServerScopeMock.mock.calls.filter(
-      ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION,
+      ([call]) => call.method === RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
     );
     expect(spawnCalls.map(([call]) => call.payload.spawnNonce)).toHaveLength(2);
   });
