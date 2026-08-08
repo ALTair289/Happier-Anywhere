@@ -3,6 +3,7 @@ import { Fastify } from "../../types";
 import { z } from "zod";
 import { db, isPrismaErrorCode } from "@/storage/db";
 import { log } from "@/utils/logging/log";
+import { describeLoggableError } from "@/utils/logging/describeLoggableError";
 import { randomKeyNaked } from "@/utils/keys/randomKeyNaked";
 import { buildNewMachineUpdate, buildUpdateMachineUpdate } from "@/app/events/eventRouter";
 import { activityCache } from "@/app/presence/sessionCache";
@@ -25,7 +26,10 @@ import {
     verifyMachineInstallationRegistration,
     type VerifiedMachineInstallationIdentity,
 } from "@/app/machines/installationProof";
-import { serializeMachineRow } from "@/app/machines/machineSerialization";
+import {
+    MACHINE_SERIALIZATION_SELECT,
+    serializeMachineRow,
+} from "@/app/machines/machineSerialization";
 import { registerMachineReplacementRoutes } from "./registerMachineReplacementRoutes";
 
 function bytesEqual(a: Uint8Array | null, b: Uint8Array | null) {
@@ -90,21 +94,6 @@ function isMachineRevokedError(value: unknown): value is { error: 'machine_revok
     if (typeof value !== 'object' || value === null) return false;
     if (!('error' in value)) return false;
     return (value as { error?: unknown }).error === 'machine_revoked';
-}
-
-function describeUnknownError(error: unknown): { code?: string; message: string } {
-    if (error instanceof Error) {
-        const codeCandidate = (error as Error & { code?: unknown }).code;
-        const code = typeof codeCandidate === 'string' ? codeCandidate : undefined;
-        return {
-            ...(code ? { code } : {}),
-            message: error.message,
-        };
-    }
-    if (typeof error === 'string') {
-        return { message: error };
-    }
-    return { message: String(error) };
 }
 
 export function machinesRoutes(app: Fastify) {
@@ -497,7 +486,7 @@ export function machinesRoutes(app: Fastify) {
                             machineId: id,
                             userId,
                             reason: 'tx_busy',
-                            error: describeUnknownError(error),
+                            error: describeLoggableError(error),
                         },
                         'Machine update skipped due to transaction contention',
                     );
@@ -745,9 +734,13 @@ export function machinesRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
 
+        // The response is a bare array with no pagination metadata, so this read stays unbounded:
+        // a row cap here would be silent truncation a client could not detect. The cost guard is
+        // the explicit projection, which keeps the payload to the columns the serializer emits.
         const machines = await db.machine.findMany({
             where: { accountId: userId },
-            orderBy: { lastActiveAt: 'desc' }
+            orderBy: { lastActiveAt: 'desc' },
+            select: MACHINE_SERIALIZATION_SELECT,
         });
 
         return machines.map(serializeMachineRow);

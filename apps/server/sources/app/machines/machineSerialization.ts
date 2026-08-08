@@ -21,6 +21,34 @@ export type MachineSerializationRow = Readonly<{
     updatedAt: Date;
 }>;
 
+/**
+ * The exact columns `serializeMachineRow` reads. Machine list/detail reads project through this so a
+ * future column — the model already carries encrypted `metadata`/`daemonState` and key blobs — cannot
+ * silently join the foreground-boot payload just by existing.
+ */
+export const MACHINE_SERIALIZATION_SELECT = {
+    id: true,
+    metadata: true,
+    metadataVersion: true,
+    daemonState: true,
+    daemonStateVersion: true,
+    dataEncryptionKey: true,
+    installationId: true,
+    installationPublicKey: true,
+    contentPublicKeyFingerprint: true,
+    replacedByMachineId: true,
+    replacedAt: true,
+    replacementReason: true,
+    replacementSource: true,
+    replacementActorUserId: true,
+    seq: true,
+    active: true,
+    lastActiveAt: true,
+    revokedAt: true,
+    createdAt: true,
+    updatedAt: true,
+} as const;
+
 export function serializeMachineRow(row: MachineSerializationRow) {
     return {
         id: row.id,
