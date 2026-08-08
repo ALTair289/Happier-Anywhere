@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildConnectedServiceCredentialRecord } from '@happier-dev/protocol';
 
 import { readConnectedServiceStateSharingManifest } from '@/daemon/connectedServices/stateSharing/connectedServiceStateSharingManifest';
+import { withConnectedServiceStateSharingDestinationLock } from '@/daemon/connectedServices/stateSharing/connectedServiceStateSharingLock';
 import { logger } from '@/ui/logger';
 
 import { verifyResumeReachableClaude } from '../verifyResumeReachableClaude';
@@ -715,6 +716,97 @@ describe('materializeClaudeCodeNativeAuth', () => {
         sourcePath: previousSessionPath,
       }),
     ]);
+  });
+
+  it('serializes source-equals-target group-home materialization through the canonical destination lock', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-home-lock-'));
+    const targetClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-target-lock-'));
+    const record = buildHealthyClaudeSubscriptionRecord(
+      'locked-profile',
+      'locked-access-placeholder',
+      'locked-refresh-placeholder',
+    );
+    let markLockAcquired!: () => void;
+    const lockAcquired = new Promise<void>((resolve) => {
+      markLockAcquired = resolve;
+    });
+    let releaseLock!: () => void;
+    const holdLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const lockOwner = withConnectedServiceStateSharingDestinationLock(
+      targetClaudeConfigDir,
+      async () => {
+        markLockAcquired();
+        await holdLock;
+      },
+      { providerId: 'claude' },
+    );
+    await lockAcquired;
+
+    const materialization = materializeClaudeSubscriptionNativeAuthHome({
+      record,
+      targetClaudeConfigDir,
+      sourceEnv: { HOME: homeDir, CLAUDE_CONFIG_DIR: targetClaudeConfigDir },
+      accountSettings: null,
+      sessionDirectory: null,
+      selectionDescriptor: {
+        kind: 'group',
+        serviceId: 'claude-subscription',
+        groupId: 'claude',
+        activeProfileId: 'locked-profile',
+        fallbackProfileId: 'locked-profile',
+        generation: 7,
+      },
+    });
+    const beforeRelease = await Promise.race([
+      materialization.then(() => 'settled' as const),
+      new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 100)),
+    ]);
+    expect(beforeRelease).toBe('blocked');
+
+    releaseLock();
+    await lockOwner;
+    await expect(materialization).resolves.toMatchObject({ status: 'materialized' });
+  });
+
+  it('does not mutate a shared group home after authoritative truth supersedes the spawn selection', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-superseded-home-'));
+    const targetClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-native-auth-superseded-target-'));
+    const record = buildHealthyClaudeSubscriptionRecord(
+      'stale-profile',
+      'stale-access-placeholder',
+      'stale-refresh-placeholder',
+    );
+
+    const result = await materializeClaudeSubscriptionNativeAuthHome({
+      record,
+      targetClaudeConfigDir,
+      sourceEnv: { HOME: homeDir },
+      accountSettings: null,
+      sessionDirectory: null,
+      selectionDescriptor: {
+        kind: 'group',
+        serviceId: 'claude-subscription',
+        groupId: 'claude',
+        activeProfileId: 'stale-profile',
+        fallbackProfileId: 'stale-profile',
+        generation: 7,
+        credentialRevision: 'csr_7123456789ABCDEFGHJKMNPQRS',
+      },
+      validateGroupMutationCurrentness: async () => ({ current: false }),
+    });
+
+    expect(result).toMatchObject({
+      status: 'diagnostic',
+      diagnostics: [expect.objectContaining({
+        code: 'claude_connected_service_generation_superseded',
+        severity: 'blocking',
+      })],
+    });
+    await expect(readFile(join(targetClaudeConfigDir, '.credentials.json'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('keeps isolated Claude subscription materialization fail-closed when the target lacks the resume session', async () => {

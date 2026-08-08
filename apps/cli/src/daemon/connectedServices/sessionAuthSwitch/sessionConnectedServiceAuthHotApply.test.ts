@@ -272,6 +272,77 @@ describe('createSessionConnectedServiceAuthHotApply', () => {
     });
   });
 
+  it('threads exact group currentness into the provider writer and reports typed supersession', async () => {
+    const validateGroupMutationCurrentness = vi.fn(async () => ({
+      current: false as const,
+      authoritativeTarget: {
+        profileId: 'current',
+        generation: 9,
+        credentialRevision: 'csr_9123456789ABCDEFGHJKMNPQRS' as const,
+      },
+    }));
+    const adapter = {
+      classifyRuntimeAuthFailure: () => null,
+      materializeActiveProfile: async () => ({}),
+      canHotApply: () => ({ supported: true }),
+      hotApply: async (input) => {
+        const currentness = await input.validateCurrentBeforeMutation?.();
+        return currentness?.current === false
+          ? { applied: false, status: 'superseded_after_apply' }
+          : { applied: true };
+      },
+      recoverAfterRuntimeAuthSwitch: async () => ({}),
+      probeQuota: async () => ({}),
+      refreshActiveProfile: async () => ({}),
+    } satisfies ConnectedServiceProviderRuntimeAuthAdapter;
+    const apply = createSessionConnectedServiceAuthHotApply({
+      resolveRuntimeAuthAdapter: async () => adapter,
+      validateGroupMutationCurrentness,
+    });
+
+    await expect(apply({
+      tracked: {
+        startedBy: 'daemon',
+        happySessionId: 'sess_1',
+        pid: 123,
+        spawnOptions: {
+          directory: '/tmp/project',
+          backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+        },
+      },
+      normalizedBindings: {
+        v: 1,
+        bindingsByServiceId: {
+          'claude-subscription': {
+            source: 'connected',
+            selection: 'group',
+            groupId: 'claude',
+            profileId: 'stale',
+          },
+        },
+      },
+      runtimeAuthSelectionsByServiceId: new Map([[
+        'claude-subscription',
+        {
+          groupId: 'claude',
+          activeProfileId: 'stale',
+          groupGeneration: 8,
+          credentialRevision: 'csr_8123456789ABCDEFGHJKMNPQRS',
+        },
+      ]]),
+    })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'credential_revision_superseded',
+    });
+    expect(validateGroupMutationCurrentness).toHaveBeenCalledWith({
+      serviceId: 'claude-subscription',
+      groupId: 'claude',
+      profileId: 'stale',
+      generation: 8,
+      credentialRevision: 'csr_8123456789ABCDEFGHJKMNPQRS',
+    });
+  });
+
   it('reports per-service hot-apply progress when a later service fails', async () => {
     const hotApply = vi
       .fn()

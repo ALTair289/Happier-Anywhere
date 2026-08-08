@@ -21,6 +21,7 @@ import {
   serializeConnectedServiceChildSelections,
 } from '../connectedServiceChildEnvironment';
 import type { ConnectedServicesMaterializeResult } from './providerMaterializerTypes';
+import type { ConnectedServicesProviderMaterializerInput } from './providerMaterializerTypes';
 import { resolveConnectedServiceMaterializedRootDir } from './resolveConnectedServiceMaterializedRootDir';
 import { resolveConnectedServiceTargetMaterializedRoot } from './resolveConnectedServiceTargetMaterializedRoot';
 
@@ -279,6 +280,7 @@ export async function materializeConnectedServicesForSpawn(params: Readonly<{
   processEnv?: NodeJS.ProcessEnv;
   vendorResumeId?: string | null;
   candidatePersistedSessionFile?: string | null;
+  validateGroupMutationCurrentness?: ConnectedServicesProviderMaterializerInput['validateGroupMutationCurrentness'];
 }>): Promise<ConnectedServicesMaterializeResult | null> {
   const rootDir = resolveConnectedServiceMaterializedRootDir({
     baseDir: params.baseDir,
@@ -319,6 +321,9 @@ export async function materializeConnectedServicesForSpawn(params: Readonly<{
       vendorResumeId: params.vendorResumeId ?? null,
       candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
       cleanupRoot,
+      ...(params.validateGroupMutationCurrentness
+        ? { validateGroupMutationCurrentness: params.validateGroupMutationCurrentness }
+        : {}),
     });
   } catch (error) {
     cleanupRoot();

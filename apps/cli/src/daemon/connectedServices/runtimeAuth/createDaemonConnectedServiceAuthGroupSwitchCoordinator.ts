@@ -29,6 +29,7 @@ import type { AcceptedConnectedServiceAccountVerificationByServiceId } from '../
 import { createConnectedServiceAuthGenerationApplyFailureError } from './connectedServiceAuthGenerationApplyFailure';
 import type { ConnectedServiceSessionAuthSwitchReason } from './connectedServiceSessionAuthSwitchCore';
 import { ConnectedServiceAuthGroupRuntimeStateRevisionConflictError } from '@/api/connectedServices/connectedServiceCredentialApi';
+import type { ConnectedServiceAuthGroupCandidatePreparationResult } from '../refresh/prepareConnectedServiceAuthGroupCandidateForSwitch';
 
 type AuthGroupApi = Readonly<{
   getConnectedServiceAuthGroup(input: Readonly<{
@@ -237,6 +238,12 @@ export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: R
     serviceId: ConnectedServiceId,
     profileId: string | null,
   ) => Promise<ConnectedServiceCredentialRevisionV1 | null>;
+  prepareCandidateForSwitch?: (input: Readonly<{
+    serviceId: ConnectedServiceId;
+    groupId: string;
+    profileId: string;
+    reason: string;
+  }>) => Promise<ConnectedServiceAuthGroupCandidatePreparationResult>;
   onCommittedSwitch?: (input: Readonly<{
     serviceId: ConnectedServiceId;
     groupId: string;
@@ -348,6 +355,14 @@ export function createDaemonConnectedServiceAuthGroupSwitchCoordinator(params: R
         credentialRevision,
       };
     },
+    ...(params.prepareCandidateForSwitch ? {
+      prepareCandidateForSwitch: async (input) => await params.prepareCandidateForSwitch?.({
+        serviceId: ConnectedServiceIdSchema.parse(input.serviceId),
+        groupId: input.groupId,
+        profileId: input.profileId,
+        reason: input.reason,
+      }) ?? { status: 'ready' as const },
+    } : {}),
     ...(params.probeQuotaSnapshotsForGroup ? {
       probeQuotaSnapshotsForGroup: async (input) => {
         const serviceId = ConnectedServiceIdSchema.parse(input.serviceId);

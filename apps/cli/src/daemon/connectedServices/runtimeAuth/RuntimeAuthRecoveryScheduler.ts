@@ -1000,9 +1000,18 @@ function mergeRuntimeAuthRecoveryIntent(
 ): RuntimeAuthRecoveryIntent {
   if (!previous) return next;
   if (previous.status === 'recovered') {
-    return previous.attemptId === next.attemptId ? previous : next;
+    if (previous.attemptId === next.attemptId) return previous;
+    // Recovery closes only the settled attempt. Any later failure owns a new epoch, including
+    // handler intake whose producer does not have a durable provider report id.
+    return next;
   }
-  if (isTerminalRuntimeAuthRecoveryStatus(previous.status)) return previous;
+  if (previous.status === 'cancelled' || previous.status === 'exhausted') {
+    if (previous.attemptId === next.attemptId) return previous;
+    // Only a fresh in-band provider report owns a new recovery epoch. A later handler/apply
+    // failure without the original attempt id is still fallout from the settled attempt and must
+    // not revive it merely because its caller omitted the report id.
+    return next.lastSettledTransition === 'working' ? next : previous;
+  }
   const sameEvidence = hasSameRuntimeAuthRecoveryEvidence(previous, next);
   const previousSourceKey = previous.classification.sourceKey;
   const nextSourceKey = next.classification.sourceKey;

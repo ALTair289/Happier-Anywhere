@@ -24,6 +24,7 @@ import {
   materializeConnectedServicesForSpawn,
   type ConnectedServiceResolvedSelection,
 } from './materialize/materializeConnectedServicesForSpawn';
+import { createConnectedServiceGroupMutationCurrentnessValidator } from './credentials/createConnectedServiceGroupMutationCurrentnessValidator';
 import { createConnectedServiceMaterializedTargetRootCleanup } from './materialize/createConnectedServiceMaterializedTargetRootCleanup';
 import {
   collectBlockingConnectedServicesMaterializationDiagnostics,
@@ -1057,6 +1058,7 @@ async function materializeAndVerifyConnectedServiceAuthForSpawn(params: Readonly
   vendorResumeId: string | null;
   resumeReachabilityRequired: boolean;
   candidatePersistedSessionFile: string | null;
+  validateGroupMutationCurrentness: ReturnType<typeof createConnectedServiceGroupMutationCurrentnessValidator>;
 }>): Promise<ConnectedServicesMaterializeResult | null> {
   const materialized = await materializeConnectedServicesForSpawn({
     agentId: params.agentId,
@@ -1088,6 +1090,7 @@ async function materializeAndVerifyConnectedServiceAuthForSpawn(params: Readonly
     processEnv: params.processEnv,
     vendorResumeId: params.vendorResumeId,
     candidatePersistedSessionFile: params.candidatePersistedSessionFile,
+    validateGroupMutationCurrentness: params.validateGroupMutationCurrentness,
   });
 
   if (!materialized) return null;
@@ -1260,6 +1263,10 @@ export async function resolveConnectedServiceAuthForSpawn(params: Readonly<{
         vendorResumeId: params.vendorResumeId ?? null,
         resumeReachabilityRequired: params.resumeReachabilityRequired ?? false,
         candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
+        validateGroupMutationCurrentness: createConnectedServiceGroupMutationCurrentnessValidator({
+          api: params.api,
+          credentials: params.credentials,
+        }),
       });
       if (materialized === null) return null;
       return {

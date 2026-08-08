@@ -5,6 +5,7 @@ import type {
   ConnectedServiceLimitCategoryV1,
   ProviderAccountUsageRecordId,
 } from '@happier-dev/protocol';
+import type { ConnectedServiceSharedGenerationMutationCurrentness } from '../credentials/lifecycleTypes';
 import type { ConnectedServiceAccountTransitionVerificationResult } from '../accountTransitions/connectedServiceAccountTransition';
 
 export const ConnectedServiceRuntimeAuthFailureKindSchema = z.enum([
@@ -69,6 +70,7 @@ export type ConnectedServiceRuntimeFailureClassification = Readonly<{
 export type ConnectedServiceRuntimeAuthTargetInput = Readonly<{
   target: Readonly<{ agentId: string; targetId?: string | null }>;
   selection: unknown;
+  validateCurrentBeforeMutation?: () => Promise<ConnectedServiceSharedGenerationMutationCurrentness>;
 }>;
 
 export type ConnectedServiceRuntimeFailureInput = Readonly<{

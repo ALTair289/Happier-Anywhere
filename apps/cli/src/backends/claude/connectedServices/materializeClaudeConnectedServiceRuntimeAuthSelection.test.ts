@@ -414,7 +414,7 @@ describe('materializeClaudeConnectedServiceRuntimeAuthSelection', () => {
       .rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('preflights shared group auth surface metadata without materializing Claude credentials', async () => {
+  it('preflights the deterministic shared group surface when request env predates materialization', async () => {
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-runtime-selection-server-'));
     const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-runtime-selection-home-'));
     const projectDir = await mkdtemp(join(tmpdir(), 'happier-claude-runtime-selection-project-'));
@@ -493,10 +493,7 @@ describe('materializeClaudeConnectedServiceRuntimeAuthSelection', () => {
         directory: projectDir,
         backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
         connectedServices: previousBindings,
-        environmentVariables: {
-          CLAUDE_CONFIG_DIR: groupClaudeConfigDir,
-          [HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY]: groupClaudeConfigDir,
-        },
+        environmentVariables: {},
       },
     };
     const input = {

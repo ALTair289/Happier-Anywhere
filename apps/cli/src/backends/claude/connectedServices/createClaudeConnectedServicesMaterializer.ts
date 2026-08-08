@@ -19,6 +19,7 @@ export function createClaudeConnectedServicesMaterializer(): ConnectedServicesPr
         sessionDirectory: params.sessionDirectory ?? null,
         vendorResumeId: params.vendorResumeId ?? null,
         candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
+        validateGroupMutationCurrentness: params.validateGroupMutationCurrentness,
       });
       if (!materialized) return null;
       return {
@@ -43,6 +44,7 @@ export function createClaudeConnectedServicesMaterializer(): ConnectedServicesPr
       sessionDirectory: params.sessionDirectory ?? null,
       vendorResumeId: params.vendorResumeId ?? null,
       candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
+      validateGroupMutationCurrentness: params.validateGroupMutationCurrentness,
     });
     if (!materialized) return null;
     return {

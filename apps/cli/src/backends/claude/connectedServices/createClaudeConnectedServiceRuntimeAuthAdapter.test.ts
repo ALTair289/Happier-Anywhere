@@ -330,7 +330,14 @@ describe('createClaudeConnectedServiceRuntimeAuthAdapter', () => {
       credentialFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       proofStrength: 'exact',
     });
-    expect(await readFile(join(runtimeClaudeConfigDir, '.claude.json'), 'utf8')).toBe(rootConfigBefore);
+    expect(JSON.parse(await readFile(join(runtimeClaudeConfigDir, '.claude.json'), 'utf8'))).toMatchObject({
+      unrelatedRuntimeState: { preserved: true },
+      hasCompletedOnboarding: true,
+      oauthAccount: {
+        accountUuid: 'provider-account',
+        emailAddress: 'member@example.com',
+      },
+    });
     expect(await readFile(join(runtimeClaudeConfigDir, 'settings.json'), 'utf8')).toBe(settingsBefore);
     expect(JSON.parse(await readFile(
       join(runtimeClaudeConfigDir, '.happier-claude-connected-service-home.json'),

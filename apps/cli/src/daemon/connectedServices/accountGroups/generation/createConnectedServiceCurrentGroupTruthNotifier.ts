@@ -13,6 +13,7 @@ type CurrentGroupTruthNotificationInput = Readonly<{
   serviceId: ConnectedServiceId;
   applicationOwnerId: string;
   currentTruth: SessionConnectedServiceAuthCurrentGroupTruthV1;
+  applicationSettled?: true;
   isCurrent?: () => boolean;
 }>;
 
@@ -61,6 +62,7 @@ export function createConnectedServiceCurrentGroupTruthNotifier<TTransport exten
       request: buildRequest({
         serviceId: input.serviceId,
         currentTruth: input.currentTruth,
+        ...(input.applicationSettled ? { applicationSettled: true } : {}),
       }),
     }).catch(() => null);
     const parsed = SessionConnectedServiceAuthApplyGenerationResponseV1Schema.safeParse(response);

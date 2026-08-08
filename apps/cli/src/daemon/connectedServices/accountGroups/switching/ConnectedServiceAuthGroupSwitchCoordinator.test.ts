@@ -31,6 +31,62 @@ class TestGenerationConflictError extends Error {
 }
 
 describe('ConnectedServiceAuthGroupSwitchCoordinator', () => {
+  it('validates quota-recovery candidates before CAS and lets the canonical selector skip an unusable member', async () => {
+    const initial: ConnectedServiceAuthGroupSwitchState = {
+      ...state('primary', 1),
+      members: [
+        { profileId: 'primary', priority: 1, createdAtMs: 1, enabled: true },
+        { profileId: 'invalid-backup', priority: 2, createdAtMs: 2, enabled: true },
+        { profileId: 'healthy-backup', priority: 3, createdAtMs: 3, enabled: true },
+      ],
+    };
+    const prepareCandidateForSwitch = vi.fn(async (input: Readonly<{ profileId: string }>) => (
+      input.profileId === 'invalid-backup'
+        ? {
+            status: 'ineligible' as const,
+            memberState: { credentialHealthStatus: 'needs_reauth' as const },
+          }
+        : { status: 'ready' as const }
+    ));
+    const commitSwitch = vi.fn(async (input: Readonly<{ toProfileId: string }>) => ({
+      ...initial,
+      activeProfileId: input.toProfileId,
+      generation: 2,
+    }));
+    const coordinator = new ConnectedServiceAuthGroupSwitchCoordinator({
+      leases: new InMemoryConnectedServiceAuthGroupSwitchLeaseRegistry(),
+      nowMs: () => 1_000,
+      quotaFreshnessMs: 60_000,
+      loadState: async () => initial,
+      prepareCandidateForSwitch,
+      commitSwitch,
+      applyGeneration: async () => ({ mode: 'hot_apply' as const }),
+    });
+
+    await expect(coordinator.switchAfterClassifiedFailure({
+      sessionId: 'source-session',
+      serviceId: 'openai-codex',
+      groupId: 'main',
+      reason: 'usage_limit',
+      observedProfileId: 'primary',
+    })).resolves.toMatchObject({
+      status: 'switched',
+      activeProfileId: 'healthy-backup',
+      generation: 2,
+    });
+    expect(prepareCandidateForSwitch).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      profileId: 'invalid-backup',
+      reason: 'usage_limit',
+    }));
+    expect(prepareCandidateForSwitch).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      profileId: 'healthy-backup',
+      reason: 'usage_limit',
+    }));
+    expect(commitSwitch).toHaveBeenCalledWith(expect.objectContaining({
+      toProfileId: 'healthy-backup',
+    }));
+  });
+
   it('times out a waiter without releasing the still-effectful owner', async () => {
     vi.useFakeTimers();
     try {

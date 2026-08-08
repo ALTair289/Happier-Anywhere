@@ -324,8 +324,8 @@ describe('reconcileConnectedServiceAuthGroupGenerations', () => {
     currentGroups,
     unavailableReason,
   ) => {
-    const applyCommittedGeneration = vi.fn(async (
-      input: Parameters<ConsumerDeps['applyCommittedGeneration']>[0],
+    const applySharedGenerationApplication = vi.fn(async (
+      input: Parameters<NonNullable<ConsumerDeps['applySharedGenerationApplication']>>[0],
     ) => ({
       reconciliationDisposition: 'converged' as const,
       errorCode: null,
@@ -340,7 +340,11 @@ describe('reconcileConnectedServiceAuthGroupGenerations', () => {
     }));
     const notifyCurrentGroupTruth = vi.fn(async () => ({ ok: true as const }));
     const consumer = new ConnectedServiceAuthGroupGenerationConsumer({
-      applyCommittedGeneration,
+      applyCommittedGeneration: vi.fn(async () => ({
+        reconciliationDisposition: 'failed' as const,
+        errorCode: 'per_session_apply_must_not_run',
+      })),
+      applySharedGenerationApplication,
       resolveGenerationApplicationScope: async () => ({
         status: 'supported',
         scope: 'shared_group_auth_surface',
@@ -361,7 +365,7 @@ describe('reconcileConnectedServiceAuthGroupGenerations', () => {
       listRuntimeTargets: () => targets,
       executionAuthority: 'passive_projection',
     });
-    expect(applyCommittedGeneration).toHaveBeenCalledOnce();
+    expect(applySharedGenerationApplication).toHaveBeenCalledOnce();
     expect(notifyCurrentGroupTruth).toHaveBeenCalledTimes(3);
     notifyCurrentGroupTruth.mockClear();
 
@@ -373,7 +377,7 @@ describe('reconcileConnectedServiceAuthGroupGenerations', () => {
       executionAuthority: 'passive_projection',
     });
 
-    expect(applyCommittedGeneration).toHaveBeenCalledOnce();
+    expect(applySharedGenerationApplication).toHaveBeenCalledOnce();
     expect(notifyCurrentGroupTruth).toHaveBeenCalledTimes(3);
     expect(notifyCurrentGroupTruth).toHaveBeenCalledWith(expect.objectContaining({
       currentTruth: {

@@ -131,6 +131,7 @@ export type SessionConnectedServiceAuthSwitchErrorCode =
   | 'metadata_update_failed'
   | 'restart_failed'
   | 'hot_apply_failed'
+  | 'credential_revision_superseded'
   | 'bindings_rollback_failed'
   | 'post_switch_recovery_failed'
   | 'hot_apply_succeeded_but_recovery_failed'

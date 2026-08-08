@@ -63,6 +63,31 @@ describe('createConnectedServiceCurrentGroupTruthNotifier', () => {
     expect(callRpc).not.toHaveBeenCalled();
   });
 
+  it('marks only exact available application notifications as settled for the provider runtime', async () => {
+    const callRpc = vi.fn(async () => ({ ok: true as const, appliedVia: 'current_truth_fence' as const }));
+    const notify = createConnectedServiceCurrentGroupTruthNotifier({
+      resolveTransport: async (sessionId) => ({ sessionId, runtime: 'claude' }),
+      callRpc,
+    });
+
+    await expect(notify({
+      sessionId: 'session-1',
+      serviceId: 'claude-subscription',
+      applicationOwnerId: 'claude',
+      applicationSettled: true,
+      currentTruth: {
+        kind: 'current_auth_group_available',
+        groupId: 'group-1',
+        generation: 7,
+        credentialRevision: 'csr_aaaaaaaaaaaaaaaaaaaaaa',
+      },
+    })).resolves.toEqual({ ok: true });
+
+    expect(callRpc).toHaveBeenCalledWith(expect.objectContaining({
+      request: expect.objectContaining({ applicationSettled: true }),
+    }));
+  });
+
   it('does not deliver old current truth when the exact registration changes during transport resolution', async () => {
     let resolveTransport!: (transport: { sessionId: string }) => void;
     const transport = new Promise<{ sessionId: string }>((resolve) => {

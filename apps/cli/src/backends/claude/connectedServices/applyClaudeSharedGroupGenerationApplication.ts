@@ -61,7 +61,16 @@ export const applyClaudeSharedGroupGenerationApplication: ApplySharedGenerationA
     metadata,
     selectionDescriptor,
     credentialRevision: input.credentialRevision,
+    validateCurrentBeforeMutation: input.validateCurrentBeforeMutation,
   });
+  if ('authoritativeTarget' in materialized && materialized.authoritativeTarget) {
+    return {
+      status: 'superseded_after_apply',
+      activeProfileId: materialized.authoritativeTarget.profileId,
+      generation: materialized.authoritativeTarget.generation,
+      credentialRevision: materialized.authoritativeTarget.credentialRevision,
+    };
+  }
   if (materialized.status !== 'materialized' || materialized.diagnostics.some((entry) => entry.severity === 'blocking')) {
     return { status: 'unavailable' };
   }

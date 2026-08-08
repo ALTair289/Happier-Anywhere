@@ -71,6 +71,20 @@ export class ConnectedServiceAuthGroupGenerationConsumer {
       providerAdoptedTarget?: ConnectedServiceProviderAdoptedGenerationTarget;
       restartRequested?: boolean;
     }>>;
+    applySharedGenerationApplication?(input: Readonly<{
+      representativeSessionId: string;
+      applicationOwnerId: string;
+      committedGeneration: ConnectedServiceAuthGroupCommittedGenerationFact;
+      switchReason: ConnectedServiceSessionAuthSwitchReason;
+      executionAuthority: ConnectedServiceGenerationExecutionAuthority;
+      signal?: AbortSignal;
+    }>): Promise<Readonly<{
+      reconciliationDisposition: ConnectedServiceAuthGenerationReconciliationDisposition;
+      errorCode: string | null;
+      authoritativeGeneration?: ConnectedServiceAuthGroupCommittedGenerationFact;
+      providerAdoptedTarget?: ConnectedServiceProviderAdoptedGenerationTarget;
+      restartRequested?: boolean;
+    }>>;
     resolveGenerationApplicationScope(input: Readonly<{
       sessionId: string;
       serviceId: ConnectedServiceId;
@@ -95,11 +109,16 @@ export class ConnectedServiceAuthGroupGenerationConsumer {
       sessionId: string;
       providerAdoptedTarget: ConnectedServiceProviderAdoptedGenerationTarget;
     }>): Promise<void>;
+    continueAfterExactRecipientApplication?(input: Readonly<{
+      sessionId: string;
+      providerAdoptedTarget: ConnectedServiceProviderAdoptedGenerationTarget;
+    }>): Promise<void>;
     notifyCurrentGroupTruth(input: Readonly<{
       sessionId: string;
       serviceId: ConnectedServiceId;
       applicationOwnerId: string;
       currentTruth: SessionConnectedServiceAuthCurrentGroupTruthV1;
+      applicationSettled?: true;
       isCurrent?: () => boolean;
     }>): Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; errorCode: string }>>;
   }>) {}
@@ -290,6 +309,9 @@ export class ConnectedServiceAuthGroupGenerationConsumer {
       executionAuthority: input.executionAuthority,
       ...(input.signal ? { signal: input.signal } : {}),
       applyCommittedGeneration: this.deps.applyCommittedGeneration,
+      ...(this.deps.applySharedGenerationApplication
+        ? { applySharedGenerationApplication: this.deps.applySharedGenerationApplication }
+        : {}),
       verifySharedGenerationApplication: this.deps.verifySharedGenerationApplication,
       ...(this.deps.settleExactRecipientApplication
         ? { settleExactRecipientApplication: this.deps.settleExactRecipientApplication }
@@ -329,6 +351,7 @@ export class ConnectedServiceAuthGroupGenerationConsumer {
         sessionId: target.sessionId,
         serviceId: input.committedGeneration.decisionCommittedTarget.serviceId,
         applicationOwnerId: target.applicationOwnerId,
+        applicationSettled: true,
         ...(target.isCurrent ? { isCurrent: target.isCurrent } : {}),
         currentTruth: {
           kind: 'current_auth_group_available',
@@ -347,6 +370,15 @@ export class ConnectedServiceAuthGroupGenerationConsumer {
           reconciliationDisposition: 'failed',
           errorCode: notification.errorCode,
         };
+        continue;
+      }
+      if (this.deps.continueAfterExactRecipientApplication) {
+        const providerAdoptedTarget = fanout.resultsBySessionId?.[target.sessionId]?.providerAdoptedTarget;
+        if (!providerAdoptedTarget) continue;
+        await this.deps.continueAfterExactRecipientApplication({
+          sessionId: target.sessionId,
+          providerAdoptedTarget,
+        }).catch(() => undefined);
       }
     }
     const acknowledgeable = input.sessions.filter((session) => (

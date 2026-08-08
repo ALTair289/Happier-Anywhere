@@ -39,6 +39,7 @@ describe('applyClaudeSharedGroupGenerationApplication', () => {
       generation: 7,
       credentialRevision,
       record,
+      validateCurrentBeforeMutation: async () => ({ current: true }),
     })).resolves.toMatchObject({
       status: 'verified',
       source: 'claude_shared_group_home_provenance',
@@ -79,5 +80,87 @@ describe('applyClaudeSharedGroupGenerationApplication', () => {
         activeProfileId: 'work',
       },
     });
+  });
+
+  it('does not let a superseded generation rewrite the current shared Claude home', async () => {
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-shared-generation-superseded-'));
+    const buildRecord = (profileId: string, accessToken: string, now: number) => buildConnectedServiceCredentialRecord({
+      now,
+      serviceId: 'claude-subscription',
+      profileId,
+      kind: 'oauth',
+      expiresAt: Date.now() + 60_000,
+      oauth: {
+        accessToken,
+        refreshToken: `${accessToken}-refresh`,
+        idToken: null,
+        scope: CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE,
+        tokenType: 'Bearer',
+        providerAccountId: `${profileId}-account`,
+        providerEmail: `${profileId}@example.test`,
+      },
+    });
+    const currentRecord = buildRecord('current', 'current-access-token', 2_000);
+    const staleRecord = buildRecord('stale', 'stale-access-token', 1_000);
+    const currentRevision = 'csr_8123456789ABCDEFGHJKMNPQRS' as const;
+    const staleRevision = 'csr_6123456789ABCDEFGHJKMNPQRS' as const;
+
+    await expect(applyClaudeSharedGroupGenerationApplication({
+      activeServerDir,
+      serviceId: 'claude-subscription',
+      groupId: 'team',
+      profileId: 'current',
+      generation: 8,
+      credentialRevision: currentRevision,
+      record: currentRecord,
+      validateCurrentBeforeMutation: async () => ({ current: true }),
+    })).resolves.toMatchObject({ status: 'verified' });
+
+    await expect(applyClaudeSharedGroupGenerationApplication({
+      activeServerDir,
+      serviceId: 'claude-subscription',
+      groupId: 'team',
+      profileId: 'stale',
+      generation: 7,
+      credentialRevision: staleRevision,
+      record: staleRecord,
+      validateCurrentBeforeMutation: async () => ({
+        current: false,
+        authoritativeTarget: {
+          profileId: 'current',
+          generation: 8,
+          credentialRevision: currentRevision,
+        },
+      }),
+    } as never)).resolves.toEqual({
+      status: 'superseded_after_apply',
+      activeProfileId: 'current',
+      generation: 8,
+      credentialRevision: currentRevision,
+    });
+
+    const claudeConfigDir = resolveClaudeConnectedServiceStableConfigDir({
+      activeServerDir,
+      serviceId: 'claude-subscription',
+      fallbackProfileId: 'current',
+      selection: {
+        kind: 'group',
+        serviceId: 'claude-subscription',
+        groupId: 'team',
+        activeProfileId: 'current',
+        fallbackProfileId: 'current',
+        generation: 8,
+        credentialRevision: currentRevision,
+        record: currentRecord,
+        policy: null,
+      },
+    });
+    expect(claudeConfigDir).not.toBeNull();
+    expect(JSON.parse(await readFile(join(claudeConfigDir!, '.credentials.json'), 'utf8')))
+      .toMatchObject({ claudeAiOauth: { accessToken: 'current-access-token' } });
+    expect(JSON.parse(await readFile(
+      join(claudeConfigDir!, '.happier-claude-connected-service-home.json'),
+      'utf8',
+    ))).toMatchObject({ credentialProfileId: 'current', generation: 8, credentialRevision: currentRevision });
   });
 });

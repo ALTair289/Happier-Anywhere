@@ -7,6 +7,7 @@ import type {
 } from '@happier-dev/protocol';
 
 import type { ConnectedServicesMaterializationDiagnostic } from '@/daemon/connectedServices/materialize/providerMaterializerTypes';
+import type { ConnectedServicesProviderMaterializerInput } from '@/daemon/connectedServices/materialize/providerMaterializerTypes';
 import type { ConnectedServiceResolvedSelection } from '@/daemon/connectedServices/materialize/materializeConnectedServicesForSpawn';
 
 import { resolveConfiguredClaudeConfigDir } from '@/backends/claude/utils/resolveConfiguredClaudeConfigDir';
@@ -108,6 +109,7 @@ export function buildClaudeSubscriptionNativeAuthSelectionDescriptor(params: Rea
       activeProfileId: params.selection.activeProfileId,
       fallbackProfileId: params.selection.fallbackProfileId,
       generation: params.selection.generation,
+      credentialRevision: params.selection.credentialRevision ?? null,
     };
   }
   return {
@@ -154,6 +156,7 @@ export async function materializeClaudeConnectedServiceSelection(params: Readonl
   sessionDirectory?: string | null;
   vendorResumeId?: string | null;
   candidatePersistedSessionFile?: string | null;
+  validateGroupMutationCurrentness?: ConnectedServicesProviderMaterializerInput['validateGroupMutationCurrentness'];
 }>): Promise<ClaudeConnectedServiceSelectionMaterialization | null> {
   const claudeConfigDir = resolveClaudeConnectedServiceStableConfigDir({
     activeServerDir: params.activeServerDir,
@@ -203,6 +206,7 @@ export async function materializeClaudeConnectedServiceSelection(params: Readonl
           vendorResumeId: params.vendorResumeId ?? null,
           candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
           selectionDescriptor: canonicalProfileSelectionDescriptor,
+          validateGroupMutationCurrentness: params.validateGroupMutationCurrentness,
         });
         groupSourceDiagnostics = canonicalProfileMaterialized.diagnostics;
         if (
@@ -238,6 +242,7 @@ export async function materializeClaudeConnectedServiceSelection(params: Readonl
       vendorResumeId: params.vendorResumeId ?? null,
       candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
       selectionDescriptor,
+      validateGroupMutationCurrentness: params.validateGroupMutationCurrentness,
     });
     return {
       env: materialized.env,

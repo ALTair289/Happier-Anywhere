@@ -322,6 +322,41 @@ describe('surfaceClaudeRuntimeIssues runtime-auth projection', () => {
     }
   });
 
+  it('routes definitive sidechain OAuth revocation to Connected Services without failing the parent turn', async () => {
+    const previousSelectionEnv = installClaudeSelectionEnv();
+    const sendSessionEvent = vi.fn();
+    const failTurn = createClaudeFailTurnSpy();
+    mockNotifyDaemonConnectedServiceRuntimeAuthFailure.mockResolvedValueOnce(
+      createScheduledRuntimeAuthRecoveryReport(),
+    );
+    try {
+      const surfaced = await surfaceClaudeRuntimeAuthFailure({
+        client: {
+          sessionId: 'sess_claude_sidechain_revoked',
+          sendSessionEvent,
+          sessionTurnLifecycle: { failTurn },
+        },
+      } as any, {
+        type: 'assistant',
+        isSidechain: true,
+        isApiErrorMessage: true,
+        apiErrorStatus: 401,
+        error: 'authentication_failed',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Please run /login · API Error: 401 OAuth access token has been revoked.' }],
+        },
+      }, '[claude-test]');
+
+      expect(surfaced).toBe(true);
+      expect(failTurn).not.toHaveBeenCalled();
+      expect(mockNotifyDaemonConnectedServiceRuntimeAuthFailure).toHaveBeenCalledOnce();
+      expect(sendSessionEvent).not.toHaveBeenCalled();
+    } finally {
+      restoreClaudeSelectionEnv(previousSelectionEnv);
+    }
+  });
+
   it('settles parent-scoped 401 failure before asking Connected Services to recover it', async () => {
     const previousSelectionEnv = installClaudeSelectionEnv();
     const sendSessionEvent = vi.fn();

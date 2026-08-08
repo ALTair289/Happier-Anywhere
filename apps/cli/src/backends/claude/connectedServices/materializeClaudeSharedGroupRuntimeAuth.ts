@@ -1,9 +1,11 @@
 import { join } from 'node:path';
 
 import { withConnectedServiceStateSharingDestinationLock } from '@/daemon/connectedServices/stateSharing/connectedServiceStateSharingLock';
+import type { ConnectedServiceSharedGenerationAuthoritativeTarget } from '@/daemon/connectedServices/credentials/lifecycleTypes';
 
 import {
   buildClaudeConnectedServiceHomeProvenance,
+  isClaudeConnectedServiceHomeGenerationSuperseded,
   matchesClaudeConnectedServiceHomeProvenance,
   readClaudeConnectedServiceHomeProvenance,
   writeClaudeConnectedServiceHomeProvenance,
@@ -13,6 +15,13 @@ import type { ClaudeSharedGroupHotApplyTarget } from './claudeSharedGroupHotAppl
 import { materializeClaudeCodeNativeAuth } from './nativeAuth/materializeClaudeCodeNativeAuth';
 import { resolveClaudeCodeCredentialsFilePath } from './nativeAuth/claudeCodeCredentialFile';
 import { verifyClaudeCodeNativeAuth } from './nativeAuth/verifyClaudeCodeNativeAuth';
+import type { ClaudeCodeNativeAuthMaterializationResult } from './nativeAuth/materializeClaudeCodeNativeAuth';
+
+type ClaudeSharedGroupRuntimeAuthMaterializationResult =
+  ClaudeCodeNativeAuthMaterializationResult
+  & Readonly<{
+    authoritativeTarget?: ConnectedServiceSharedGenerationAuthoritativeTarget;
+  }>;
 
 /**
  * Live Claude group adoption owns only the stable group's credential surface. Initial spawn
@@ -21,10 +30,27 @@ import { verifyClaudeCodeNativeAuth } from './nativeAuth/verifyClaudeCodeNativeA
  */
 export async function materializeClaudeSharedGroupRuntimeAuth(
   target: ClaudeSharedGroupHotApplyTarget,
-) {
+): Promise<ClaudeSharedGroupRuntimeAuthMaterializationResult> {
   return await withConnectedServiceStateSharingDestinationLock(
     target.metadata.runtimeClaudeConfigDir,
     async () => {
+      const currentness = await target.validateCurrentBeforeMutation?.();
+      if (currentness?.current === false) {
+        return {
+          status: 'diagnostic' as const,
+          env: { CLAUDE_CONFIG_DIR: target.metadata.runtimeClaudeConfigDir },
+          diagnostics: [{
+            code: 'claude_shared_group_generation_superseded',
+            providerId: 'claude' as const,
+            serviceId: 'claude-subscription' as const,
+            severity: 'blocking' as const,
+            reason: 'authoritative_group_target_superseded',
+          }],
+          ...(currentness.authoritativeTarget
+            ? { authoritativeTarget: currentness.authoritativeTarget }
+            : {}),
+        };
+      }
       const expectedProvenance = buildClaudeConnectedServiceHomeProvenance({
         record: target.record,
         selectionDescriptor: target.selectionDescriptor,
@@ -33,6 +59,22 @@ export async function materializeClaudeSharedGroupRuntimeAuth(
       const existingProvenance = await readClaudeConnectedServiceHomeProvenance(
         target.metadata.runtimeClaudeConfigDir,
       );
+      if (isClaudeConnectedServiceHomeGenerationSuperseded({
+        incomingSelection: target.selectionDescriptor,
+        existingProvenance,
+      })) {
+        return {
+          status: 'diagnostic' as const,
+          env: { CLAUDE_CONFIG_DIR: target.metadata.runtimeClaudeConfigDir },
+          diagnostics: [{
+            code: 'claude_shared_group_generation_superseded',
+            providerId: 'claude' as const,
+            serviceId: 'claude-subscription' as const,
+            severity: 'blocking' as const,
+            reason: 'authoritative_newer_generation_already_materialized',
+          }],
+        };
+      }
       const exactExistingCredential = matchesClaudeConnectedServiceHomeProvenance(
         expectedProvenance,
         existingProvenance,

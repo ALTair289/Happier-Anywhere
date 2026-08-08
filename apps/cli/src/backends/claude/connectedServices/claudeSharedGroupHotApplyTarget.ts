@@ -5,6 +5,7 @@ import {
 } from '@happier-dev/protocol';
 
 import type { ClaudeSubscriptionNativeAuthSelectionDescriptor } from './nativeAuth/materializeClaudeCodeNativeAuth';
+import type { ConnectedServiceSharedGenerationMutationCurrentness } from '@/daemon/connectedServices/credentials/lifecycleTypes';
 import {
   readClaudeRuntimeAuthSharedGroupSurfaceMetadata,
   type ClaudeRuntimeAuthSharedGroupSurfaceMetadata,
@@ -15,6 +16,7 @@ export type ClaudeSharedGroupHotApplyTarget = Readonly<{
   metadata: ClaudeRuntimeAuthSharedGroupSurfaceMetadata;
   selectionDescriptor: Extract<ClaudeSubscriptionNativeAuthSelectionDescriptor, { kind: 'group' }>;
   credentialRevision: ConnectedServiceCredentialRevisionV1;
+  validateCurrentBeforeMutation?: () => Promise<ConnectedServiceSharedGenerationMutationCurrentness>;
 }>;
 
 function readRecord(value: unknown): Record<string, unknown> | null {

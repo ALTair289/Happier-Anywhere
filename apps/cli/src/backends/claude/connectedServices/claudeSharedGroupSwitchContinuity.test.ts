@@ -12,10 +12,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiClient } from '@/api/api';
 import type { TrackedSession } from '@/daemon/types';
 import {
-  HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY,
-  HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY,
-} from '@/daemon/connectedServices/connectedServiceChildEnvironment';
-import {
   ConnectedServiceSessionAuthSwitchLockRegistry,
   createConnectedServiceSessionAuthSwitchCore,
 } from '@/daemon/connectedServices/runtimeAuth/connectedServiceSessionAuthSwitchCore';
@@ -42,7 +38,6 @@ vi.mock('@/session/transport/http/sessionsHttp', () => ({
   fetchSessionByIdCompat: mockFetchSessionByIdCompat,
 }));
 
-const OLD_CREDENTIAL_REVISION = 'csr_abcdefghijklmnopqrstuv';
 const NEW_CREDENTIAL_REVISION = 'csr_bcdefghijklmnopqrstuvw';
 
 function groupBindings(profileId: string): ConnectedServiceBindingsV1 {
@@ -78,7 +73,7 @@ describe('Claude shared-group switch continuity', () => {
     ));
   });
 
-  it('hot-applies an exact same-group shared-home rewrite despite a stale respawn CLAUDE_CONFIG_DIR', async () => {
+  it('hot-applies an exact same-group shared-home rewrite when spawn request env predates materialization', async () => {
     const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-shared-continuity-server-'));
     const homeDir = await mkdtemp(join(tmpdir(), 'happier-claude-shared-continuity-home-'));
     const projectDir = await mkdtemp(join(tmpdir(), 'happier-claude-shared-continuity-project-'));
@@ -127,21 +122,9 @@ describe('Claude shared-group switch continuity', () => {
         directory: projectDir,
         backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
         connectedServices: previousBindings,
-        environmentVariables: {
-          // Incident shape: respawn metadata retained an incomplete/stale environment snapshot,
-          // while the spawn/materialization owner still carried the exact stable shared-home target.
-          CLAUDE_CONFIG_DIR: join(activeServerDir, 'stale-respawn-claude-config'),
-          [HAPPIER_CONNECTED_SERVICE_TARGET_MATERIALIZED_ROOT_ENV_KEY]: groupClaudeConfigDir,
-          [HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY]: JSON.stringify([{
-            kind: 'group',
-            serviceId: 'claude-subscription',
-            groupId: 'work',
-            activeProfileId: 'leeroy',
-            fallbackProfileId: 'leeroy',
-            generation: 271,
-            credentialRevision: OLD_CREDENTIAL_REVISION,
-          }]),
-        },
+        // Real daemon composition stores the request-time env here. Connected Services adds the
+        // finalized shared-home env later, so this snapshot is legitimately empty.
+        environmentVariables: {},
       },
     };
     const credentials = {

@@ -42,6 +42,7 @@ export type ClaudeConnectedServiceHomeSelectionDescriptor =
       activeProfileId: string;
       fallbackProfileId: string;
       generation: number;
+      credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
     }>;
 
 export type ClaudeConnectedServiceHomeProvenanceV1 = Readonly<{
@@ -54,6 +55,18 @@ export type ClaudeConnectedServiceHomeProvenanceV1 = Readonly<{
   generation?: number | undefined;
   selection: ClaudeConnectedServiceHomeSelectionProvenance;
 }>;
+
+export function isClaudeConnectedServiceHomeGenerationSuperseded(input: Readonly<{
+  incomingSelection: ClaudeConnectedServiceHomeSelectionDescriptor;
+  existingProvenance: ClaudeConnectedServiceHomeProvenanceV1 | null;
+}>): boolean {
+  if (input.incomingSelection.kind !== 'group') return false;
+  const existing = input.existingProvenance;
+  return existing?.selection.kind === 'group'
+    && existing.selection.groupId === input.incomingSelection.groupId
+    && typeof existing.generation === 'number'
+    && existing.generation > input.incomingSelection.generation;
+}
 
 function readObject(value: unknown): Record<string, unknown> | null {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -98,7 +111,9 @@ export function buildClaudeConnectedServiceHomeProvenance(params: Readonly<{
       credentialProfileId: params.record.profileId,
       credentialCreatedAt: params.record.createdAt,
       ...(credentialFingerprint ? { credentialFingerprint } : {}),
-      ...(params.credentialRevision ? { credentialRevision: params.credentialRevision } : {}),
+      ...(params.credentialRevision ?? params.selectionDescriptor.credentialRevision
+        ? { credentialRevision: params.credentialRevision ?? params.selectionDescriptor.credentialRevision ?? undefined }
+        : {}),
       generation: params.selectionDescriptor.generation,
       selection: {
         kind: 'group',

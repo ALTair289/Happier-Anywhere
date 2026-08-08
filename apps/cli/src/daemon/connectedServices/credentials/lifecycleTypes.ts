@@ -136,7 +136,27 @@ export type ConnectedServiceGenerationApplicationProofResult =
       credentialRevision: ConnectedServiceCredentialRevisionV1;
       credentialFingerprint: string;
     }>
-  | Readonly<{ status: 'unavailable' }>;
+  | Readonly<{ status: 'unavailable' }>
+  | Readonly<{
+      status: 'superseded_after_apply';
+      activeProfileId: string;
+      generation: number;
+      credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
+    }>;
+
+export type ConnectedServiceSharedGenerationAuthoritativeTarget = Readonly<{
+  profileId: string;
+  generation: number;
+  credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
+}>;
+
+export type ConnectedServiceSharedGenerationMutationCurrentness = Readonly<
+  | { current: true }
+  | {
+      current: false;
+      authoritativeTarget?: ConnectedServiceSharedGenerationAuthoritativeTarget;
+    }
+>;
 
 export const DEFAULT_CONNECTED_SERVICE_RUNTIME_AUTH_APPLY_CAPABILITY: ConnectedServiceRuntimeAuthApplyCapability = {
   directLiveHotAuth: 'unsupported',
@@ -242,6 +262,7 @@ export type ConnectedServiceCredentialLifecycleDescriptor = Readonly<{
     generation: number;
     credentialRevision: ConnectedServiceCredentialRevisionV1;
     record: ConnectedServiceCredentialRecordV1;
+    validateCurrentBeforeMutation: () => Promise<ConnectedServiceSharedGenerationMutationCurrentness>;
   }>) => Promise<ConnectedServiceGenerationApplicationProofResult>;
   /**
    * Builds the retained session-RPC notification required by provider runtimes that cache group
@@ -250,6 +271,7 @@ export type ConnectedServiceCredentialLifecycleDescriptor = Readonly<{
   buildLiveGenerationCurrentTruthRequest?: (input: Readonly<{
     serviceId: ConnectedServiceId;
     currentTruth: SessionConnectedServiceAuthCurrentGroupTruthV1;
+    applicationSettled?: true;
   }>) => SessionConnectedServiceAuthApplyGenerationRequestV1;
   credentialStorageCleanup?: ConnectedServiceCredentialStorageCleanup;
   materializedHomeMaintenance?: ConnectedServiceMaterializedHomeMaintenance;

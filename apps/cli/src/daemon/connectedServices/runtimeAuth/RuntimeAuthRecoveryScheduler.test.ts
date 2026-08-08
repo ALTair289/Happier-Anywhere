@@ -673,6 +673,73 @@ describe('RuntimeAuthRecoveryScheduler', () => {
     expect(scheduler.readByKey(recoveryKey)?.attemptId).not.toBe(attemptId);
   });
 
+  it('preserves terminal settlement only for the same attempt and re-arms a fresh report epoch', async () => {
+    const scheduler = new RuntimeAuthRecoveryScheduler({
+      nowMs: () => 1_000,
+      baseBackoffMs: 100,
+      maxBackoffMs: 1_000,
+      jitterMs: () => 0,
+      recover: async () => ({
+        status: 'recovery_action_required' as const,
+        action: {
+          kind: 'reconnect_profile' as const,
+          serviceId: 'openai-codex',
+          profileId: 'primary',
+          groupId: 'team',
+          reason: 'usage_limit' as const,
+        },
+      }),
+    });
+    const recoveryKey = buildRuntimeAuthRecoveryKey({
+      sessionId: 'session-terminal-new-attempt',
+      serviceId: 'openai-codex',
+      profileId: 'primary',
+      groupId: 'team',
+    });
+    const first = await scheduler.beginClassifiedFailure({
+      reportId: 'runtime-auth-report:terminal-a',
+      sessionId: 'session-terminal-new-attempt',
+      switchesThisTurn: 0,
+      classification: classification(),
+    });
+
+    await scheduler.wakeByKey({ recoveryKey, reason: 'manual' });
+    expect(scheduler.readByKey(recoveryKey)).toMatchObject({
+      status: 'cancelled',
+      attemptId: first.attemptId,
+      lastSettledTransition: 'terminal',
+    });
+
+    await scheduler.beginClassifiedFailure({
+      reportId: 'runtime-auth-report:terminal-a',
+      sessionId: 'session-terminal-new-attempt',
+      switchesThisTurn: 0,
+      classification: classification(),
+    });
+    expect(scheduler.readByKey(recoveryKey)).toMatchObject({
+      status: 'cancelled',
+      attemptId: first.attemptId,
+    });
+
+    const fresh = await scheduler.beginClassifiedFailure({
+      reportId: 'runtime-auth-report:terminal-b',
+      sessionId: 'session-terminal-new-attempt',
+      switchesThisTurn: 0,
+      classification: classification(),
+    });
+    expect(fresh.attemptId).not.toBe(first.attemptId);
+    expect(scheduler.readByKey(recoveryKey)).toMatchObject({
+      status: 'waiting',
+      attemptId: fresh.attemptId,
+      lastSettledTransition: 'working',
+    });
+    expect(scheduler.readByKey(recoveryKey)).not.toMatchObject({
+      pendingVisibleEvents: expect.arrayContaining([
+        expect.objectContaining({ attemptId: first.attemptId, transition: 'terminal' }),
+      ]),
+    });
+  });
+
   it('creates live-daemon intake for a classified failure before local repair runs', async () => {
     const diagnostics: RuntimeAuthRecoveryDiagnostic[] = [];
     const scheduler = new RuntimeAuthRecoveryScheduler({

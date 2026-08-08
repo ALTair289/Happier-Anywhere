@@ -144,13 +144,27 @@ export function createClaudeConnectedServiceRuntimeAuthAdapter(): ConnectedServi
       if (!target) {
         return { applied: false, reason: 'hot_apply_unsupported', recovery: 'restart_rematerialize' };
       }
-      const materialized = await materializeClaudeSharedGroupRuntimeAuth(target);
+      const materialized = await materializeClaudeSharedGroupRuntimeAuth({
+        ...target,
+        ...(input.validateCurrentBeforeMutation
+          ? { validateCurrentBeforeMutation: input.validateCurrentBeforeMutation }
+          : {}),
+      });
       const blockingDiagnostics = materialized.diagnostics.filter((diagnostic) => diagnostic.severity === 'blocking');
       if (blockingDiagnostics.length > 0 || materialized.status !== 'materialized') {
+        const superseded = blockingDiagnostics[0]?.code === 'claude_shared_group_generation_superseded';
         return {
           applied: false,
+          ...('authoritativeTarget' in materialized && materialized.authoritativeTarget
+            ? {
+                status: 'superseded_after_apply',
+                activeProfileId: materialized.authoritativeTarget.profileId,
+                generation: materialized.authoritativeTarget.generation,
+                credentialRevision: materialized.authoritativeTarget.credentialRevision,
+              }
+            : {}),
           reason: blockingDiagnostics[0]?.code ?? 'claude_shared_group_auth_surface_materialization_failed',
-          recovery: 'restart_resume',
+          recovery: superseded ? 'none' : 'restart_resume',
           diagnostics: materialized.diagnostics,
         };
       }

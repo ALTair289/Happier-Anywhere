@@ -325,6 +325,66 @@ describe('createClaudeConnectedServicesMaterializer', () => {
     expect(credential.claudeAiOauth.accessToken).toBe('selected-access-placeholder');
   });
 
+  it('does not let a superseded spawn selection mutate the shared Claude group home', async () => {
+    const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-superseded-server-'));
+    const rootDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-superseded-root-'));
+    const sourceClaudeConfigDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-superseded-source-'));
+    const record = buildClaudeSubscriptionRecord();
+    const validateGroupMutationCurrentness = vi.fn(async () => ({ current: false as const }));
+
+    const result = await createClaudeConnectedServicesMaterializer()({
+      agentId: 'claude',
+      activeServerDir,
+      rootDir,
+      recordsByServiceId: new Map([['claude-subscription', record]]),
+      selectionsByServiceId: new Map([['claude-subscription', {
+        kind: 'group',
+        serviceId: 'claude-subscription',
+        groupId: 'claude-team',
+        activeProfileId: 'oauth-profile',
+        fallbackProfileId: 'fallback-profile',
+        generation: 7,
+        credentialRevision: 'csr_7123456789ABCDEFGHJKMNPQRS',
+        record,
+        policy: null,
+      }]]),
+      processEnv: {
+        CLAUDE_CONFIG_DIR: sourceClaudeConfigDir,
+        HOME: tmpdir(),
+      },
+      validateGroupMutationCurrentness,
+      cleanupRoot: () => {},
+    });
+
+    const expectedGroupClaudeConfigDir = join(
+      activeServerDir,
+      'daemon',
+      'connected-services',
+      'homes',
+      'claude-subscription',
+      '__groups',
+      'claude-team',
+      'claude',
+      'claude-config',
+    );
+    expect(validateGroupMutationCurrentness).toHaveBeenCalledWith({
+      serviceId: 'claude-subscription',
+      groupId: 'claude-team',
+      profileId: 'oauth-profile',
+      generation: 7,
+      credentialRevision: 'csr_7123456789ABCDEFGHJKMNPQRS',
+    });
+    expect(result?.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'claude_connected_service_generation_superseded',
+        severity: 'blocking',
+      }),
+    ]));
+    await expect(readFile(join(expectedGroupClaudeConfigDir, '.credentials.json'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('materializes macOS credentials without creating a derived keychain item', async () => {
     if (ORIGINAL_PLATFORM_DESCRIPTOR) {
       Object.defineProperty(process, 'platform', { ...ORIGINAL_PLATFORM_DESCRIPTOR, value: 'darwin' });
@@ -398,7 +458,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
       if (args[0] === 'dump-keychain') return { status: 0, stdout: '' };
       return { status: 0 };
     });
-    const loggerInfoSpy = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    const loggerDebugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
     try {
       const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-server-'));
       const rootDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-root-'));
@@ -431,14 +491,14 @@ describe('createClaudeConnectedServicesMaterializer', () => {
       });
 
       await expect(materialize()).resolves.not.toBeNull();
-      loggerInfoSpy.mockClear();
+      loggerDebugSpy.mockClear();
       spawnSpy.mockClear();
       securityInputs.length = 0;
 
       const second = await materialize();
 
       expect(second).not.toBeNull();
-      const credentialWriteEvents = loggerInfoSpy.mock.calls.filter(([, metadata]) => {
+      const credentialWriteEvents = loggerDebugSpy.mock.calls.filter(([, metadata]) => {
         const event = metadata as { event?: unknown; decision?: unknown } | undefined;
         return event?.event === 'claude_code_credential_file_decision'
           && event.decision === 'write';
@@ -447,7 +507,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
       expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'add-generic-password')).toBe(false);
       expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'dump-keychain')).toBe(false);
     } finally {
-      loggerInfoSpy.mockRestore();
+      loggerDebugSpy.mockRestore();
     }
   });
 
@@ -580,7 +640,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
       if (args[0] === 'find-generic-password') return { status: 44, stderr: 'keychain item is not readable by this process' };
       return { status: 0 };
     });
-    const loggerInfoSpy = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    const loggerDebugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
     try {
       const activeServerDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-server-'));
       const rootDir = await mkdtemp(join(tmpdir(), 'happier-claude-materializer-root-'));
@@ -614,7 +674,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
       const firstProvenance = JSON.parse(
         await readFile(resolveClaudeConnectedServiceHomeProvenancePath(first!.env.CLAUDE_CONFIG_DIR!), 'utf8'),
       );
-      loggerInfoSpy.mockClear();
+      loggerDebugSpy.mockClear();
       spawnSpy.mockClear();
 
       const second = await materializer({
@@ -631,7 +691,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
       });
 
       expect(second).not.toBeNull();
-      const credentialWriteEvents = loggerInfoSpy.mock.calls.filter(([, metadata]) => {
+      const credentialWriteEvents = loggerDebugSpy.mock.calls.filter(([, metadata]) => {
         const event = metadata as { event?: unknown; decision?: unknown } | undefined;
         return event?.event === 'claude_code_credential_file_decision'
           && event.decision === 'write';
@@ -645,7 +705,7 @@ describe('createClaudeConnectedServicesMaterializer', () => {
       expect(secondProvenance.credentialFingerprint).not.toBe(firstProvenance.credentialFingerprint);
       expect(spawnSpy.mock.calls.some(([, args]) => Array.isArray(args) && args[0] === 'add-generic-password')).toBe(false);
     } finally {
-      loggerInfoSpy.mockRestore();
+      loggerDebugSpy.mockRestore();
     }
   });
 

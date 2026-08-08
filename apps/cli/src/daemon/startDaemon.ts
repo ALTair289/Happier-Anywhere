@@ -249,6 +249,8 @@ import {
 import { buildConnectedServiceUxDiagnostic } from './connectedServices/diagnostics/connectedServiceUxDiagnostics';
 import { shouldResolveConnectedServiceAuthForSpawn } from './connectedServices/shouldResolveConnectedServiceAuthForSpawn';
 import { ConnectedServiceRefreshCoordinator } from './connectedServices/refresh/ConnectedServiceRefreshCoordinator';
+import { prepareConnectedServiceAuthGroupCandidateForSwitch } from './connectedServices/refresh/prepareConnectedServiceAuthGroupCandidateForSwitch';
+import { createConnectedServiceGroupMutationCurrentnessValidator } from './connectedServices/credentials/createConnectedServiceGroupMutationCurrentnessValidator';
 import { createConnectedServicesAuthUpdatedRestartHandler } from './connectedServices/refresh/createConnectedServicesAuthUpdatedRestartHandler';
 import { ConnectedServiceQuotasCoordinator } from './connectedServices/quotas/ConnectedServiceQuotasCoordinator';
 import { createConnectedServiceQuotaFetchers } from './connectedServices/quotas/createConnectedServiceQuotaFetchers';
@@ -1792,6 +1794,28 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         const sessionAttachCleanupByPid = new Map<number, () => Promise<void>>();
       const connectedServicesMaterializationBaseDir = join(configuration.happyHomeDir, 'daemon', 'connected-services', 'materialized');
       let connectedServiceRefreshCoordinator: ConnectedServiceRefreshCoordinator | null = null;
+      const prepareAuthGroupCandidateForSwitch = async (input: Readonly<{
+        serviceId: ConnectedServiceId;
+        groupId: string;
+        profileId: string;
+        reason: string;
+      }>) => {
+        const refreshService = connectedServiceRefreshCoordinator;
+        if (!refreshService) {
+          return {
+            status: 'ineligible' as const,
+            memberState: { credentialHealthStatus: 'refresh_failed_retryable' as const },
+          };
+        }
+        return await prepareConnectedServiceAuthGroupCandidateForSwitch({
+          serviceId: input.serviceId,
+          profileId: input.profileId,
+          reason: input.reason,
+          refreshService,
+        });
+      };
+      const validateConnectedServiceGroupMutationCurrentness =
+        createConnectedServiceGroupMutationCurrentnessValidator({ api, credentials });
       let connectedServiceRefreshLoopHandle: Readonly<{
         stop: () => void;
         pause: () => void;
@@ -3268,6 +3292,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     );
                     const preTurnSwitchCoordinator = createDaemonConnectedServiceAuthGroupSwitchCoordinator({
                       api,
+                      prepareCandidateForSwitch: prepareAuthGroupCandidateForSwitch,
                       resolveCredentialRevision: (serviceId, profileId) => profileId
                         ? latestConnectedServiceProjectionSnapshot?.resolveCredentialRevision(serviceId, profileId) ?? null
                         : null,
@@ -4968,7 +4993,9 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 onSignalFailureLogMessage: '[DAEMON RUN] Failed to restart connected-service auth group session through shared switch primitive',
               });
             },
-            hotApply: createSessionConnectedServiceAuthHotApply(),
+            hotApply: createSessionConnectedServiceAuthHotApply({
+              validateGroupMutationCurrentness: validateConnectedServiceGroupMutationCurrentness,
+            }),
             recoverAfterRuntimeAuthSwitch: recoverTrackedSessionConnectedServiceRuntimeAuthSwitch,
             continueAfterRuntimeAuthSwitch: async (continuationInput) => {
               if (generationInput.groupId === null || generationInput.generation === null) return;
@@ -5505,6 +5532,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           });
           const switchCoordinator = createDaemonConnectedServiceAuthGroupSwitchCoordinator({
             api,
+            prepareCandidateForSwitch: prepareAuthGroupCandidateForSwitch,
             resolveCredentialRevision: (serviceId, profileId) => profileId
               ? latestConnectedServiceProjectionSnapshot?.resolveCredentialRevision(serviceId, profileId) ?? null
               : null,
@@ -6311,7 +6339,9 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               onSignalFailureLogMessage: '[DAEMON RUN] Failed to restart connected-service auth-switched session',
             });
           },
-          hotApply: createSessionConnectedServiceAuthHotApply(),
+          hotApply: createSessionConnectedServiceAuthHotApply({
+            validateGroupMutationCurrentness: validateConnectedServiceGroupMutationCurrentness,
+          }),
           recoverAfterRuntimeAuthSwitch: recoverTrackedSessionConnectedServiceRuntimeAuthSwitch,
           verifyProviderAccountAdoption: verifyConnectedServiceAccountAdoption,
           persistSessionBindings: async ({
@@ -6905,6 +6935,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         executionAuthority: ConnectedServiceExecutionAuthorityV1;
       }>) => createQuotaDrivenConnectedServiceAuthGroupSwitchCoordinator({
         api,
+        prepareCandidateForSwitch: prepareAuthGroupCandidateForSwitch,
         runtimeQuotaSnapshots: connectedServiceRuntimeQuotaSnapshots,
         accountUsageStore: providerAccountUsageStore,
         leases: connectedServiceAuthGroupSwitchLeases,
@@ -7440,55 +7471,72 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             request,
           }),
         }),
-        applyCommittedGeneration: async (input) => {
-          const tracked = getCurrentChildren().find((child) => child.happySessionId === input.sessionId) ?? null;
-          if (!tracked) {
-            const target = input.committedGeneration.decisionCommittedTarget;
-            if (target.credentialRevision === null) {
-              return { reconciliationDisposition: 'failed', errorCode: 'credential_revision_missing' };
-            }
-            const scope = await resolveConnectedServiceGenerationApplicationScope(
-              target.serviceId,
-              input.applicationOwnerId as CatalogAgentId | undefined,
-            );
-            if (scope.status !== 'supported' || scope.scope !== 'shared_group_auth_surface') {
-              return { reconciliationDisposition: 'failed', errorCode: 'session_not_found' };
-            }
-            const descriptor = await resolveConnectedServiceCredentialLifecycleDescriptor(scope.ownerId as CatalogAgentId);
-            if (!descriptor.applySharedGenerationApplication) {
-              return { reconciliationDisposition: 'failed', errorCode: 'shared_generation_application_unavailable' };
-            }
-            const resolved = await resolveConnectedServiceCredentialsWithRevisions({
-              credentials,
-              api,
-              bindings: [{ serviceId: target.serviceId, profileId: target.profileId }],
-            }).then((byServiceId) => byServiceId.get(target.serviceId) ?? null).catch(() => null);
-            if (!resolved || resolved.credentialRevision !== target.credentialRevision) {
-              return { reconciliationDisposition: 'failed', errorCode: 'credential_revision_superseded' };
-            }
-            const proof = await descriptor.applySharedGenerationApplication({
-              activeServerDir: configuration.activeServerDir,
+        applySharedGenerationApplication: async (input) => {
+          const target = input.committedGeneration.decisionCommittedTarget;
+          const credentialRevision = target.credentialRevision;
+          if (credentialRevision === null) {
+            return { reconciliationDisposition: 'failed', errorCode: 'credential_revision_missing' };
+          }
+          const descriptor = await resolveConnectedServiceCredentialLifecycleDescriptor(
+            input.applicationOwnerId as CatalogAgentId,
+          );
+          if (!descriptor.applySharedGenerationApplication) {
+            return { reconciliationDisposition: 'failed', errorCode: 'shared_generation_application_unavailable' };
+          }
+          const resolved = await resolveConnectedServiceCredentialsWithRevisions({
+            credentials,
+            api,
+            bindings: [{ serviceId: target.serviceId, profileId: target.profileId }],
+          }).then((byServiceId) => byServiceId.get(target.serviceId) ?? null).catch(() => null);
+          if (!resolved || resolved.credentialRevision !== credentialRevision) {
+            return { reconciliationDisposition: 'failed', errorCode: 'credential_revision_superseded' };
+          }
+          const proof = await descriptor.applySharedGenerationApplication({
+            activeServerDir: configuration.activeServerDir,
+            serviceId: target.serviceId,
+            groupId: target.groupId,
+            profileId: target.profileId,
+            generation: target.generation,
+            credentialRevision,
+            record: resolved.record,
+            validateCurrentBeforeMutation: async () => await validateConnectedServiceGroupMutationCurrentness({
               serviceId: target.serviceId,
               groupId: target.groupId,
               profileId: target.profileId,
               generation: target.generation,
-              credentialRevision: target.credentialRevision,
-              record: resolved.record,
-            }).catch(() => ({ status: 'unavailable' as const }));
-            if (proof.status !== 'verified' || proof.credentialRevision !== target.credentialRevision) {
-              return { reconciliationDisposition: 'failed', errorCode: 'shared_generation_application_unverified' };
-            }
-            return {
-              reconciliationDisposition: 'converged',
-              errorCode: null,
-              providerAdoptedTarget: {
-                ...target,
-                proof: {
-                  ...proof,
-                  status: 'verified',
-                },
+              credentialRevision,
+            }),
+          }).catch(() => ({ status: 'unavailable' as const }));
+          if (proof.status === 'superseded_after_apply') {
+            return mapCommittedGenerationApplyResult({
+              committedGeneration: input.committedGeneration,
+              result: {
+                status: 'superseded_after_apply',
+                activeProfileId: proof.activeProfileId,
+                generation: proof.generation,
+                credentialRevision: proof.credentialRevision,
               },
-            };
+            });
+          }
+          if (proof.status !== 'verified' || proof.credentialRevision !== credentialRevision) {
+            return { reconciliationDisposition: 'failed', errorCode: 'shared_generation_application_unverified' };
+          }
+          return {
+            reconciliationDisposition: 'converged',
+            errorCode: null,
+            providerAdoptedTarget: {
+              ...target,
+              proof: {
+                ...proof,
+                status: 'verified',
+              },
+            },
+          };
+        },
+        applyCommittedGeneration: async (input) => {
+          const tracked = getCurrentChildren().find((child) => child.happySessionId === input.sessionId) ?? null;
+          if (!tracked) {
+            return { reconciliationDisposition: 'failed', errorCode: 'session_not_found' };
           }
           const target = input.committedGeneration.decisionCommittedTarget;
           const coordinator = createQuotaAuthGroupSwitchCoordinatorForSession({
@@ -7524,9 +7572,20 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           if (!settledRuntimeTarget) {
             throw new Error('connected-service exact recipient runtime binding unavailable');
           }
+        },
+        continueAfterExactRecipientApplication: async ({ sessionId, providerAdoptedTarget }) => {
           await continueAfterExactConnectedServiceGenerationApplication({
             sessionId,
             target: providerAdoptedTarget,
+          }).catch((error) => {
+            logger.warn('[DAEMON RUN] Exact connected-service application settled but continuation enqueue failed', {
+              sessionId,
+              serviceId: providerAdoptedTarget.serviceId,
+              groupId: providerAdoptedTarget.groupId,
+              profileId: providerAdoptedTarget.profileId,
+              generation: providerAdoptedTarget.generation,
+              error: serializeAxiosErrorForLog(error),
+            });
           });
         },
         verifySharedGenerationApplication: async (input) => {

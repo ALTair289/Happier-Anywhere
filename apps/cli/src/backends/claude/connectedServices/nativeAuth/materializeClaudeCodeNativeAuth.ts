@@ -1,6 +1,7 @@
 import type {
   AccountSettings,
   ConnectedServiceCredentialRecordV1,
+  ConnectedServiceCredentialRevisionV1,
 } from '@happier-dev/protocol';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -18,6 +19,7 @@ import {
 } from '../syncClaudeConnectedServiceHome';
 import {
   buildClaudeConnectedServiceHomeProvenance,
+  isClaudeConnectedServiceHomeGenerationSuperseded,
   matchesClaudeConnectedServiceHomeProvenance,
   readClaudeConnectedServiceHomeProvenance,
   writeClaudeConnectedServiceHomeProvenance,
@@ -72,6 +74,7 @@ export type ClaudeSubscriptionNativeAuthSelectionDescriptor =
       activeProfileId: string;
       fallbackProfileId: string;
       generation: number;
+      credentialRevision?: ConnectedServiceCredentialRevisionV1 | null;
     }>;
 
 export type ClaudeSubscriptionNativeAuthIdentityDiagnostic = Readonly<{
@@ -393,12 +396,16 @@ async function shouldPreserveNewerExistingCredential(params: Readonly<{
   selectionDescriptor: ClaudeSubscriptionNativeAuthSelectionDescriptor;
   targetClaudeConfigDir: string;
 }>): Promise<boolean> {
-  return matchesClaudeConnectedServiceHomeProvenance(
+  const existingProvenance = await readClaudeConnectedServiceHomeProvenance(params.targetClaudeConfigDir);
+  return isClaudeConnectedServiceHomeGenerationSuperseded({
+    incomingSelection: params.selectionDescriptor,
+    existingProvenance,
+  }) || matchesClaudeConnectedServiceHomeProvenance(
     buildClaudeConnectedServiceHomeProvenance({
       record: params.record,
       selectionDescriptor: params.selectionDescriptor,
     }),
-    await readClaudeConnectedServiceHomeProvenance(params.targetClaudeConfigDir),
+    existingProvenance,
   );
 }
 
@@ -441,8 +448,46 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
   /** Ambient native store root for self-source sharing-policy reconciliation (RD-MAT-2). */
   ambientStateSourceDir?: string | null;
   selectionDescriptor: ClaudeSubscriptionNativeAuthSelectionDescriptor;
+  validateGroupMutationCurrentness?: (
+    input: Readonly<{
+      serviceId: 'claude-subscription';
+      groupId: string;
+      profileId: string;
+      generation: number;
+      credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
+    }>,
+  ) => Promise<Readonly<{ current: boolean }>>;
 }>): Promise<ClaudeSubscriptionNativeAuthHomeMaterializationResult> {
-  await stripLegacyRefreshTokensFromManagedClaudeHome(params.targetClaudeConfigDir);
+  const validateGroupMutationCurrentness = async (): Promise<boolean> => {
+    if (params.selectionDescriptor.kind !== 'group' || !params.validateGroupMutationCurrentness) return true;
+    const result = await params.validateGroupMutationCurrentness({
+      serviceId: 'claude-subscription',
+      groupId: params.selectionDescriptor.groupId,
+      profileId: params.selectionDescriptor.activeProfileId,
+      generation: params.selectionDescriptor.generation,
+      credentialRevision: params.selectionDescriptor.credentialRevision ?? null,
+    });
+    return result.current;
+  };
+  const supersededResult = (): ClaudeSubscriptionNativeAuthHomeMaterializationResult => ({
+    status: 'diagnostic',
+    env: { CLAUDE_CONFIG_DIR: params.targetClaudeConfigDir },
+    diagnostics: [{
+      code: 'claude_connected_service_generation_superseded',
+      providerId: 'claude',
+      serviceId: 'claude-subscription',
+      severity: 'blocking',
+      reason: 'authoritative_group_target_changed_before_materialization',
+    }],
+    identityDiagnostic: buildClaudeSubscriptionNativeAuthIdentityDiagnostic({
+      record: params.record,
+      selectionDescriptor: params.selectionDescriptor,
+      credentialHealthStatus: classifyClaudeCodeCredentialHealth(params.record).status,
+    }),
+  });
+  if (params.selectionDescriptor.kind === 'profile') {
+    await stripLegacyRefreshTokensFromManagedClaudeHome(params.targetClaudeConfigDir);
+  }
   // Reconcile obsolete Happier-managed derived keychain items once we materialize a managed home. The
   // sweep is deferred, deduped and never touches the global login or other-account items.
   scheduleStaleClaudeCodeMacOsKeychainCredentialSweep({
@@ -472,6 +517,21 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
     credentialHealthStatus: health.status,
   });
   if (health.status !== 'ok') {
+    if (params.selectionDescriptor.kind === 'group') {
+      return await withConnectedServiceStateSharingDestinationLock(params.targetClaudeConfigDir, async () => {
+        if (!await validateGroupMutationCurrentness()) return supersededResult();
+        await stripLegacyRefreshTokensFromManagedClaudeHome(params.targetClaudeConfigDir);
+        const materialized = await materializeClaudeCodeNativeAuth({
+          record: params.record,
+          claudeConfigDir: params.targetClaudeConfigDir,
+          preserveNewerExistingCredential: false,
+          homeDir: params.sourceEnv.HOME,
+          username: params.sourceEnv.USER,
+          diagnosticContext: credentialDiagnosticContextForSelection(params.selectionDescriptor),
+        });
+        return { ...materialized, identityDiagnostic };
+      }, { providerId: 'claude' });
+    }
     const materialized = await materializeClaudeCodeNativeAuth({
       record: params.record,
       claudeConfigDir: params.targetClaudeConfigDir,
@@ -497,74 +557,106 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
   const sharingPolicy = resolveClaudeHomeSharingSettings(params.accountSettings ?? null);
   const sourceClaudeConfigDir = resolveConfiguredClaudeConfigDir({ env: params.sourceEnv });
   if (resolve(sourceClaudeConfigDir) === resolve(params.targetClaudeConfigDir)) {
-    const syncResult = await syncClaudeConnectedServiceHome({
-      sourceEnv: params.sourceEnv,
-      targetDir: params.targetClaudeConfigDir,
-      accountSettings: params.accountSettings ?? null,
-      sessionDirectory: params.sessionDirectory ?? null,
-      preserveNativeCredentialFile: true,
-      sharingPolicyOverride: {
-        configMode: 'copied',
-        stateMode: sharingPolicy.stateMode,
-      },
-      vendorResumeId: params.vendorResumeId ?? null,
-      candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
-      ambientStateSourceDir: params.ambientStateSourceDir ?? null,
-    });
-    await mkdir(params.targetClaudeConfigDir, { recursive: true });
-    await materializeClaudeWorkspaceTrust({
-      sourceEnv: params.sourceEnv,
-      targetDir: params.targetClaudeConfigDir,
-      sessionDirectory: params.sessionDirectory ?? null,
-      preserveExistingOauthAccountProjection: true,
-    });
-    const credentialFileAlreadyCurrent = await isClaudeSubscriptionNativeCredentialFileCurrent({
-      record: params.record,
-      selectionDescriptor: params.selectionDescriptor,
-      targetClaudeConfigDir: params.targetClaudeConfigDir,
-    });
-    const materialized = credentialFileAlreadyCurrent
-      ? alreadyMaterializedClaudeCodeNativeAuthResult(params.targetClaudeConfigDir)
-      : await materializeClaudeCodeNativeAuth({
-          record: params.record,
+    return await withConnectedServiceStateSharingDestinationLock(params.targetClaudeConfigDir, async () => {
+      if (!await validateGroupMutationCurrentness()) return supersededResult();
+      await stripLegacyRefreshTokensFromManagedClaudeHome(params.targetClaudeConfigDir);
+      // The source and destination may be the same shared group home for an already-running
+      // session. Re-read provenance only after acquiring the canonical destination lock so a
+      // delayed older generation cannot overwrite a newer fan-out/materialization.
+      const existingProvenance = await readClaudeConnectedServiceHomeProvenance(
+        params.targetClaudeConfigDir,
+      );
+      if (isClaudeConnectedServiceHomeGenerationSuperseded({
+        incomingSelection: params.selectionDescriptor,
+        existingProvenance,
+      })) {
+        return {
+          ...alreadyMaterializedClaudeCodeNativeAuthResult(params.targetClaudeConfigDir),
+          identityDiagnostic,
+        };
+      }
+      const syncResult = await syncClaudeConnectedServiceHome({
+        sourceEnv: params.sourceEnv,
+        targetDir: params.targetClaudeConfigDir,
+        accountSettings: params.accountSettings ?? null,
+        sessionDirectory: params.sessionDirectory ?? null,
+        preserveNativeCredentialFile: true,
+        sharingPolicyOverride: {
+          configMode: 'copied',
+          stateMode: sharingPolicy.stateMode,
+        },
+        vendorResumeId: params.vendorResumeId ?? null,
+        candidatePersistedSessionFile: params.candidatePersistedSessionFile ?? null,
+        ambientStateSourceDir: params.ambientStateSourceDir ?? null,
+        destinationLockAlreadyHeld: true,
+      });
+      await mkdir(params.targetClaudeConfigDir, { recursive: true });
+      await materializeClaudeWorkspaceTrust({
+        sourceEnv: params.sourceEnv,
+        targetDir: params.targetClaudeConfigDir,
+        sessionDirectory: params.sessionDirectory ?? null,
+        preserveExistingOauthAccountProjection: true,
+      });
+      const credentialFileAlreadyCurrent = await isClaudeSubscriptionNativeCredentialFileCurrent({
+        record: params.record,
+        selectionDescriptor: params.selectionDescriptor,
+        targetClaudeConfigDir: params.targetClaudeConfigDir,
+      });
+      const materialized = credentialFileAlreadyCurrent
+        ? alreadyMaterializedClaudeCodeNativeAuthResult(params.targetClaudeConfigDir)
+        : await materializeClaudeCodeNativeAuth({
+            record: params.record,
+            claudeConfigDir: params.targetClaudeConfigDir,
+            preserveNewerExistingCredential: false,
+            homeDir: params.sourceEnv.HOME,
+            username: params.sourceEnv.USER,
+            diagnosticContext: credentialDiagnosticContextForSelection(params.selectionDescriptor),
+          });
+      if (materialized.status !== 'materialized') {
+        return {
+          ...materialized,
+          diagnostics: [...syncResult.diagnostics, ...materialized.diagnostics],
+          identityDiagnostic,
+        };
+      }
+      await reconcileClaudeAccountScopedRootConfigFile({
+        path: join(params.targetClaudeConfigDir, '.claude.json'),
+        preserveExistingAccountState,
+        ...oauthIdentity,
+      });
+      if (!credentialFileAlreadyCurrent) {
+        await writeClaudeConnectedServiceHomeProvenance({
           claudeConfigDir: params.targetClaudeConfigDir,
-          preserveNewerExistingCredential: false,
-          homeDir: params.sourceEnv.HOME,
-          username: params.sourceEnv.USER,
-          diagnosticContext: credentialDiagnosticContextForSelection(params.selectionDescriptor),
+          provenance: buildClaudeConnectedServiceHomeProvenance({
+            record: params.record,
+            selectionDescriptor: params.selectionDescriptor,
+          }),
         });
-    if (materialized.status !== 'materialized') {
+      }
       return {
         ...materialized,
+        env: { CLAUDE_CONFIG_DIR: params.targetClaudeConfigDir },
+        credentialPath: join(params.targetClaudeConfigDir, '.credentials.json'),
         diagnostics: [...syncResult.diagnostics, ...materialized.diagnostics],
         identityDiagnostic,
       };
-    }
-    await reconcileClaudeAccountScopedRootConfigFile({
-      path: join(params.targetClaudeConfigDir, '.claude.json'),
-      preserveExistingAccountState,
-      ...oauthIdentity,
-    });
-    if (!credentialFileAlreadyCurrent) {
-      await writeClaudeConnectedServiceHomeProvenance({
-        claudeConfigDir: params.targetClaudeConfigDir,
-        provenance: buildClaudeConnectedServiceHomeProvenance({
-          record: params.record,
-          selectionDescriptor: params.selectionDescriptor,
-        }),
-      });
-    }
-    return {
-      ...materialized,
-      env: { CLAUDE_CONFIG_DIR: params.targetClaudeConfigDir },
-      credentialPath: join(params.targetClaudeConfigDir, '.credentials.json'),
-      diagnostics: [...syncResult.diagnostics, ...materialized.diagnostics],
-      identityDiagnostic,
-    };
+    }, { providerId: 'claude' });
   }
 
   if (preserveNewerExistingCredential) {
     return await withConnectedServiceStateSharingDestinationLock(params.targetClaudeConfigDir, async () => {
+      if (!await validateGroupMutationCurrentness()) return supersededResult();
+      await stripLegacyRefreshTokensFromManagedClaudeHome(params.targetClaudeConfigDir);
+      const existingProvenance = await readClaudeConnectedServiceHomeProvenance(params.targetClaudeConfigDir);
+      if (isClaudeConnectedServiceHomeGenerationSuperseded({
+        incomingSelection: params.selectionDescriptor,
+        existingProvenance,
+      })) {
+        return {
+          ...alreadyMaterializedClaudeCodeNativeAuthResult(params.targetClaudeConfigDir),
+          identityDiagnostic,
+        };
+      }
       const syncResult = await syncClaudeConnectedServiceHome({
         sourceEnv: params.sourceEnv,
         targetDir: params.targetClaudeConfigDir,
@@ -637,6 +729,18 @@ export async function materializeClaudeSubscriptionNativeAuthHome(params: Readon
   // concurrent self-source materialization of the same profile home cannot interleave in-place
   // writes with the staged replacement. The inner sync locks only the staged dir (distinct key).
   return await withConnectedServiceStateSharingDestinationLock(params.targetClaudeConfigDir, async () => {
+    if (!await validateGroupMutationCurrentness()) return supersededResult();
+    await stripLegacyRefreshTokensFromManagedClaudeHome(params.targetClaudeConfigDir);
+    const existingProvenance = await readClaudeConnectedServiceHomeProvenance(params.targetClaudeConfigDir);
+    if (isClaudeConnectedServiceHomeGenerationSuperseded({
+      incomingSelection: params.selectionDescriptor,
+      existingProvenance,
+    })) {
+      return {
+        ...alreadyMaterializedClaudeCodeNativeAuthResult(params.targetClaudeConfigDir),
+        identityDiagnostic,
+      };
+    }
     const stagedClaudeConfigDir = await mkdtemp(join(dirname(params.targetClaudeConfigDir), '.happier-claude-config-'));
     try {
       const syncResult = await syncClaudeConnectedServiceHome({

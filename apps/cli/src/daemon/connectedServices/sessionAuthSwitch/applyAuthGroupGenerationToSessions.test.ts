@@ -310,7 +310,8 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
   });
 
   it('keeps shared provider owners and per-session runtimes as distinct application effects', async () => {
-    const applied: string[] = [];
+    const perSessionApplied: string[] = [];
+    const sharedApplied: string[] = [];
     const result = await applyConnectedServiceAuthGroupGenerationToSessions({
       ...sharedVerificationDeps(),
       committedGeneration: manualGeneration,
@@ -322,14 +323,18 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
         { sessionId: 'other-a', fromProfileId: 'old', applicationScope: 'shared_group_auth_surface', applicationOwnerId: 'other-provider' },
         { sessionId: 'direct-a', fromProfileId: 'direct-old', applicationScope: 'per_session_runtime', applicationOwnerId: 'direct-a' },
       ],
+      applySharedGenerationApplication: async ({ applicationOwnerId }) => {
+        sharedApplied.push(applicationOwnerId);
+        return converged(manualGeneration);
+      },
       applyCommittedGeneration: async ({ sessionId }) => {
-        applied.push(sessionId);
+        perSessionApplied.push(sessionId);
         return converged(manualGeneration);
       },
     });
 
-    expect(applied).toHaveLength(3);
-    expect(applied).toEqual(expect.arrayContaining(['claude-a', 'other-a', 'direct-a']));
+    expect(sharedApplied).toEqual(['claude', 'other-provider']);
+    expect(perSessionApplied).toEqual(['direct-a']);
     expect(result.appliedSessionCount).toBe(4);
   });
 
@@ -347,7 +352,8 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
         applicationScope: 'shared_group_auth_surface' as const,
         applicationOwnerId: 'claude',
       })),
-      applyCommittedGeneration: applied,
+      applySharedGenerationApplication: applied,
+      applyCommittedGeneration: vi.fn(async () => converged(manualGeneration)),
       settleExactRecipientApplication: async ({ sessionId }: { sessionId: string }) => {
         if (sessionId !== 'unrelated') settled.push(sessionId);
       },
@@ -372,7 +378,7 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
   });
 
   it('reports one shared representative failure for every bound session without another provider apply', async () => {
-    const applyCommittedGeneration = vi.fn(async () => ({
+    const applySharedGenerationApplication = vi.fn(async () => ({
       reconciliationDisposition: 'failed' as const,
       errorCode: 'provider_application_failed',
     }));
@@ -387,10 +393,11 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
         applicationScope: 'shared_group_auth_surface' as const,
         applicationOwnerId: 'claude',
       })),
-      applyCommittedGeneration,
+      applySharedGenerationApplication,
+      applyCommittedGeneration: vi.fn(async () => converged(manualGeneration)),
     });
 
-    expect(applyCommittedGeneration).toHaveBeenCalledTimes(1);
+    expect(applySharedGenerationApplication).toHaveBeenCalledTimes(1);
     expect(result.failedSessionCount).toBe(3);
     expect(result.resultsBySessionId?.b).toMatchObject({
       reconciliationDisposition: 'failed',
@@ -420,12 +427,13 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
         applicationScope: 'shared_group_auth_surface' as const,
         applicationOwnerId: 'claude',
       })),
-      applyCommittedGeneration: async ({ committedGeneration }) => {
+      applySharedGenerationApplication: async ({ committedGeneration }) => {
         appliedGenerations.push(committedGeneration.decisionCommittedTarget.generation);
         return committedGeneration.decisionCommittedTarget.generation === 7
           ? { reconciliationDisposition: 'superseded_after_apply' as const, errorCode: null, authoritativeGeneration: generationC }
           : converged(committedGeneration);
       },
+      applyCommittedGeneration: vi.fn(async () => converged(manualGeneration)),
     });
 
     expect(appliedGenerations).toEqual([7, 8]);
@@ -435,7 +443,7 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
   it('recovers a lost shared-effect response through exact provider verification without receipt I/O or a duplicate effect', async () => {
     let providerTarget: ReturnType<typeof converged>['providerAdoptedTarget'] | null = null;
     const providerEffects: ConnectedServiceAuthGroupCommittedGenerationFact[] = [];
-    const applyCommittedGeneration = vi.fn(async ({ committedGeneration }: Readonly<{
+    const applySharedGenerationApplication = vi.fn(async ({ committedGeneration }: Readonly<{
       committedGeneration: ConnectedServiceAuthGroupCommittedGenerationFact;
     }>) => {
       providerEffects.push(committedGeneration);
@@ -470,7 +478,8 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
         applicationOwnerId: 'claude',
       })),
       verifySharedGenerationApplication,
-      applyCommittedGeneration,
+      applySharedGenerationApplication,
+      applyCommittedGeneration: vi.fn(async () => converged(manualGeneration)),
     };
 
     const lostResponse = await applyConnectedServiceAuthGroupGenerationToSessions(input);
@@ -479,7 +488,7 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
     const recovered = await applyConnectedServiceAuthGroupGenerationToSessions(input);
 
     expect(providerEffects).toEqual([manualGeneration]);
-    expect(applyCommittedGeneration).toHaveBeenCalledTimes(1);
+    expect(applySharedGenerationApplication).toHaveBeenCalledTimes(1);
     expect(verifySharedGenerationApplication).toHaveBeenCalledTimes(2);
     expect(recovered).toMatchObject({
       ok: true,
@@ -490,7 +499,7 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
 
   it('single-flights concurrent duplicate deliveries for the same exact shared epoch', async () => {
     const gate = deferred();
-    const applyCommittedGeneration = vi.fn(async () => await gate.promise);
+    const applySharedGenerationApplication = vi.fn(async () => await gate.promise);
     const verifySharedGenerationApplication = vi.fn(async () => null);
     const buildInput = (sessionId: string) => ({
       committedGeneration: manualGeneration,
@@ -503,17 +512,18 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
         applicationOwnerId: 'claude',
       }],
       verifySharedGenerationApplication,
-      applyCommittedGeneration,
+      applySharedGenerationApplication,
+      applyCommittedGeneration: vi.fn(async () => converged(manualGeneration)),
     });
 
     const first = applyConnectedServiceAuthGroupGenerationToSessions(buildInput('a'));
     const second = applyConnectedServiceAuthGroupGenerationToSessions(buildInput('b'));
-    await vi.waitFor(() => expect(applyCommittedGeneration).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(applySharedGenerationApplication).toHaveBeenCalledTimes(1));
     gate.resolve(converged(manualGeneration));
     const results = await Promise.all([first, second]);
 
     expect(verifySharedGenerationApplication).toHaveBeenCalledTimes(1);
-    expect(applyCommittedGeneration).toHaveBeenCalledTimes(1);
+    expect(applySharedGenerationApplication).toHaveBeenCalledTimes(1);
     expect(results.map((result) => result.appliedSessionCount)).toEqual([1, 1]);
   });
 
@@ -717,6 +727,10 @@ describe('applyConnectedServiceAuthGroupGenerationToSessions', () => {
         applicationOwnerId: 'shared-owner',
       }],
       applyCommittedGeneration: async () => {
+        controller.abort();
+        return converged(manualGeneration);
+      },
+      applySharedGenerationApplication: async () => {
         controller.abort();
         return converged(manualGeneration);
       },

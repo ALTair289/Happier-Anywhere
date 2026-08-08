@@ -516,12 +516,43 @@ function isSubagentScopedRuntimeAuthEvidence(error: unknown): boolean {
     return typeof parentToolUseId === 'string' && parentToolUseId.trim().length > 0;
 }
 
+function containsClaudeOAuthRevocationText(value: unknown, depth = 0): boolean {
+    if (depth > 5 || value === null || value === undefined) return false;
+    if (typeof value === 'string') {
+        return /\boauth(?: access)? token has been (?:revoked|expired)\b/i.test(value);
+    }
+    if (Array.isArray(value)) {
+        return value.some((entry) => containsClaudeOAuthRevocationText(entry, depth + 1));
+    }
+    if (typeof value !== 'object') return false;
+    return Object.values(value as Record<string, unknown>).some((entry) =>
+        containsClaudeOAuthRevocationText(entry, depth + 1),
+    );
+}
+
+export function containsDefinitiveClaudeOAuthRevocationEvidence(value: unknown): boolean {
+    const record = value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null;
+    if (!record) return false;
+    const apiStatus = record.apiErrorStatus ?? record.status ?? record.statusCode;
+    const exactApiFailure = record.isApiErrorMessage === true && apiStatus === 401;
+    const hookEventName = record.hook_event_name ?? record.hookEventName;
+    const errorCode = record.error ?? record.error_type ?? record.errorType;
+    const exactHookFailure = hookEventName === 'StopFailure'
+        && (errorCode === 'authentication_failed' || errorCode === 'invalid_grant');
+    return (exactApiFailure || exactHookFailure) && containsClaudeOAuthRevocationText(record);
+}
+
 export async function surfaceClaudeRuntimeAuthFailure(
     session: RuntimeIssueSession,
     error: unknown,
     logPrefix: string,
 ): Promise<boolean> {
-    if (isSubagentScopedRuntimeAuthEvidence(error)) return false;
+    const subagentScoped = isSubagentScopedRuntimeAuthEvidence(error);
+    const definitiveSubagentOAuthRevocation = subagentScoped
+        && containsDefinitiveClaudeOAuthRevocationEvidence(error);
+    if (subagentScoped && !definitiveSubagentOAuthRevocation) return false;
     const selection =
         findConnectedServiceChildSelection(process.env, 'claude-subscription')
         ?? findConnectedServiceChildSelection(process.env, 'anthropic')
@@ -534,7 +565,7 @@ export async function surfaceClaudeRuntimeAuthFailure(
     if (!classification) return false;
 
     const retryDecision = resolveClaudeRuntimeAuthRetryDecision(error);
-    if (retryDecision.action === 'await_provider_retry') {
+    if (!definitiveSubagentOAuthRevocation && retryDecision.action === 'await_provider_retry') {
         return false;
     }
 
@@ -544,6 +575,7 @@ export async function surfaceClaudeRuntimeAuthFailure(
         error,
     });
     if (!selection) {
+        if (subagentScoped) return false;
         await session.client.sessionTurnLifecycle?.failTurn?.({
             provider: 'claude',
             issue,
@@ -554,7 +586,9 @@ export async function surfaceClaudeRuntimeAuthFailure(
     // The provider has already rejected this exact turn. Begin its local terminal transition
     // before asking Connected Services to repair the account, but do not let the terminal event's
     // durable write prevent the recovery owner from receiving the rejection.
-    beginConnectedClaudeTurnFailure(session, issue, logPrefix);
+    if (!subagentScoped) {
+        beginConnectedClaudeTurnFailure(session, issue, logPrefix);
+    }
     const recoveryReport = await reportConnectedServiceRuntimeAuthFailureToDaemon({
         sessionId: session.client.sessionId,
         switchesThisTurn: 0,

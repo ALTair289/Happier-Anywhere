@@ -87,6 +87,18 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       expectedGeneration: number;
       reason: string;
     }>): Promise<ConnectedServiceAuthGroupSwitchState>;
+    prepareCandidateForSwitch?(input: Readonly<{
+      serviceId: string;
+      groupId: string;
+      profileId: string;
+      reason: string;
+    }>): Promise<
+      | Readonly<{ status: 'ready' }>
+      | Readonly<{
+          status: 'ineligible';
+          memberState: ConnectedServiceAuthGroupMemberRuntimeState;
+        }>
+    >;
     preflightApplyGeneration?(
       input: ConnectedServiceAuthGroupSwitchApplyGenerationInput,
     ): Promise<ConnectedServiceAuthGroupSwitchApplyGenerationResult | void>;
@@ -198,6 +210,47 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
       const applyFailure = readConnectedServiceAuthGenerationApplyFailure(error);
       if (!applyFailure) throw error;
       return applyFailure;
+    }
+  }
+
+  /**
+   * Candidate choice stays wholly owned by the canonical selector. An optional boundary may prove
+   * that a selected credential is unusable before the CAS; when it does, we feed that fact back as
+   * operation-local member state and ask the same selector for the next candidate. Nothing is
+   * committed, persisted, or selected by the boundary itself.
+   */
+  private async selectPreparedCandidate(input: Readonly<{
+    state: ConnectedServiceAuthGroupSwitchState;
+    activeProfileId: string | null | undefined;
+    reason: string;
+    allowCurrentProfileRetry?: boolean;
+  }>): Promise<ReturnType<typeof selectConnectedServiceAuthGroupCandidate>> {
+    const memberStatesByProfileId = new Map(input.state.memberStatesByProfileId);
+    for (;;) {
+      const selected = selectConnectedServiceAuthGroupCandidate({
+        nowMs: this.deps.nowMs(),
+        quotaFreshnessMs: this.deps.quotaFreshnessMs,
+        activeProfileId: input.activeProfileId ?? null,
+        policy: input.state.policy,
+        members: input.state.members,
+        memberStatesByProfileId,
+        ...(input.allowCurrentProfileRetry === undefined
+          ? {}
+          : { allowCurrentProfileRetry: input.allowCurrentProfileRetry }),
+      });
+      if (!selected.selected || !this.deps.prepareCandidateForSwitch) return selected;
+      const prepared = await this.deps.prepareCandidateForSwitch({
+        serviceId: input.state.serviceId,
+        groupId: input.state.groupId,
+        profileId: selected.selected.profileId,
+        reason: input.reason,
+      });
+      if (prepared.status === 'ready') return selected;
+      const existing = memberStatesByProfileId.get(selected.selected.profileId) ?? {};
+      memberStatesByProfileId.set(selected.selected.profileId, {
+        ...existing,
+        ...prepared.memberState,
+      });
     }
   }
 
@@ -1062,13 +1115,10 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
             activeProfileId: loaded.activeProfileId,
           })
         : false;
-      const selected = selectConnectedServiceAuthGroupCandidate({
-        nowMs: this.deps.nowMs(),
-        quotaFreshnessMs: this.deps.quotaFreshnessMs,
+      const selected = await this.selectPreparedCandidate({
+        state: loaded,
         activeProfileId: trigger === 'pre_turn' ? loaded.activeProfileId : selectionActiveProfileId,
-        policy: loaded.policy,
-        members: loaded.members,
-        memberStatesByProfileId: loaded.memberStatesByProfileId,
+        reason: input.reason,
         ...(trigger === 'pre_turn' ? { allowCurrentProfileRetry: allowLoadedActiveProfileRetry } : {}),
       });
       if (!selected.selected) {
@@ -1213,13 +1263,10 @@ export class ConnectedServiceAuthGroupSwitchCoordinator {
             commitLoaded = resolvedConflict.state;
             commitSelectionActiveProfileId = resolvedConflict.selectionActiveProfileId
               ?? (trigger === 'pre_turn' ? commitLoaded.activeProfileId : commitSelectionActiveProfileId);
-            const retrySelected = selectConnectedServiceAuthGroupCandidate({
-              nowMs: this.deps.nowMs(),
-              quotaFreshnessMs: this.deps.quotaFreshnessMs,
+            const retrySelected = await this.selectPreparedCandidate({
+              state: commitLoaded,
               activeProfileId: commitSelectionActiveProfileId,
-              policy: commitLoaded.policy,
-              members: commitLoaded.members,
-              memberStatesByProfileId: commitLoaded.memberStatesByProfileId,
+              reason: input.reason,
             });
             if (!retrySelected.selected) {
               const result: ConnectedServiceAuthGroupSwitchResult = retrySelected.reason === 'manual_strategy'

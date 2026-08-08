@@ -2,12 +2,16 @@ import {
   ConnectedServiceCredentialRevisionV1Schema,
   ConnectedServiceIdSchema,
   type ConnectedServiceBindingsV1,
+  type ConnectedServiceCredentialRevisionV1,
   type ConnectedServiceId,
 } from '@happier-dev/protocol';
 
 import { getConnectedServiceRuntimeAuthAdapter, resolveCatalogAgentId } from '@/backends/catalog';
 import { CATALOG_AGENT_IDS, type CatalogAgentId } from '@/backends/types';
-import type { ConnectedServiceProviderRuntimeAuthAdapter } from '../runtimeAuth/types';
+import type {
+  ConnectedServiceProviderRuntimeAuthAdapter,
+  ConnectedServiceRuntimeAuthTargetInput,
+} from '../runtimeAuth/types';
 import type { TrackedSession } from '@/daemon/types';
 import type {
   AcceptedConnectedServiceAccountVerification,
@@ -26,7 +30,7 @@ type HotApplyResult =
     }>
   | Readonly<{
       ok: false;
-      errorCode: 'hot_apply_unavailable' | 'hot_apply_failed' | 'hot_apply_restart_required';
+      errorCode: 'hot_apply_unavailable' | 'hot_apply_failed' | 'hot_apply_restart_required' | 'credential_revision_superseded';
       serviceId?: string;
       serviceResultsByServiceId?: Readonly<Record<string, HotApplyServiceResult>>;
       underlyingError?: string;
@@ -149,6 +153,13 @@ function readAcceptedVerificationFromHotApplyResult(
 function readHotApplyFailureErrorCode(
   result: Readonly<Record<string, unknown>>,
 ): Exclude<HotApplyResult, Readonly<{ ok: true }>>['errorCode'] {
+  if (
+    result.status === 'superseded_after_apply'
+    || result.reason === 'credential_revision_superseded'
+    || result.reason === 'shared_generation_application_superseded'
+  ) {
+    return 'credential_revision_superseded';
+  }
   return result.recovery === 'restart_resume'
     ? 'hot_apply_restart_required'
     : 'hot_apply_failed';
@@ -156,6 +167,13 @@ function readHotApplyFailureErrorCode(
 
 export function createSessionConnectedServiceAuthHotApply(deps?: Readonly<{
   resolveRuntimeAuthAdapter?: (agentId: CatalogAgentId) => Promise<ConnectedServiceProviderRuntimeAuthAdapter | null>;
+  validateGroupMutationCurrentness?: (input: Readonly<{
+    serviceId: ConnectedServiceId;
+    groupId: string;
+    profileId: string;
+    generation: number;
+    credentialRevision: ConnectedServiceCredentialRevisionV1 | null;
+  }>) => ReturnType<NonNullable<ConnectedServiceRuntimeAuthTargetInput['validateCurrentBeforeMutation']>>;
 }>) {
   const resolveRuntimeAuthAdapter = deps?.resolveRuntimeAuthAdapter
     ?? (async (agentId: CatalogAgentId) => await getConnectedServiceRuntimeAuthAdapter(agentId));
@@ -183,6 +201,34 @@ export function createSessionConnectedServiceAuthHotApply(deps?: Readonly<{
     for (let index = 0; index < targetBindings.length; index += 1) {
       const { serviceId, binding } = targetBindings[index]!;
       const materializedSelection = input.runtimeAuthSelectionsByServiceId?.get(serviceId);
+      const materializedSelectionRecord = readRecord(materializedSelection);
+      const groupGeneration = materializedSelectionRecord?.groupGeneration ?? materializedSelectionRecord?.generation;
+      const credentialRevision = ConnectedServiceCredentialRevisionV1Schema.safeParse(
+        materializedSelectionRecord?.credentialRevision,
+      );
+      const validateCurrentBeforeMutation = binding.selection === 'group'
+        ? async () => {
+            const groupId = readString(materializedSelectionRecord?.groupId) ?? readString(binding.groupId);
+            const profileId = readString(materializedSelectionRecord?.activeProfileId)
+              ?? readString(materializedSelectionRecord?.profileId)
+              ?? readString(binding.profileId);
+            if (
+              !deps?.validateGroupMutationCurrentness
+              || !groupId
+              || !profileId
+              || !Number.isSafeInteger(groupGeneration)
+            ) {
+              return { current: false as const };
+            }
+            return await deps.validateGroupMutationCurrentness({
+              serviceId,
+              groupId,
+              profileId,
+              generation: groupGeneration as number,
+              credentialRevision: credentialRevision.success ? credentialRevision.data : null,
+            });
+          }
+        : undefined;
       const result = await adapter.hotApply({
         target: { agentId },
         selection: materializedSelection ?? {
@@ -193,6 +239,7 @@ export function createSessionConnectedServiceAuthHotApply(deps?: Readonly<{
             ? { groupId: binding.groupId, activeProfileId: binding.profileId }
             : {}),
         },
+        ...(validateCurrentBeforeMutation ? { validateCurrentBeforeMutation } : {}),
       });
       if (!resultApplied(result)) {
         const errorCode = readHotApplyFailureErrorCode(result);

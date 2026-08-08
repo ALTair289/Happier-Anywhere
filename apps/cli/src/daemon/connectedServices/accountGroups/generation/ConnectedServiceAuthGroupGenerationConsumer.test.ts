@@ -81,8 +81,14 @@ describe('ConnectedServiceAuthGroupGenerationConsumer', () => {
       errorCode: null,
       providerAdoptedTarget,
     }));
+    const applySharedGenerationApplication = vi.fn(async () => ({
+      reconciliationDisposition: 'converged' as const,
+      errorCode: null,
+      providerAdoptedTarget,
+    }));
     const consumer = convergedConsumer({
       applyCommittedGeneration,
+      applySharedGenerationApplication,
       resolveGenerationApplicationScope: async () => ({
         status: 'supported',
         scope: 'shared_group_auth_surface',
@@ -97,8 +103,41 @@ describe('ConnectedServiceAuthGroupGenerationConsumer', () => {
       sessions: ['a', 'b', 'c'].map((sessionId) => ({ sessionId, activity: 'live' as const })),
     });
 
-    expect(applyCommittedGeneration).toHaveBeenCalledOnce();
+    expect(applySharedGenerationApplication).toHaveBeenCalledOnce();
+    expect(applyCommittedGeneration).not.toHaveBeenCalled();
     expect(result).toMatchObject({ acknowledgeable: true, appliedSessionCount: 3 });
+  });
+
+  it('keeps exact application settled when best-effort continuation fails', async () => {
+    const settleExactRecipientApplication = vi.fn(async () => undefined);
+    const continueAfterExactRecipientApplication = vi.fn(async () => {
+      throw new Error('pending continuation unavailable');
+    });
+    const notifyCurrentGroupTruth = vi.fn(async () => ({ ok: true as const }));
+    const consumer = convergedConsumer({
+      settleExactRecipientApplication,
+      continueAfterExactRecipientApplication,
+      notifyCurrentGroupTruth,
+    });
+
+    const result = await consumer.consume({
+      executionAuthority: 'runtime_recovery',
+      committedGeneration: generation,
+      switchReason: 'automatic_runtime_failure',
+      sessions: [{ sessionId: 'origin', activity: 'live' }],
+    });
+
+    expect(settleExactRecipientApplication).toHaveBeenCalledOnce();
+    expect(notifyCurrentGroupTruth).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'origin',
+      applicationSettled: true,
+    }));
+    expect(continueAfterExactRecipientApplication).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      acknowledgeable: true,
+      appliedSessionCount: 1,
+      failedSessionCount: 0,
+    });
   });
 
   it('drops a replaced exact registration after shared proof without applying or publishing stale available truth', async () => {
