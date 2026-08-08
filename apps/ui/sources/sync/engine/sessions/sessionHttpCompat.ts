@@ -306,6 +306,18 @@ function throwSessionListHttpError(status: number, routeLabel: string): never {
     throw new Error(`Failed to fetch ${routeLabel}: ${status}`);
 }
 
+/**
+ * Whether a requested list path IS the `/v2/sessions` route rather than a sibling under it.
+ *
+ * Route identity is the path; the query string only selects which row families the route merges.
+ * Comparing the whole string silently disabled the `/v1/sessions` fallback for every initial page
+ * that carries a flag, while a sibling route such as `/v2/sessions/active` must never be diverted
+ * to the legacy list.
+ */
+function isV2SessionsListRoute(sessionListPath: string): boolean {
+    return sessionListPath === '/v2/sessions' || sessionListPath.startsWith('/v2/sessions?');
+}
+
 function looksLikeMissingV2SessionsListRoute(status: number, body: unknown): boolean {
     if (status === 404 || status === 405 || status === 501) {
         return true;
@@ -342,6 +354,16 @@ export function looksLikeCurrentV2SessionNotFound404(body: unknown): boolean {
     return V2SessionByIdNotFoundSchema.safeParse(body).success;
 }
 
+/**
+ * `includedActiveRows` reports whether the server merged the active-session row family into this
+ * response, which it advertises with a top-level `includedActive: true` on the initial page.
+ *
+ * The advertisement is what makes `includeActive=true` negotiable at all: an older server drops an
+ * unknown query parameter in its zod querystring schema and answers with a perfectly valid page that
+ * is simply missing those rows, so absence of the rows proves nothing (an account can legitimately
+ * have none). `V2SessionListResponseSchema` is `.passthrough()`, so the marker rides the existing
+ * response without a format change and older clients never see it.
+ */
 export async function fetchSessionListPageCompat(params: Readonly<{
     request: SessionRequest;
     token: string;
@@ -354,6 +376,7 @@ export async function fetchSessionListPageCompat(params: Readonly<{
     nextCursor: string | null;
     hasNext: boolean;
     source: 'v2' | 'v1';
+    includedActiveRows: boolean;
 }> {
     const sessionListPath = params.sessionListPath || '/v2/sessions';
     const url = new URL(sessionListPath, 'http://placeholder.local');
@@ -393,9 +416,10 @@ export async function fetchSessionListPageCompat(params: Readonly<{
                 nextCursor: typeof parsed.nextCursor === 'string' ? parsed.nextCursor : null,
                 hasNext: parsed.hasNext === true,
                 source: 'v2',
+                includedActiveRows: parsed.includedActive === true,
             };
         }
-    } else if (sessionListPath !== '/v2/sessions' || !looksLikeMissingV2SessionsListRoute(v2Response.status, v2Body)) {
+    } else if (!isV2SessionsListRoute(sessionListPath) || !looksLikeMissingV2SessionsListRoute(v2Response.status, v2Body)) {
         throwSessionListHttpError(v2Response.status, sessionListPath);
     }
 
@@ -427,6 +451,7 @@ export async function fetchSessionListPageCompat(params: Readonly<{
         nextCursor: null,
         hasNext: false,
         source: 'v1',
+        includedActiveRows: false,
     };
 }
 

@@ -132,9 +132,13 @@ function createSessionListDataKeyHydrationAbortController(params: Readonly<{
 }
 
 function buildSessionListInitialPath(params: {
+    includeActiveRows: boolean;
     includeAttentionRows: boolean;
 }): string | undefined {
     const query: string[] = [];
+    if (params.includeActiveRows) {
+        query.push('includeActive=true');
+    }
     if (params.includeAttentionRows) {
         query.push('includeAttention=true');
     }
@@ -1278,33 +1282,17 @@ export async function fetchAndApplySessions(params: {
         }
     };
 
+    // The initial page asks the server to merge the active-session rows into the response it already
+    // builds. That removes an entire ~1 MB round trip on every foreground, and — because both
+    // requests contend for the same server DB connection — the serialization edge behind it.
+    const wantsInitialActiveRows = params.includeActiveSessionRows === true && !cursor && !params.sessionListPath;
+    let servedActiveRowsWithInitialPage = false;
     const initialSessionListPath = !cursor && !params.sessionListPath
         ? buildSessionListInitialPath({
+            includeActiveRows: wantsInitialActiveRows,
             includeAttentionRows: params.includeSessionListAttentionRows === true,
         })
         : undefined;
-    if (params.includeActiveSessionRows === true && !cursor && !params.sessionListPath) {
-        const activePageFields = {
-            loadedSessions: sessions.length,
-            limit: 500,
-            cursorPresent: 0,
-            activePage: 1,
-            listPage: 0,
-        };
-        const activePage = await syncPerformanceTelemetry.measureAsync(
-            'sync.sessions.snapshot.fetchPage',
-            activePageFields,
-            async () => fetchSessionListPageCompat({
-                request,
-                token: credentials.token,
-                sessionListPath: '/v2/sessions/active',
-                cursor: null,
-                limit: 500,
-                telemetryFields: activePageFields,
-            }),
-        );
-        appendRows(activePage.sessions);
-    }
     while (fetchedPages < sessionListMaxPages) {
         const pageLimit = sessionListPageSize;
         const fetchPageFields = {
@@ -1343,6 +1331,9 @@ export async function fetchAndApplySessions(params: {
             () => {
                 appendRows(page.sessions);
                 source = page.source;
+                if (fetchedPages === 0) {
+                    servedActiveRowsWithInitialPage = page.includedActiveRows;
+                }
                 shouldStopAfterPage = !page.hasNext || !page.nextCursor || page.source === 'v1';
                 nextCursor = page.nextCursor;
                 nextCursorForMore = page.nextCursor;
@@ -1355,6 +1346,36 @@ export async function fetchAndApplySessions(params: {
         if (nextCursor && seenCursors.has(nextCursor)) break;
         if (nextCursor) seenCursors.add(nextCursor);
         cursor = nextCursor;
+    }
+
+    if (wantsInitialActiveRows && !servedActiveRowsWithInitialPage) {
+        const activePageFields = {
+            loadedSessions: sessions.length,
+            limit: 500,
+            cursorPresent: 0,
+            activePage: 1,
+            listPage: 0,
+        };
+        const activePage = await syncPerformanceTelemetry.measureAsync(
+            'sync.sessions.snapshot.fetchPage',
+            activePageFields,
+            async () => fetchSessionListPageCompat({
+                request,
+                token: credentials.token,
+                sessionListPath: '/v2/sessions/active',
+                cursor: null,
+                limit: 500,
+                telemetryFields: activePageFields,
+            }),
+        );
+        // A server that does not merge the family still owes the snapshot the same rows in the same
+        // order it had when this call led the sequence: active rows first, winning the de-dupe
+        // against the cursor page.
+        const pageRows = sessions.slice();
+        sessions.length = 0;
+        seenSessionIds.clear();
+        appendRows(activePage.sessions);
+        appendRows(pageRows);
     }
 
     const sessionsNeedingEncryption = sessions.filter((session) => session.encryptionMode !== 'plain');
@@ -1802,7 +1823,16 @@ export async function fetchAndApplySessions(params: {
 
             if (params.awaitSessionListHydration === true) {
                 void hydrationPromise.catch(logBackgroundHydrationError);
-                const hydratedSessions = await syncPerformanceTelemetry.measureAsync(
+                // The gate's contract is "every required row reached a terminal state", which
+                // `requiredHydrationPromise` already enforces: it resolves only once
+                // `pendingRequiredHydrationIds` is empty, and a genuine hydration error rejects it
+                // through `rejectRequiredHydration`. A required row that decrypted to nothing or was
+                // superseded by newer list state has a terminal disposition that was already applied
+                // (unavailable / stale renderable patches), so the refresh completed. Treating those
+                // as a failed refresh made the caller's `refreshedByCatchUp.sessions` stay false and
+                // the resume tail repeat the entire session-list refresh — the second foreground
+                // catch-up wave measured on device.
+                await syncPerformanceTelemetry.measureAsync(
                     'sync.sessions.snapshot.requiredHydration.wait',
                     {
                         requiredRows: requiredRowsNeedingHydration.length,
@@ -1812,17 +1842,6 @@ export async function fetchAndApplySessions(params: {
                 );
                 if (!shouldContinue()) {
                     return buildFetchResult();
-                }
-                if (requiredRowsNeedingHydration.length > 0) {
-                    const hydratedSessionIds = new Set(
-                        hydratedSessions
-                            .filter((session): session is HydratedSession => Boolean(session))
-                            .map((session) => session.id),
-                    );
-                    const missingRequiredHydration = requiredRowsNeedingHydration.find((row) => !hydratedSessionIds.has(row.id));
-                    if (missingRequiredHydration) {
-                        throw new Error(`Required session hydration failed for ${missingRequiredHydration.id}`);
-                    }
                 }
             } else {
                 void hydrationPromise.catch(logBackgroundHydrationError);

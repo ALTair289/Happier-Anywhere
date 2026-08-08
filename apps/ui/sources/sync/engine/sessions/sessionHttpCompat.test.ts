@@ -80,6 +80,66 @@ describe('fetchSessionListPageCompat', () => {
         }));
     });
 
+    it('still falls back to /v1/sessions when the initial page carries row-family query flags', async () => {
+        // The initial page asks for extra row families through the query string. A server without
+        // /v2/sessions at all must still be recognised: route identity is the path, not the query.
+        const request = vi.fn(async (path: string) => {
+            if (path.startsWith('/v2/sessions?')) {
+                return jsonResponse({ error: 'Not found', path: '/v2/sessions' }, 404);
+            }
+            if (path === '/v1/sessions') {
+                return jsonResponse({ sessions: [rawSessionRow()] });
+            }
+            throw new Error(`Unexpected request path: ${path}`);
+        });
+
+        const page = await fetchSessionListPageCompat({
+            request,
+            token: 'token',
+            sessionListPath: '/v2/sessions?includeActive=true&includeAttention=true',
+            limit: 50,
+        });
+
+        expect(page.source).toBe('v1');
+        expect(page.includedActiveRows).toBe(false);
+    });
+
+    it('does not divert a sibling /v2/sessions/... route to the legacy list', async () => {
+        const requestedPaths: string[] = [];
+        const request = vi.fn(async (path: string) => {
+            requestedPaths.push(path);
+            return jsonResponse({ error: 'Not found', path: '/v2/sessions/active' }, 404);
+        });
+
+        await expect(fetchSessionListPageCompat({
+            request,
+            token: 'token',
+            sessionListPath: '/v2/sessions/active',
+            limit: 500,
+        })).rejects.toThrow();
+        expect(requestedPaths).toEqual(['/v2/sessions/active?limit=500']);
+    });
+
+    it('reports the merged active-row family only when the server advertises it', async () => {
+        const advertising = vi.fn(async () => jsonResponse({
+            includedActive: true,
+            sessions: [rawSessionRow()],
+            nextCursor: null,
+            hasNext: false,
+        }));
+        const silent = vi.fn(async () => jsonResponse({
+            sessions: [rawSessionRow()],
+            nextCursor: null,
+            hasNext: false,
+        }));
+
+        const advertised = await fetchSessionListPageCompat({ request: advertising, token: 'token', limit: 50 });
+        const unadvertised = await fetchSessionListPageCompat({ request: silent, token: 'token', limit: 50 });
+
+        expect(advertised.includedActiveRows).toBe(true);
+        expect(unadvertised.includedActiveRows).toBe(false);
+    });
+
 });
 
 describe('session record coercion carries the server-materialized unread entry fact', () => {

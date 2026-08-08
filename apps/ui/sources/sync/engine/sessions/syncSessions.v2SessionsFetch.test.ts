@@ -32,6 +32,8 @@ vi.mock('@/sync/domains/server/serverRuntime', () => ({
     }),
 }));
 
+const MERGED_INITIAL_PAGE_PATH = '/v2/sessions?includeActive=true&includeAttention=true&limit=50';
+
 type SessionRow = V2SessionRecord;
 type FetchAndApplySessionsParams = Parameters<typeof fetchAndApplySessions>[0];
 type TestNativeCryptoWorker = NonNullable<Parameters<Encryption['configureNativeCryptoWorker']>[0]['worker']>;
@@ -486,7 +488,75 @@ describe('fetchAndApplySessions (/v2/sessions snapshot)', () => {
         ]);
     });
 
-    it('attributes active-row and list-page request timings separately', async () => {
+    it('issues one page request when the server merges the active rows', async () => {
+        const requestSpy = vi.fn(async (path: string) => {
+            if (path === MERGED_INITIAL_PAGE_PATH) {
+                return jsonResponse({
+                    includedActive: true,
+                    sessions: [
+                        buildSessionRow({ id: 's_active', encryptionMode: 'plain' }),
+                        buildSessionRow({ id: 's_page', encryptionMode: 'plain' }),
+                    ],
+                    nextCursor: null,
+                    hasNext: false,
+                });
+            }
+            throw new Error(`Unexpected path ${path}`);
+        });
+        const { encryption } = createEncryptionHarness();
+
+        const result = await fetchAndApplySessions({
+            credentials: { token: 't', secret: 's' } as AuthCredentials,
+            encryption,
+            sessionDataKeys: new Map<string, Uint8Array>(),
+            request: requestSpy,
+            includeActiveSessionRows: true,
+            includeSessionListAttentionRows: true,
+            applySessions: vi.fn(),
+            repairInvalidReadStateV1: async () => {},
+            log: { log: () => {} },
+        });
+
+        expect(requestSpy.mock.calls.map((call) => call[0])).toEqual([MERGED_INITIAL_PAGE_PATH]);
+        expect(result.sessionIds).toEqual(['s_active', 's_page']);
+    });
+
+    it('falls back to the standalone active endpoint when the server does not merge the active rows', async () => {
+        const activeRow = buildSessionRow({ id: 's_active', encryptionMode: 'plain' });
+        const pageRow = buildSessionRow({ id: 's_page', encryptionMode: 'plain' });
+        const requestSpy = vi.fn(async (path: string) => {
+            if (path === MERGED_INITIAL_PAGE_PATH) {
+                // No `includedActive` marker: an older server silently ignores the query flag.
+                return jsonResponse({ sessions: [pageRow, activeRow], nextCursor: null, hasNext: false });
+            }
+            if (path === '/v2/sessions/active?limit=500') {
+                return jsonResponse({ sessions: [activeRow], nextCursor: null, hasNext: false });
+            }
+            throw new Error(`Unexpected path ${path}`);
+        });
+        const { encryption } = createEncryptionHarness();
+
+        const result = await fetchAndApplySessions({
+            credentials: { token: 't', secret: 's' } as AuthCredentials,
+            encryption,
+            sessionDataKeys: new Map<string, Uint8Array>(),
+            request: requestSpy,
+            includeActiveSessionRows: true,
+            includeSessionListAttentionRows: true,
+            applySessions: vi.fn(),
+            repairInvalidReadStateV1: async () => {},
+            log: { log: () => {} },
+        });
+
+        expect(requestSpy.mock.calls.map((call) => call[0])).toEqual([
+            MERGED_INITIAL_PAGE_PATH,
+            '/v2/sessions/active?limit=500',
+        ]);
+        // Pre-merge ordering contract: active rows lead the snapshot and win the de-dupe.
+        expect(result.sessionIds).toEqual(['s_active', 's_page']);
+    });
+
+    it('attributes active-row and list-page request timings separately on the fallback path', async () => {
         const requestSpy = vi.fn(async (path: string) => {
             if (path === '/v2/sessions/active?limit=500') {
                 return jsonResponse({
@@ -495,7 +565,7 @@ describe('fetchAndApplySessions (/v2/sessions snapshot)', () => {
                     hasNext: false,
                 });
             }
-            if (path === '/v2/sessions?includeAttention=true&limit=50') {
+            if (path === MERGED_INITIAL_PAGE_PATH) {
                 return jsonResponse({
                     sessions: [buildSessionRow({ id: 's_page', encryptionMode: 'plain' })],
                     nextCursor: null,
@@ -525,8 +595,8 @@ describe('fetchAndApplySessions (/v2/sessions snapshot)', () => {
         });
 
         expect(requestSpy.mock.calls.map((call) => call[0])).toEqual([
+            MERGED_INITIAL_PAGE_PATH,
             '/v2/sessions/active?limit=500',
-            '/v2/sessions?includeAttention=true&limit=50',
         ]);
         const requestEvent = syncPerformanceTelemetry.snapshot().events.find(
             (event) => event.name === 'sync.sessions.snapshot.fetchPage.request',
@@ -4913,5 +4983,67 @@ describe('fetchAndApplySessions (/v2/sessions snapshot)', () => {
         expect(requestSpy).toHaveBeenCalledTimes(1);
         expect(fetchSpy).not.toHaveBeenCalled();
         expect(appliedSessions.map((session) => session.id)).toEqual(['s1']);
+    });
+
+    it('completes a required-row wait when a newer update supersedes the required row mid-hydration', async () => {
+        // The required-row gate exists so a caller that names `requiredHydrationSessionIds` never
+        // observes a half-applied list. A row that is superseded by strictly newer state while it
+        // decrypted has a terminal, already-applied disposition (the stale patch below), so the
+        // refresh completed. Reporting it as a failed refresh made the resume tail repeat the whole
+        // session-list refresh — the second foreground catch-up wave measured on device.
+        const requestSpy = vi.fn(async () =>
+            jsonResponse({
+                sessions: [
+                    buildSessionRow({
+                        id: 's_superseded',
+                        dataEncryptionKey: 'k-superseded',
+                        metadata: 'meta-superseded',
+                        metadataVersion: 2,
+                        seq: 2,
+                        updatedAt: 2,
+                    }),
+                ],
+                nextCursor: null,
+                hasNext: false,
+            }),
+        );
+
+        const { encryption, decryptMetadata } = createEncryptionHarness();
+        let currentRenderables: Record<string, SessionListRenderableSession> = {};
+        const applySessionListRenderables = vi.fn((sessions: SessionListRenderableSession[]) => {
+            currentRenderables = Object.fromEntries(sessions.map((session) => [session.id, session]));
+        });
+        const applySessionListRenderablePatches = vi.fn();
+        // A socket update for the same session lands while the required row is still decrypting.
+        decryptMetadata.mockImplementation(async (_version: number, encrypted: string) => {
+            currentRenderables.s_superseded = {
+                ...currentRenderables.s_superseded,
+                seq: 9,
+                updatedAt: 9,
+                metadataVersion: 9,
+            } as SessionListRenderableSession;
+            return { decrypted: encrypted };
+        });
+        const applySessions = vi.fn();
+
+        const result = await fetchAndApplySessions({
+            credentials: { token: 't', secret: 's' },
+            encryption,
+            sessionDataKeys: new Map<string, Uint8Array>(),
+            request: requestSpy,
+            applySessions,
+            applySessionListRenderables,
+            applySessionListRenderablePatches,
+            getCurrentSessionListRenderable: (sessionId) => currentRenderables[sessionId],
+            cachedSessionListEntries: {},
+            awaitSessionListHydration: true,
+            requiredHydrationSessionIds: ['s_superseded'],
+            repairInvalidReadStateV1: async () => {},
+            log: { log: () => {} },
+        });
+
+        expect(result.sessionIds).toEqual(['s_superseded']);
+        // The superseded row is not re-applied over the newer state that overtook it.
+        expect(applySessions).not.toHaveBeenCalled();
     });
 });
