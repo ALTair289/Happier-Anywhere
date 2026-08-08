@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { deriveActivityAttentionFlags } from '@/activity/attention/activityAttentionSessions';
 import { createStorageStoreMock } from '@/dev/testkit/mocks/storage';
 import { registerStorageStateReader } from '@/sync/domains/state/storageStateReaderBridge';
 import type { Message } from '@/sync/domains/messages/messageTypes';
@@ -750,5 +751,56 @@ describe('createLocalActivityBadgeSnapshotSelector', () => {
         expect(first.count).toBe(1);
         expect(second).not.toBe(first);
         expect(second.count).toBe(0);
+    });
+
+    it('counts a session once even when several attention reasons are active at the same time', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(1_000_000);
+        const selector = createLocalActivityBadgeSnapshotSelector({
+            badgesEnabled: true,
+            friendRequestCount: 2,
+            hasNonNumericInboxAttention: false,
+            sessionOptions: {
+                showPendingPermissionRequests: true,
+                showPendingUserActionRequests: true,
+                showUnread: true,
+            },
+        });
+        const renderable = createRenderable({
+            id: 'session1',
+            active: true,
+            activeAt: 1_000_000,
+            presence: 'online',
+            latestTurnStatus: 'in_progress',
+            latestTurnStatusObservedAt: 1_000_000,
+            hasUnreadMessages: true,
+            hasPendingPermissionRequests: true,
+            hasPendingUserActionRequests: true,
+            pendingRequestObservedAt: 1_000_000,
+            pendingBlockedCount: 1,
+        });
+
+        // Guard the fixture: "counts once" is vacuous unless several distinct
+        // attention reasons really are live on this single session.
+        expect(deriveActivityAttentionFlags(renderable, {
+            showPendingPermissionRequests: true,
+            showPendingUserActionRequests: true,
+            showUnread: true,
+            sessionMessagesById: {},
+            nowMs: 1_000_000,
+        })).toMatchObject({
+            hasUnread: true,
+            hasPendingPermissionRequests: true,
+            hasPendingUserActionRequests: true,
+            hasBlockedPendingDelivery: true,
+        });
+
+        const snapshot = selector(createStorageState({
+            sessionListRenderables: { session1: renderable },
+        }));
+
+        // One session contributes exactly 1, never one per reason; the other 2
+        // are the friend requests.
+        expect(snapshot.count).toBe(3);
     });
 });

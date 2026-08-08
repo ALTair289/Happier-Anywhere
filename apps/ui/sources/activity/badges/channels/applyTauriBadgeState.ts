@@ -1,6 +1,6 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
-import type { ActivityBadgeState } from '../buildActivityBadgeState';
+import type { ActivityBadgeState } from '../activityBadgeState';
 
 let pendingState: ActivityBadgeState | null = null;
 let drainPromise: Promise<void> | null = null;

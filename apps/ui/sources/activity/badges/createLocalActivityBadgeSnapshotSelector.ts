@@ -16,7 +16,6 @@ import {
     isBeforeFreshnessBoundary,
 } from '@/activity/attention/sessionAttentionSignatureLedger';
 
-import { buildActivityBadgeState } from './buildActivityBadgeState';
 
 export type ActivityBadgeSessionOptions = Readonly<{
     showUnread: boolean;
@@ -185,6 +184,10 @@ export function createLocalActivityBadgeSnapshotSelector(
     const sessionFreshnessLedger = createSessionRuntimeFreshnessLedger();
     const renderableFreshnessLedger = createRenderableRuntimeFreshnessLedger();
     const attentionBySessionId = new Map<string, boolean>();
+    // Whether `attentionBySessionId` holds every session. Only a full derivation
+    // establishes that; until it has run once, an incremental update would be
+    // applied to an empty cache and undercount.
+    let hasSeededAttentionCache = false;
     let sessionAttentionCount = 0;
     let previousDeltaRevision: number | null = null;
     let previousSignature: string | null = null;
@@ -194,6 +197,19 @@ export function createLocalActivityBadgeSnapshotSelector(
     // The selector is the badge's subscription: React re-renders only when this
     // returns a different object. An evaluation that reaches the same badge values
     // must therefore return the *same* snapshot instance, not an equal one.
+    // Every input that can move one session's attention is covered by exactly one
+    // ledger, so the union of their change sets is the complete set of sessions
+    // whose contribution can have moved this wave.
+    const collectLedgerChangedSessionIds = (): readonly string[] => {
+        const ids = new Set<string>();
+        for (const id of sessionLedger.readChangedIds()) ids.add(id);
+        for (const id of renderableLedger.readChangedIds()) ids.add(id);
+        for (const id of sessionMessagesLedger.readChangedIds()) ids.add(id);
+        for (const id of sessionFreshnessLedger.readChangedIds()) ids.add(id);
+        for (const id of renderableFreshnessLedger.readChangedIds()) ids.add(id);
+        return [...ids];
+    };
+
     const commitSnapshot = (next: LocalActivityBadgeSnapshot): LocalActivityBadgeSnapshot => {
         if (previousSnapshot !== null && isSameBadgeSnapshot(previousSnapshot, next)) {
             return previousSnapshot;
@@ -206,6 +222,7 @@ export function createLocalActivityBadgeSnapshotSelector(
         state: StorageState,
         nowMs: number,
     ): number => {
+        hasSeededAttentionCache = true;
         attentionBySessionId.clear();
         let count = 0;
         const badgeSessions = resolveActivityAttentionSessionsFromRecords({
@@ -309,6 +326,7 @@ export function createLocalActivityBadgeSnapshotSelector(
             || params.hasNonNumericInboxAttention === true;
         const canApplyDelta = params.badgesEnabled
             && isFreshnessStable
+            && hasSeededAttentionCache
             && previousSnapshot
             && delta
             && previousDeltaRevision !== null
@@ -378,29 +396,23 @@ export function createLocalActivityBadgeSnapshotSelector(
             });
         }
 
-        const badgeSessions = resolveActivityAttentionSessionsFromRecords({
-            sessionsById: state.sessions,
-            sessionRowsById: state.sessionListRenderables,
-        });
-        const badgeState = buildActivityBadgeState({
-            sessions: badgeSessions,
-            numericInboxCount: params.friendRequestCount,
-            hasNonNumericInboxAttention: params.hasNonNumericInboxAttention,
-            sessionOptions: {
-                ...params.sessionOptions,
-                sessionMessagesById: state.sessionMessages,
-                nowMs,
-            },
-        });
+        // The ledgers just told us exactly which sessions moved, so only the very
+        // first evaluation has to derive the whole account.
+        const sessionAttentionCountForWave = hasSeededAttentionCache
+            ? applyAttentionDelta(state, collectLedgerChangedSessionIds(), [], nowMs)
+            : rebuildAttentionCache(state, nowMs);
+        const count = Math.max(
+            0,
+            sessionAttentionCountForWave + Math.max(0, Math.trunc(params.friendRequestCount)),
+        );
 
         previousSignature = snapshotSignature;
         previousDeltaRevision = deltaRevision;
-        rebuildAttentionCache(state, nowMs);
         return commitSnapshot({
-            count: badgeState.count,
+            count,
             hasLocalBadgeSource,
             isDataReady: state.isDataReady,
-            showNonNumericDot: badgeState.showNonNumericDot,
+            showNonNumericDot: count === 0 && params.hasNonNumericInboxAttention,
         });
     };
 }

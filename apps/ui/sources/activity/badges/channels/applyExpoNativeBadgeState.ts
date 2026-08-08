@@ -1,4 +1,4 @@
-import type { ActivityBadgeState } from '../buildActivityBadgeState';
+import type { ActivityBadgeState } from '../activityBadgeState';
 import { loadExpoNotifications } from '@/utils/platform/loadExpoNotifications';
 import { withTimeout } from '@/utils/timing/time';
 
