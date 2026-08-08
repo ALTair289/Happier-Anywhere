@@ -148,6 +148,20 @@ describe('ConnectedServiceOauthPasteView', () => {
     });
   });
 
+  it('renders the callback field in the canonical keyboard-aware list', async () => {
+    resetMocks();
+    const { ConnectedServiceOauthPasteView } = await import('./ConnectedServiceOauthPasteView');
+    const { ItemList } = await import('@/components/ui/lists/ItemList');
+
+    const screen = await renderScreen(
+      <ConnectedServiceOauthPasteView serviceId="openai-codex" profileId="work" onDone={() => {}} />,
+    );
+
+    const list = screen.findByType(ItemList);
+    expect(list.props.keyboardAware).toBe(true);
+    expect(list.props.keyboardShouldPersistTaps).toBe('handled');
+  });
+
   it('rejects proxy bundles that claim a different serviceId', async () => {
     resetMocks();
     const { ConnectedServiceOauthPasteView } = await import('./ConnectedServiceOauthPasteView');

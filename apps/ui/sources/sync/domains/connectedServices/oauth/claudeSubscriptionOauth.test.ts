@@ -13,7 +13,10 @@ describe('claudeSubscriptionOauth', () => {
     });
 
     const parsed = new URL(url);
+    expect(parsed.origin).toBe('https://claude.com');
+    expect(parsed.pathname).toBe('/cai/oauth/authorize');
     expect(parsed.searchParams.get('redirect_uri')).toBe('https://platform.claude.com/oauth/code/callback');
     expect(parsed.searchParams.get('scope')).toBe(CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE);
+    expect(parsed.searchParams.get('scope')?.split(' ')).toContain('org:create_api_key');
   });
 });

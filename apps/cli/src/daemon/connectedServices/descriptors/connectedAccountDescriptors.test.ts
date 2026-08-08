@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE } from '@happier-dev/agents';
+
 function buildJwt(payload: Record<string, unknown>): string {
   return [
     'hdr',
@@ -9,13 +11,7 @@ function buildJwt(payload: Record<string, unknown>): string {
 }
 
 describe('connected account descriptors', () => {
-  const claudeCodeScopeString = [
-    'user:inference',
-    'user:profile',
-    'user:sessions:claude_code',
-    'user:mcp_servers',
-    'user:file_upload',
-  ].join(' ');
+  const claudeCodeScopeString = CLAUDE_CODE_RECOMMENDED_OAUTH_SCOPE;
 
   it('describes existing connected service credential families', async () => {
     const mod = await import('./connectedAccountDescriptors').catch(() => null);
@@ -80,6 +76,16 @@ describe('connected account descriptors', () => {
       tokenUrl: 'https://example.test/token',
       refreshTokenBody: 'form',
       scopes: expect.any(Array),
+    });
+  });
+
+  it('uses the current Gemini CLI OAuth credential defaults', async () => {
+    const mod = await import('./connectedAccountDescriptors');
+
+    expect(mod.resolveConnectedAccountOauthConfig('gemini', {})).toMatchObject({
+      clientId: '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
+      clientSecret: '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',
+      tokenUrl: 'https://oauth2.googleapis.com/token',
     });
   });
 

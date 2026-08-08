@@ -1,12 +1,15 @@
+import {
+  GEMINI_CLI_OAUTH_AUTHORIZE_URL,
+  GEMINI_CLI_OAUTH_CALLBACK_URL,
+  GEMINI_CLI_OAUTH_CLIENT_ID,
+  GEMINI_CLI_OAUTH_SCOPES,
+} from '@happier-dev/agents';
+
 export const GEMINI_OAUTH = Object.freeze({
-  clientId: '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
-  authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
-  defaultRedirectUri: 'http://localhost:54545/oauth2callback',
-  scopes: [
-    'https://www.googleapis.com/auth/cloud-platform',
-    'https://www.googleapis.com/auth/userinfo.email',
-    'https://www.googleapis.com/auth/userinfo.profile',
-  ].join(' '),
+  clientId: GEMINI_CLI_OAUTH_CLIENT_ID,
+  authorizeUrl: GEMINI_CLI_OAUTH_AUTHORIZE_URL,
+  defaultRedirectUri: GEMINI_CLI_OAUTH_CALLBACK_URL,
+  scopes: GEMINI_CLI_OAUTH_SCOPES.join(' '),
 });
 
 export function buildGeminiAuthorizationUrl(params: Readonly<{

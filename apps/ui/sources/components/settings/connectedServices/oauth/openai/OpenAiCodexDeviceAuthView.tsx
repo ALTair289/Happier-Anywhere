@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Linking, Pressable, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import tweetnacl from 'tweetnacl';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
 import { Typography } from '@/constants/Typography';
@@ -34,6 +33,7 @@ import { resolveConnectedServiceOauthErrorMessage } from '../resolveConnectedSer
 import { storeConnectedServiceCredentialWithIdentityConfirmation } from '../../storeConnectedServiceCredentialWithIdentityConfirmation';
 import { runConnectedServiceCredentialStoredEffects } from '../../runConnectedServiceCredentialStoredEffects';
 import { Icon } from '@/components/ui/icons/Icon';
+import { createConnectedServiceOauthExchangeKeyPair } from '@/sync/domains/connectedServices/oauth/createConnectedServiceOauthExchangeKeyPair';
 
 function asStringParam(value: unknown): string {
   if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : '';
@@ -64,9 +64,9 @@ export const OpenAiCodexDeviceAuthView = React.memo(function OpenAiCodexDeviceAu
     return auth.credentials;
   };
 
-  const keyPairRef = React.useRef<tweetnacl.BoxKeyPair | null>(null);
+  const keyPairRef = React.useRef<ReturnType<typeof createConnectedServiceOauthExchangeKeyPair> | null>(null);
   if (!keyPairRef.current) {
-    keyPairRef.current = tweetnacl.box.keyPair();
+    keyPairRef.current = createConnectedServiceOauthExchangeKeyPair();
   }
 
   const [deviceAuth, setDeviceAuth] = React.useState<OpenAiCodexDeviceAuthStartResponse | null>(null);

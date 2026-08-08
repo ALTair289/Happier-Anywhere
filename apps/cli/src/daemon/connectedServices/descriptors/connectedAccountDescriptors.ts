@@ -4,7 +4,13 @@ import {
   CLAUDE_CODE_REQUIRED_OAUTH_SCOPES,
   CLAUDE_OAUTH_PROFILE_BETA_HEADER,
   CLAUDE_OAUTH_PROFILE_URL,
+  CLAUDE_OAUTH_CLIENT_ID,
   CLAUDE_OAUTH_TOKEN_URL,
+  GEMINI_CLI_OAUTH_CLIENT_ID,
+  GEMINI_CLI_OAUTH_CLIENT_SECRET,
+  GEMINI_CLI_OAUTH_TOKEN_URL,
+  OPENAI_CODEX_OAUTH_CLIENT_ID,
+  OPENAI_CODEX_OAUTH_TOKEN_URL,
   normalizeClaudeOauthProfileEntitlement,
 } from '@happier-dev/agents';
 import {
@@ -205,9 +211,9 @@ export const CONNECTED_ACCOUNT_DESCRIPTORS = [
     credentialKind: 'oauth',
     oauth: {
       clientIdEnv: 'HAPPIER_CONNECTED_SERVICES_OPENAI_CODEX_OAUTH_CLIENT_ID',
-      defaultClientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
+      defaultClientId: OPENAI_CODEX_OAUTH_CLIENT_ID,
       tokenUrlEnv: 'HAPPIER_CONNECTED_SERVICES_OPENAI_CODEX_OAUTH_TOKEN_URL',
-      defaultTokenUrl: 'https://auth.openai.com/oauth/token',
+      defaultTokenUrl: OPENAI_CODEX_OAUTH_TOKEN_URL,
       refreshTokenBody: 'form',
       scopes: [],
       mapCredentialPayload: ({ now, payload }) => {
@@ -253,7 +259,7 @@ export const CONNECTED_ACCOUNT_DESCRIPTORS = [
     credentialKind: 'oauth',
     oauth: {
       clientIdEnv: 'HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_CLIENT_ID',
-      defaultClientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+      defaultClientId: CLAUDE_OAUTH_CLIENT_ID,
       tokenUrlEnv: 'HAPPIER_CONNECTED_SERVICES_CLAUDE_SUBSCRIPTION_OAUTH_TOKEN_URL',
       defaultTokenUrl: CLAUDE_OAUTH_TOKEN_URL,
       refreshTokenBody: 'json',
@@ -323,11 +329,11 @@ export const CONNECTED_ACCOUNT_DESCRIPTORS = [
     credentialKind: 'oauth',
     oauth: {
       clientIdEnv: 'HAPPIER_CONNECTED_SERVICES_GEMINI_OAUTH_CLIENT_ID',
-      defaultClientId: '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
+      defaultClientId: GEMINI_CLI_OAUTH_CLIENT_ID,
       clientSecretEnv: 'HAPPIER_CONNECTED_SERVICES_GEMINI_OAUTH_CLIENT_SECRET',
-      defaultClientSecret: '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l',
+      defaultClientSecret: GEMINI_CLI_OAUTH_CLIENT_SECRET,
       tokenUrlEnv: 'HAPPIER_CONNECTED_SERVICES_GEMINI_OAUTH_TOKEN_URL',
-      defaultTokenUrl: 'https://oauth2.googleapis.com/token',
+      defaultTokenUrl: GEMINI_CLI_OAUTH_TOKEN_URL,
       refreshTokenBody: 'form',
       scopes: [],
       mapCredentialPayload: ({ now, payload }) => {

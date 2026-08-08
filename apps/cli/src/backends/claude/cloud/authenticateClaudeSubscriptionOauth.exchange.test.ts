@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CLAUDE_OAUTH_AUTHORIZE_URL } from '@happier-dev/agents';
 
 import {
   buildClaudeSubscriptionAuthorizationUrl,
@@ -11,7 +12,7 @@ describe('exchangeClaudeSubscriptionAuthorizationCodeForTokens', () => {
       redirectUri: 'https://platform.claude.com/oauth/code/callback',
       state: 'state',
       challenge: 'challenge',
-    })).toMatch(/^https:\/\/platform\.claude\.com\/oauth\/authorize\?/);
+    })).toMatch(new RegExp(`^${CLAUDE_OAUTH_AUTHORIZE_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\?`));
   });
 
   it('posts JSON to Claude Code current token endpoint', async () => {

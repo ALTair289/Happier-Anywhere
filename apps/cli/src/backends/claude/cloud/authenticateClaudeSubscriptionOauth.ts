@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto';
 
 import {
   CLAUDE_OAUTH_AUTHORIZE_URL,
+  CLAUDE_OAUTH_CALLBACK_URL,
+  CLAUDE_OAUTH_CLIENT_ID,
   CLAUDE_OAUTH_TOKEN_URL,
 } from '@happier-dev/agents';
 
@@ -26,8 +28,6 @@ export type ClaudeSubscriptionOauthTokens = Readonly<{
   };
 }>;
 
-const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback';
 const SCOPE = CLAUDE_SUBSCRIPTION_OAUTH_SCOPE;
 
 function generateState(): string {
@@ -41,7 +41,7 @@ export function buildClaudeSubscriptionAuthorizationUrl(params: Readonly<{
 }>): string {
   const query = new URLSearchParams({
     code: 'true',
-    client_id: CLIENT_ID,
+    client_id: CLAUDE_OAUTH_CLIENT_ID,
     response_type: 'code',
     redirect_uri: params.redirectUri,
     scope: SCOPE,
@@ -67,7 +67,7 @@ export async function exchangeClaudeSubscriptionAuthorizationCodeForTokens(param
       grant_type: 'authorization_code',
       code: params.code,
       redirect_uri: params.redirectUri,
-      client_id: CLIENT_ID,
+      client_id: CLAUDE_OAUTH_CLIENT_ID,
       code_verifier: params.verifier,
       state: params.state,
     }),
@@ -97,7 +97,7 @@ export async function authenticateClaudeSubscriptionOauth(
   const pkce = generatePkceCodes();
   const state = generateState();
   const authorizationUrl = buildClaudeSubscriptionAuthorizationUrl({
-    redirectUri: REDIRECT_URI,
+    redirectUri: CLAUDE_OAUTH_CALLBACK_URL,
     state,
     challenge: pkce.challenge,
   });
@@ -135,7 +135,7 @@ export async function authenticateClaudeSubscriptionOauth(
   return await exchangeClaudeSubscriptionAuthorizationCodeForTokens({
     code: parsed.code,
     verifier: pkce.verifier,
-    redirectUri: REDIRECT_URI,
+    redirectUri: CLAUDE_OAUTH_CALLBACK_URL,
     state,
   });
 }

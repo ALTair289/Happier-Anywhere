@@ -1,12 +1,17 @@
-import { buildSafeOauthProviderFailureMessage } from '@/cloud/safeOauthProviderError';
+import {
+  OPENAI_CODEX_DEVICE_REDIRECT_URI,
+  OPENAI_CODEX_DEVICE_TOKEN_URL,
+  OPENAI_CODEX_DEVICE_USER_CODE_URL,
+  OPENAI_CODEX_DEVICE_VERIFICATION_URL,
+  OPENAI_CODEX_OAUTH_CLIENT_ID,
+} from '@happier-dev/agents';
 
-import type { CodexAuthTokens } from './authenticate';
+import {
+  exchangeCodexAuthorizationGrant,
+  type CodexAuthTokens,
+} from './oauthExchange';
 
-const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
-const ISSUER = 'https://auth.openai.com';
-
-export const OPENAI_CODEX_DEVICE_VERIFICATION_URL = `${ISSUER}/codex/device`;
-export const OPENAI_CODEX_DEVICE_REDIRECT_URI = `${ISSUER}/deviceauth/callback`;
+export { OPENAI_CODEX_DEVICE_REDIRECT_URI, OPENAI_CODEX_DEVICE_VERIFICATION_URL };
 
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3_000;
 
@@ -17,71 +22,19 @@ function assertNonEmptyString(value: unknown, label: string): string {
   return value;
 }
 
-function parseJWT(token: string): any {
-  const parts = token.split('.');
-  if (parts.length !== 3) {
-    throw new Error('Invalid JWT format');
-  }
-
-  const payload = Buffer.from(parts[1], 'base64url').toString();
-  return JSON.parse(payload);
-}
-
-function extractOpenAiAccountIdFromIdToken(idToken: string): string {
-  const idTokenPayload = parseJWT(idToken);
-  let accountId = idTokenPayload.chatgpt_account_id;
-  if (!accountId) {
-    const authClaim = idTokenPayload['https://api.openai.com/auth'];
-    if (authClaim && typeof authClaim === 'object') {
-      accountId = authClaim.chatgpt_account_id || authClaim.account_id;
-    }
-  }
-  return String(accountId ?? '');
-}
-
 async function exchangeDeviceApprovalForTokens(params: Readonly<{
   fetcher: typeof fetch;
   now: number;
   authorizationCode: string;
   codeVerifier: string;
 }>): Promise<CodexAuthTokens> {
-  const response = await params.fetcher(`${ISSUER}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'authorization_code',
-      client_id: CLIENT_ID,
-      code: params.authorizationCode,
-      code_verifier: params.codeVerifier,
-      redirect_uri: OPENAI_CODEX_DEVICE_REDIRECT_URI,
-    }),
+  return await exchangeCodexAuthorizationGrant({
+    fetcher: params.fetcher,
+    now: params.now,
+    code: params.authorizationCode,
+    verifier: params.codeVerifier,
+    redirectUri: OPENAI_CODEX_DEVICE_REDIRECT_URI,
   });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(buildSafeOauthProviderFailureMessage({
-      operation: 'Token exchange',
-      status: response.status,
-      statusText: response.statusText,
-      body,
-    }));
-  }
-
-  const data = (await response.json()) as any;
-  const idToken = assertNonEmptyString(data?.id_token, 'id_token');
-  const refreshToken = assertNonEmptyString(data?.refresh_token, 'refresh_token');
-  const accessToken = typeof data?.access_token === 'string' && data.access_token ? data.access_token : idToken;
-  const expiresIn = typeof data?.expires_in === 'number' ? data.expires_in : undefined;
-  const accountId = extractOpenAiAccountIdFromIdToken(idToken);
-
-  return {
-    id_token: idToken,
-    access_token: accessToken,
-    refresh_token: refreshToken,
-    account_id: accountId,
-    expires_in: expiresIn,
-    expires_at: expiresIn && Number.isFinite(expiresIn) && expiresIn > 0 ? params.now + Math.trunc(expiresIn) * 1000 : null,
-  };
 }
 
 export async function authenticateCodexDevice(params: Readonly<{
@@ -93,10 +46,10 @@ export async function authenticateCodexDevice(params: Readonly<{
   const fetcher = params.fetcher ?? fetch;
   const sleep = params.sleep ?? (async (ms) => await new Promise((r) => setTimeout(r, ms)));
 
-  const usercodeRes = await fetcher(`${ISSUER}/api/accounts/deviceauth/usercode`, {
+  const usercodeRes = await fetcher(OPENAI_CODEX_DEVICE_USER_CODE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: CLIENT_ID }),
+    body: JSON.stringify({ client_id: OPENAI_CODEX_OAUTH_CLIENT_ID }),
   });
   if (!usercodeRes.ok) {
     throw new Error(`Failed to initiate device authorization: ${usercodeRes.status}`);
@@ -110,7 +63,7 @@ export async function authenticateCodexDevice(params: Readonly<{
   params.onUserCode?.({ verificationUrl: OPENAI_CODEX_DEVICE_VERIFICATION_URL, userCode });
 
   while (true) {
-    const pollRes = await fetcher(`${ISSUER}/api/accounts/deviceauth/token`, {
+    const pollRes = await fetcher(OPENAI_CODEX_DEVICE_TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode }),

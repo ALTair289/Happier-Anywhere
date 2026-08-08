@@ -1,8 +1,15 @@
+import {
+  OPENAI_CODEX_OAUTH_AUTHORIZE_URL,
+  OPENAI_CODEX_OAUTH_CALLBACK_URL,
+  OPENAI_CODEX_OAUTH_CLIENT_ID,
+  OPENAI_CODEX_OAUTH_SCOPE,
+} from '@happier-dev/agents';
+
 export const OPENAI_CODEX_OAUTH = Object.freeze({
-  clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
-  authBaseUrl: 'https://auth.openai.com',
-  defaultRedirectUri: 'http://localhost:1455/auth/callback',
-  scope: 'openid profile email offline_access',
+  clientId: OPENAI_CODEX_OAUTH_CLIENT_ID,
+  authorizeUrl: OPENAI_CODEX_OAUTH_AUTHORIZE_URL,
+  defaultRedirectUri: OPENAI_CODEX_OAUTH_CALLBACK_URL,
+  scope: OPENAI_CODEX_OAUTH_SCOPE,
 });
 
 export function buildOpenAiCodexAuthorizationUrl(params: Readonly<{
@@ -21,5 +28,5 @@ export function buildOpenAiCodexAuthorizationUrl(params: Readonly<{
     codex_cli_simplified_flow: 'true',
     state: params.state,
   });
-  return `${OPENAI_CODEX_OAUTH.authBaseUrl}/oauth/authorize?${query.toString()}`;
+  return `${OPENAI_CODEX_OAUTH.authorizeUrl}?${query.toString()}`;
 }

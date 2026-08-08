@@ -1,7 +1,5 @@
 import type { AuthCredentials } from '@/auth/storage/tokenStorage';
 
-import tweetnacl from 'tweetnacl';
-
 import {
   buildConnectedServiceCredentialRecord,
   encodeBase64,
@@ -12,6 +10,7 @@ import {
 import { exchangeConnectedServiceOauthViaProxy } from '@/sync/api/account/apiConnectedServicesV2';
 
 import { buildOauthRecordFromProxyPayload, parseConnectedServiceOauthProxyBundle } from './connectedServiceOauthProxyBundle';
+import { createConnectedServiceOauthExchangeKeyPair } from './createConnectedServiceOauthExchangeKeyPair';
 
 import { buildClaudeSubscriptionAuthorizationUrl, CLAUDE_SUBSCRIPTION_OAUTH } from './claudeSubscriptionOauth';
 import { buildGeminiAuthorizationUrl, GEMINI_OAUTH } from './geminiOauth';
@@ -49,7 +48,7 @@ async function exchangeOauthViaProxy(params: Readonly<{
   state: string;
   now: number;
 }>): Promise<Extract<ConnectedServiceCredentialRecordV1, { kind: 'oauth' }>> {
-  const keyPair = tweetnacl.box.keyPair();
+  const keyPair = createConnectedServiceOauthExchangeKeyPair();
   const publicKeyB64Url = encodeBase64(keyPair.publicKey, 'base64url');
   const exchanged = await exchangeConnectedServiceOauthViaProxy(params.credentials, {
     serviceId: params.serviceId,

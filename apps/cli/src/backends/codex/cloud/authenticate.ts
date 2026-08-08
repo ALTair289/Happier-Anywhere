@@ -6,28 +6,27 @@
  */
 
 import { randomBytes } from 'crypto';
+import {
+  OPENAI_CODEX_OAUTH_AUTHORIZE_URL,
+  OPENAI_CODEX_OAUTH_CLIENT_ID,
+  OPENAI_CODEX_OAUTH_SCOPE,
+} from '@happier-dev/agents';
 import { openBrowser } from '@/ui/openBrowser';
 import { generatePkceCodes } from '@/cloud/pkce';
 import type { CloudConnectAuthenticateOptions } from '@/cloud/connectTypes';
 import { startOauthPkceWithPasteFallback } from '@/cloud/oauthPkceWithPasteFallback';
-import { buildSafeOauthProviderFailureMessage } from '@/cloud/safeOauthProviderError';
 import { promptInput } from '@/terminal/prompts/promptInput';
 
 import { createCodexCloudAuthenticator } from './createCodexCloudAuthenticator';
 import { authenticateCodexDevice, OPENAI_CODEX_DEVICE_VERIFICATION_URL } from './deviceAuth';
+import {
+  exchangeCodexAuthorizationGrant,
+  type CodexAuthTokens,
+} from './oauthExchange';
 
-export interface CodexAuthTokens {
-    id_token: string;
-    access_token: string;
-    refresh_token: string;
-    account_id: string;
-    expires_in?: number;
-    expires_at?: number | null;
-}
+export type { CodexAuthTokens } from './oauthExchange';
 
 // Configuration
-const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
-const AUTH_BASE_URL = 'https://auth.openai.com';
 const DEFAULT_PORT = 1455;
 
 /**
@@ -38,19 +37,6 @@ function generateState(): string {
 }
 
 /**
- * Parse JWT token to extract payload
- */
-function parseJWT(token: string): any {
-    const parts = token.split('.');
-    if (parts.length !== 3) {
-        throw new Error('Invalid JWT format');
-    }
-
-    const payload = Buffer.from(parts[1], 'base64url').toString();
-    return JSON.parse(payload);
-}
-
-/**
  * Exchange authorization code for tokens
  */
 async function exchangeCodeForTokens(
@@ -58,54 +44,12 @@ async function exchangeCodeForTokens(
     verifier: string,
     port: number
 ): Promise<CodexAuthTokens> {
-    const response = await fetch(`${AUTH_BASE_URL}/oauth/token`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-            grant_type: 'authorization_code',
-            client_id: CLIENT_ID,
-            code: code,
-            code_verifier: verifier,
-            redirect_uri: `http://localhost:${port}/auth/callback`,
-        }),
+    return await exchangeCodexAuthorizationGrant({
+      code,
+      verifier,
+      redirectUri: `http://localhost:${port}/auth/callback`,
+      now: Date.now(),
     });
-
-    if (!response.ok) {
-        const body = await response.text().catch(() => '');
-        throw new Error(buildSafeOauthProviderFailureMessage({
-            operation: 'Token exchange',
-            status: response.status,
-            statusText: response.statusText,
-            body,
-        }));
-    }
-
-    const data = (await response.json() as any);
-
-    // Parse ID token to get account ID
-    const idTokenPayload = parseJWT(data.id_token);
-
-    // The account ID is stored at chatgpt_account_id in the payload
-    let accountId = idTokenPayload.chatgpt_account_id;
-
-    // Check nested location
-    if (!accountId) {
-        const authClaim = idTokenPayload['https://api.openai.com/auth'];
-        if (authClaim && typeof authClaim === 'object') {
-            accountId = authClaim.chatgpt_account_id || authClaim.account_id;
-        }
-    }
-
-    return {
-        id_token: data.id_token,
-        access_token: data.access_token || data.id_token,
-        refresh_token: data.refresh_token,
-        account_id: accountId,
-        expires_in: typeof data.expires_in === 'number' ? data.expires_in : undefined,
-        expires_at: null,
-    };
 }
 
 export async function exchangeCodexAuthorizationCodeForTokens(params: Readonly<{
@@ -122,7 +66,12 @@ export async function exchangeCodexAuthorizationCodeForTokens(params: Readonly<{
 }>> {
   const redirectUrl = new URL(params.redirectUri);
   const port = Number.parseInt(redirectUrl.port || '80', 10);
-  const tokens = await exchangeCodeForTokens(params.code, params.verifier, port);
+  const tokens = await exchangeCodexAuthorizationGrant({
+    code: params.code,
+    verifier: params.verifier,
+    redirectUri: params.redirectUri,
+    now: params.now,
+  });
 
   const expiresAt = typeof tokens.expires_in === 'number' && Number.isFinite(tokens.expires_in) && tokens.expires_in > 0
     ? params.now + Math.trunc(tokens.expires_in) * 1000
@@ -205,9 +154,9 @@ export async function authenticateCodex(opts?: CloudConnectAuthenticateOptions):
       buildAuthorizationUrl: ({ redirectUri, state, challenge }) => {
         const params = [
           ['response_type', 'code'],
-          ['client_id', CLIENT_ID],
+          ['client_id', OPENAI_CODEX_OAUTH_CLIENT_ID],
           ['redirect_uri', redirectUri],
-          ['scope', 'openid profile email offline_access'],
+          ['scope', OPENAI_CODEX_OAUTH_SCOPE],
           ['code_challenge', challenge],
           ['code_challenge_method', 'S256'],
           ['id_token_add_organizations', 'true'],
@@ -215,7 +164,7 @@ export async function authenticateCodex(opts?: CloudConnectAuthenticateOptions):
           ['state', state],
         ];
         const queryString = params.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
-        return `${AUTH_BASE_URL}/oauth/authorize?${queryString}`;
+        return `${OPENAI_CODEX_OAUTH_AUTHORIZE_URL}?${queryString}`;
       },
       onAuthorizationUrl: ({ authorizationUrl }) => {
         console.log('\nOpen this URL in a browser to authenticate:\n');

@@ -6,6 +6,10 @@
  */
 
 import { randomBytes } from 'crypto';
+import {
+    GEMINI_CLI_OAUTH_AUTHORIZE_URL,
+    GEMINI_CLI_OAUTH_SCOPES,
+} from '@happier-dev/agents';
 import { generatePkceCodes } from '@/cloud/pkce';
 import { buildSafeOauthProviderFailureMessage } from '@/cloud/safeOauthProviderError';
 import { openBrowser } from '@/ui/openBrowser';
@@ -24,13 +28,8 @@ export interface GeminiAuthTokens {
 }
 
 // Google OAuth Configuration for Gemini
-const AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const DEFAULT_PORT = 54545;
-const SCOPES = [
-    'https://www.googleapis.com/auth/cloud-platform',
-    'https://www.googleapis.com/auth/userinfo.email',
-    'https://www.googleapis.com/auth/userinfo.profile',
-].join(' ');
+const SCOPES = GEMINI_CLI_OAUTH_SCOPES.join(' ');
 
 export async function exchangeGeminiAuthorizationCodeForTokens(params: Readonly<{
     code: string;
@@ -138,7 +137,7 @@ export async function authenticateGemini(opts?: CloudConnectAuthenticateOptions)
                     state,
                     prompt: 'consent', // Force consent to get refresh token
                 });
-                return `${AUTHORIZE_URL}?${params}`;
+                return `${GEMINI_CLI_OAUTH_AUTHORIZE_URL}?${params}`;
             },
             onAuthorizationUrl: ({ authorizationUrl }) => {
                 console.log('\nOpen this URL in a browser to authenticate:\n');

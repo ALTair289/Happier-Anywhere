@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import tweetnacl from 'tweetnacl';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 import { RoundButton } from '@/components/ui/buttons/RoundButton';
@@ -29,6 +28,7 @@ import { resolveConnectedServiceOauthErrorMessage } from './oauth/resolveConnect
 import { storeConnectedServiceCredentialWithIdentityConfirmation } from './storeConnectedServiceCredentialWithIdentityConfirmation';
 import { runConnectedServiceCredentialStoredEffects } from './runConnectedServiceCredentialStoredEffects';
 import { Icon } from '@/components/ui/icons/Icon';
+import { createConnectedServiceOauthExchangeKeyPair } from '@/sync/domains/connectedServices/oauth/createConnectedServiceOauthExchangeKeyPair';
 
 function asStringParam(value: unknown): string {
   if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : '';
@@ -54,9 +54,9 @@ export const ConnectedServiceOauthPasteView = React.memo(function ConnectedServi
   const [busy, setBusy] = React.useState(false);
   const [redirectUrlInput, setRedirectUrlInput] = React.useState('');
   const [didShowOpenInstructions, setDidShowOpenInstructions] = React.useState(false);
-  const keyPairRef = React.useRef<tweetnacl.BoxKeyPair | null>(null);
+  const keyPairRef = React.useRef<ReturnType<typeof createConnectedServiceOauthExchangeKeyPair> | null>(null);
   if (!keyPairRef.current) {
-    keyPairRef.current = tweetnacl.box.keyPair();
+    keyPairRef.current = createConnectedServiceOauthExchangeKeyPair();
   }
 
   React.useEffect(() => {
@@ -190,7 +190,7 @@ export const ConnectedServiceOauthPasteView = React.memo(function ConnectedServi
   }
 
   return (
-    <ItemList>
+    <ItemList keyboardAware keyboardShouldPersistTaps="handled">
       <ItemGroup title={t('connectedServices.oauthPaste.connectWebGroupTitle')}>
         <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
           <Text style={{ color: theme.colors.text.secondary }}>
