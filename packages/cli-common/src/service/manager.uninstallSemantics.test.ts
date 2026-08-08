@@ -15,7 +15,6 @@ describe('service uninstall semantics', () => {
   it.each([
     ['systemd-user', 'systemctl', ['--user', 'disable', '--now', 'dev.happier.stack.exp.service']],
     ['launchd-user', 'launchctl', ['bootout', 'gui/501/dev.happier.stack.exp']],
-    ['schtasks-user', 'schtasks', ['/End', '/TN', 'Happier\\dev.happier.stack.exp']],
   ] as const)('plans %s teardown as fail-closed before definition removal', (backend, command, args) => {
     const definitionPath = '/tmp/dev.happier.stack.exp.service';
     const plan = planServiceAction({
@@ -39,14 +38,28 @@ describe('service uninstall semantics', () => {
     }
   });
 
+  it('plans Windows teardown through typed scheduler commands before definition removal', () => {
+    const plan = planServiceAction({
+      backend: 'schtasks-user',
+      action: 'uninstall',
+      label: 'dev.happier.stack.exp',
+      definitionPath: 'C:\\Users\\test\\.happier\\services\\dev.happier.stack.exp.ps1',
+      taskName: 'Happier\\dev.happier.stack.exp',
+    });
+
+    expect(plan.commands).toHaveLength(2);
+    expect(plan.commands.every((command) => command.cmd === 'powershell.exe')).toBe(true);
+    expect(plan.commands[0]?.args.at(-1)).toContain('Stop-ScheduledTask');
+    expect(plan.commands[1]?.args.at(-1)).toContain('Unregister-ScheduledTask');
+    expect(plan.commands.every((command) => command.allowFail !== true)).toBe(true);
+  });
+
   it.each([
     ['systemctl', ['--user', 'disable', '--now', 'x.service'], 'Unit x.service does not exist.'],
     ['systemctl', ['show', 'x.service', '--property=LoadState', '--value'], 'Unit x.service could not be found.'],
     ['launchctl', ['bootout', 'gui/501', '/tmp/x.plist'], 'Could not find specified service'],
     ['launchctl', ['print', 'gui/501/x'], 'Could not find service "x" in domain'],
     ['launchctl', ['bootout', 'gui/501/dev.happier.stack.x'], 'Boot-out failed: 3: No such process'],
-    ['schtasks', ['/Delete', '/F', '/TN', 'Happier\\x'], 'ERROR: The system cannot find the file specified.'],
-    ['schtasks', ['/Query', '/TN', 'Happier\\x'], 'ERROR: The system cannot find the file specified.'],
   ])('accepts benign already-absent %s failures', (cmd, args, stderr) => {
     expect(isBenignServiceAbsenceFailure({ cmd, args, stderr, stdout: '', status: 1 })).toBe(true);
   });
@@ -69,7 +82,6 @@ describe('service uninstall semantics', () => {
     it.each([
       ['systemctl', ['disable', '--now', 'x.service'], 'Unit x.service does not exist.'],
       ['launchctl', ['bootout', 'gui/501/x'], 'Could not find specified service'],
-      ['schtasks', ['/Delete', '/F', '/TN', 'Happier\\x'], 'ERROR: The system cannot find the file specified.'],
     ])('continues past an already-absent %s service', async (command, args, stderr) => {
       await withFakeServiceCommand(command, stderr, async () => {
         await expect(applyServicePlan({
