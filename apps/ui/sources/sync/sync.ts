@@ -465,6 +465,16 @@ import {
 
 const SESSION_LIST_BACKGROUND_HYDRATION_SCROLL_SETTLE_MS = 180;
 
+/**
+ * How long a successful `/v1/version` answer stays fresh.
+ *
+ * The answer depends on the installed app version and the server's published minimum, neither of
+ * which can change while this process is foregrounded, so a burst of app switches asked the same
+ * question repeatedly. Longer than the 30 s machines window because the fact is far less volatile,
+ * and short enough that an `upgrade-required` transition is still picked up in the same sitting.
+ */
+const NATIVE_UPDATE_CHECK_STALE_MS = 15 * 60_000;
+
 export type SessionViewportSource = 'default' | 'observed';
 
 export type SessionViewportAnchorKind = 'message' | 'toolGroup' | 'item';
@@ -997,6 +1007,7 @@ class Sync {
     private lastRecalculationTime = 0;
 	    private machinesRefreshInFlight: Promise<void> | null = null;
 	    private lastMachinesRefreshAt = 0;
+	    private lastNativeUpdateCheckAt = 0;
 
     private readSocketOfflineDurationMs(): number {
         if (this.lastSocketDisconnectedAtMs != null) {
@@ -4981,6 +4992,14 @@ class Sync {
             if (Platform.OS === 'android' && !Constants.expoConfig?.android?.package) {
                 return;
             }
+            // The released client version cannot change between two foregrounds of the same app
+            // process, so this fired once per foreground for an answer that was already known.
+            // Gated at the owner, like `refreshMachinesThrottled`, so every invalidation path — the
+            // resume tail, bootstrap, and any future caller — inherits it; the stamp advances only
+            // on a successful check so a failed one is retried at the next invalidation.
+            if ((Date.now() - this.lastNativeUpdateCheckAt) < NATIVE_UPDATE_CHECK_STALE_MS) {
+                return;
+            }
 
             // Use the same canonical client identity as HTTP and Socket.IO session sync.
             const declaration = readCurrentUiClientCompatibilityDeclaration();
@@ -5012,6 +5031,7 @@ class Sync {
                 throw new Error('Invalid /v1/version response');
             }
             const data = parsed.data;
+            this.lastNativeUpdateCheckAt = Date.now();
 
             // Apply update status to storage
             if (data.status === 'upgrade-required') {
