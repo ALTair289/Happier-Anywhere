@@ -127,7 +127,7 @@ describe('resolveTranscriptNavigationRailPageScroll', () => {
 });
 
 describe('classifyTranscriptNavigationRailScrollEvent', () => {
-    const command = { lastEventAtMs: 1_000, positionPx: 0, targetPx: 500 } as const;
+    const command = { lastEventAtMs: 1_000, positionPx: 0, targetPx: 500, userInitiated: false } as const;
 
     it('reads a scroll with no outstanding command as the reader moving the rail', () => {
         expect(classifyTranscriptNavigationRailScrollEvent({ atMs: 1_000, command: null, positionPx: 120 }))
@@ -137,7 +137,7 @@ describe('classifyTranscriptNavigationRailScrollEvent', () => {
     it('attributes frames converging on the commanded target to the command and tracks their position', () => {
         const first = classifyTranscriptNavigationRailScrollEvent({ atMs: 1_016, command, positionPx: 120 });
         expect(first.origin).toBe('command');
-        expect(first.command).toEqual({ lastEventAtMs: 1_016, positionPx: 120, targetPx: 500 });
+        expect(first.command).toEqual({ lastEventAtMs: 1_016, positionPx: 120, targetPx: 500, userInitiated: false });
 
         const second = classifyTranscriptNavigationRailScrollEvent({
             atMs: 1_032,
@@ -146,6 +146,21 @@ describe('classifyTranscriptNavigationRailScrollEvent', () => {
         });
         expect(second.origin).toBe('command');
         expect(second.command?.positionPx).toBe(340);
+    });
+
+    it('carries the reader-initiated mark across every frame of the move it belongs to', () => {
+        // The rail decides whether to abandon an in-flight move by reading this
+        // mark off the outstanding command, so losing it mid-approach would make
+        // a reader's own page cancellable again the moment it started.
+        const asked = { lastEventAtMs: 1_000, positionPx: 0, targetPx: 500, userInitiated: true } as const;
+        const first = classifyTranscriptNavigationRailScrollEvent({ atMs: 1_016, command: asked, positionPx: 120 });
+        expect(first.command?.userInitiated).toBe(true);
+        const second = classifyTranscriptNavigationRailScrollEvent({
+            atMs: 1_032,
+            command: first.command,
+            positionPx: 340,
+        });
+        expect(second.command?.userInitiated).toBe(true);
     });
 
     it('ends the command the moment the target lands, so the next event is the reader again', () => {
@@ -170,7 +185,7 @@ describe('classifyTranscriptNavigationRailScrollEvent', () => {
     it('tolerates sub-pixel jitter within a converging approach', () => {
         const jittered = classifyTranscriptNavigationRailScrollEvent({
             atMs: 1_016,
-            command: { lastEventAtMs: 1_000, positionPx: 300, targetPx: 500 },
+            command: { lastEventAtMs: 1_000, positionPx: 300, targetPx: 500, userInitiated: false },
             positionPx: 299.75,
         });
         expect(jittered.origin).toBe('command');

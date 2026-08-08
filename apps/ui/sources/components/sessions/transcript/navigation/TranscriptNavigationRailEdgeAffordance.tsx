@@ -9,11 +9,24 @@ import { t } from '@/text';
 import { resolveTranscriptNavigationRailSoftFadeStyle } from './useTranscriptNavigationRailSoftPresence';
 
 /**
- * Height of the edge band. Deliberately identical to the gradient it carries:
- * the chevron may only sit over markers the fade has already washed out, so
- * revealing it never steals a hit area from a marker the reader can still see.
+ * Height of the gradient that washes out the markers the viewport cuts off. It
+ * paints over the marker column but never accepts the pointer, so it costs no
+ * marker its hit area.
  */
-const EDGE_BAND_HEIGHT_PX = 18;
+const EDGE_FADE_HEIGHT_PX = 18;
+
+/**
+ * Height of the chevron's press lane, which sits ENTIRELY OUTSIDE the marker
+ * column — past the first marker for the top edge, past the last for the
+ * bottom.
+ *
+ * Markers tile the viewport contiguously (a 4px line in a 12px hit area at a
+ * 12px pitch), so a chevron laid over the column does not merely overlap it: it
+ * takes two whole markers per edge, and it takes them exactly when the reader is
+ * hovering the rail to aim at one. The rail is centred in the pane with room to
+ * spare above and below its viewport, so the lane costs the minimap nothing.
+ */
+const CHEVRON_LANE_HEIGHT_PX = 16;
 
 /**
  * How far the chevron travels outward as it appears. Four pixels reads as a
@@ -67,11 +80,16 @@ export function TranscriptNavigationRailEdgeAffordance(props: TranscriptNavigati
             testID={`transcript-navigation-rail.edge.${props.edge}`}
             style={[styles.edge, isTop ? styles.edgeTop : styles.edgeBottom]}
         >
-            <ScrollEdgeFades
-                color={theme.colors.surface.base}
-                edges={isTop ? { top: true } : { bottom: true }}
-                size={EDGE_BAND_HEIGHT_PX}
-            />
+            <View
+                pointerEvents="none"
+                style={[styles.fade, isTop ? styles.fadeTop : styles.fadeBottom]}
+            >
+                <ScrollEdgeFades
+                    color={theme.colors.surface.base}
+                    edges={isTop ? { top: true } : { bottom: true }}
+                    size={EDGE_FADE_HEIGHT_PX}
+                />
+            </View>
             <Pressable
                 accessibilityLabel={isTop
                     ? t('session.transcriptNavigation.railScrollUpA11y')
@@ -82,6 +100,7 @@ export function TranscriptNavigationRailEdgeAffordance(props: TranscriptNavigati
                 testID={`transcript-navigation-rail.chevron.${props.edge}`}
                 style={[
                     styles.chevron,
+                    isTop ? styles.chevronTop : styles.chevronBottom,
                     // A chevron faded to zero must not intercept the pointer,
                     // or an invisible button would eat the edge markers' hover.
                     props.revealed ? null : styles.chevronHidden,
@@ -101,29 +120,51 @@ export function TranscriptNavigationRailEdgeAffordance(props: TranscriptNavigati
 }
 
 const stylesheet = StyleSheet.create(() => ({
+    /**
+     * Spans the press lane plus the gradient, anchored so the lane half falls
+     * outside the marker viewport and the gradient half falls inside it. Never
+     * `overflow: 'hidden'` — the lane is deliberately out of bounds, and
+     * clipping it would put the chevron back over the markers.
+     */
     edge: {
-        height: EDGE_BAND_HEIGHT_PX,
+        height: CHEVRON_LANE_HEIGHT_PX + EDGE_FADE_HEIGHT_PX,
         left: 0,
-        overflow: 'hidden',
         position: 'absolute',
         right: 0,
     },
     edgeTop: {
-        top: 0,
+        top: -CHEVRON_LANE_HEIGHT_PX,
     },
     edgeBottom: {
+        bottom: -CHEVRON_LANE_HEIGHT_PX,
+    },
+    fade: {
+        height: EDGE_FADE_HEIGHT_PX,
+        left: 0,
+        position: 'absolute',
+        right: 0,
+    },
+    fadeTop: {
         bottom: 0,
+    },
+    fadeBottom: {
+        top: 0,
     },
     chevron: {
         alignItems: 'center',
-        bottom: 0,
+        height: CHEVRON_LANE_HEIGHT_PX,
         justifyContent: 'center',
         left: 0,
         position: 'absolute',
         right: 0,
-        top: 0,
         // Above the gradient, which paints at zIndex 10.
         zIndex: 11,
+    },
+    chevronTop: {
+        top: 0,
+    },
+    chevronBottom: {
+        bottom: 0,
     },
     chevronHidden: {
         pointerEvents: 'none',

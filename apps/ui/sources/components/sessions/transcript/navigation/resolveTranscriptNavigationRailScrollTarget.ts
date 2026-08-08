@@ -47,6 +47,14 @@ export type TranscriptNavigationRailScrollCommand = Readonly<{
     /** Where the rail was when the command was issued, then the last position attributed to it. */
     positionPx: number;
     targetPx: number;
+    /**
+     * Whether the reader asked for this move (a chevron press, arrow keys) as
+     * opposed to the rail following the read anchor. A move the reader asked for
+     * is not interrupted by their pointer arriving on the rail: that guard
+     * exists to stop the rail sliding under a resting cursor, and the cursor is
+     * already on the rail when they press a chevron.
+     */
+    userInitiated: boolean;
 }>;
 
 export type TranscriptNavigationRailScrollEventOrigin = 'command' | 'reader';
@@ -90,6 +98,7 @@ export function classifyTranscriptNavigationRailScrollEvent(input: Readonly<{
             lastEventAtMs: input.atMs,
             positionPx: input.positionPx,
             targetPx: command.targetPx,
+            userInitiated: command.userInitiated,
         },
         origin: 'command',
     };

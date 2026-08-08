@@ -244,11 +244,13 @@ export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
         options?: Readonly<{ userInitiated?: boolean }>,
     ) => {
         const nowMs = Date.now();
-        if (options?.userInitiated === true) lastUserScrollAtMsRef.current = nowMs;
+        const userInitiated = options?.userInitiated === true;
+        if (userInitiated) lastUserScrollAtMsRef.current = nowMs;
         scrollCommandRef.current = {
             lastEventAtMs: nowMs,
             positionPx: readRailPositionPx(),
             targetPx: nextScrollTopPx,
+            userInitiated,
         };
         setScrollTopPx(nextScrollTopPx);
         railScrollRef.current?.scrollTo({ animated: !reducedMotion, y: nextScrollTopPx });
@@ -259,10 +261,17 @@ export function TranscriptNavigationRail(props: TranscriptNavigationRailProps) {
      * *next* command is not enough: one already running would keep sliding
      * markers out from under a cursor that is aiming at them for the rest of its
      * animation. A non-animated command at the current position ends it there.
+     *
+     * A move the READER asked for is left alone. Their pointer is already on the
+     * rail when they press a chevron, and a page that lands against an end
+     * unmounts the pressed chevron from under the cursor — the browser then
+     * re-delivers `pointerEnter` on remount (the departed node cannot be
+     * recognised as a descendant), so cancelling here would abort the reader's
+     * own page one frame after it started.
      */
     const cancelRailScroll = React.useCallback(() => {
         const command = scrollCommandRef.current;
-        if (!command) return;
+        if (!command || command.userInitiated) return;
         scrollCommandRef.current = null;
         setScrollTopPx(command.positionPx);
         railScrollRef.current?.scrollTo({ animated: false, y: command.positionPx });
@@ -642,6 +651,11 @@ const stylesheet = StyleSheet.create((theme) => ({
         pointerEvents: 'none',
     },
     rovingTabstop: {
+        // The edge chevrons deliberately sit in lanes just outside this box, so
+        // that no press target is laid over a marker. Stated rather than
+        // inherited: clipping here would silently push them back onto the
+        // markers instead of visibly breaking.
+        overflow: 'visible',
         position: 'relative',
         width: 32,
     },

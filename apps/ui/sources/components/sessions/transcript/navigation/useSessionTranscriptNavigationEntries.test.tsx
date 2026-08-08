@@ -278,6 +278,34 @@ describe('useSessionTranscriptNavigationEntries', () => {
         expect(entries[1]?.responsePreview).toBe('Project is ready');
     });
 
+    it('backfills a forked session from its own history instead of standing down entirely', async () => {
+        fetchUserMessageHistoryPageMock.mockResolvedValue(loadedPage([
+            remoteRow(0, 'user', 'Older prompt'),
+        ], null));
+
+        const { useSessionTranscriptNavigationEntriesFromMessages } = await import('./useSessionTranscriptNavigationEntries');
+        const messages = defaultTranscript();
+        const messagesById = Object.fromEntries(messages.map((message) => [message.id, message]));
+        const messageIdsOldestFirst = messages.map((message) => message.id);
+        const rendered = await renderHook(() => useSessionTranscriptNavigationEntriesFromMessages({
+            activeServerAccountScope: null,
+            forkedTranscriptEnabled: true,
+            messageIdsOldestFirst,
+            messagesById,
+            sessionId: 'session-1',
+        }));
+        await drainRemoteHistoryPaging();
+
+        // Asked for its own newest page — NOT a cursor read off the loaded rows, which for a fork
+        // also contain read-only ancestor context numbered in a different session's seq space.
+        expect(fetchUserMessageHistoryPageMock).toHaveBeenCalledWith('session-1', { limit: 40 });
+        expect(rendered.getCurrent().transcriptNavigationEntries.map((entry) => entry.promptPreview)).toEqual([
+            'Older prompt',
+            'Set up the project',
+            'Run the tests',
+        ]);
+    });
+
     it('stops paging at the bounded page cap', async () => {
         seedTranscript([]);
         let cursor = 1_000;

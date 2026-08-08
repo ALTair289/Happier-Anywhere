@@ -142,6 +142,39 @@ async function hoverRail(screen: Awaited<ReturnType<typeof renderRail>>['screen'
 const TURN_60_SCROLL_TOP_PX = (59 * MARKER_PITCH_PX) + MARKER_HEIGHT_PX
     + TRANSCRIPT_NAVIGATION_RAIL_SCROLL_MARGIN_PX - VIEWPORT_HEIGHT_PX;
 
+/**
+ * The chevron's pressable box in marker-viewport coordinates (y = 0 at the top
+ * of the scrolling marker column), composed from the edge box's own anchor and
+ * the chevron's offset inside it.
+ *
+ * A chevron that fills its box carries no explicit height, so that case is
+ * reconstructed from its inset pair rather than read as absent — the point of
+ * the assertion is where the press target lands, not which style keys spell it.
+ */
+function chevronLaneBounds(
+    screen: Awaited<ReturnType<typeof renderRail>>['screen'],
+    edge: 'top' | 'bottom',
+): Readonly<{ topPx: number; bottomPx: number }> {
+    const box = flattenStyle(screen.findByTestId(`transcript-navigation-rail.edge.${edge}`)?.props.style);
+    const chevron = flattenStyle(screen.findByTestId(`transcript-navigation-rail.chevron.${edge}`)?.props.style);
+    const boxHeightPx = Number(box.height);
+    const insetTopPx = Number(chevron.top ?? 0);
+    const insetBottomPx = Number(chevron.bottom ?? 0);
+    const chevronHeightPx = typeof chevron.height === 'number'
+        ? chevron.height
+        : boxHeightPx - insetTopPx - insetBottomPx;
+    // A `top` box is anchored to the viewport top; a `bottom` box is anchored to
+    // the viewport bottom, so it resolves through the viewport height.
+    const boxTopPx = typeof box.top === 'number'
+        ? box.top
+        : VIEWPORT_HEIGHT_PX - Number(box.bottom) - boxHeightPx;
+    const offsetInBoxPx = typeof chevron.bottom === 'number' && typeof chevron.height === 'number'
+        ? boxHeightPx - insetBottomPx - chevronHeightPx
+        : insetTopPx;
+    const topPx = boxTopPx + offsetInBoxPx;
+    return { topPx, bottomPx: topPx + chevronHeightPx };
+}
+
 describe('TranscriptNavigationRail overflow affordance', () => {
     it('scrolls the active marker into view when the read anchor moves outside the rail viewport', async () => {
         const { screen, scrollTo } = await renderRail();
@@ -298,6 +331,24 @@ describe('TranscriptNavigationRail overflow affordance', () => {
         expect(scrollTo).toHaveBeenCalledTimes(callCountAfterCancel);
     });
 
+    it('does not cancel a page the reader just asked for when the pointer arrives on the rail', async () => {
+        const { screen, scrollTo } = await renderRail();
+
+        await act(async () => {
+            screen.findByTestId('transcript-navigation-rail.chevron.bottom')?.props.onPress?.();
+        });
+        expect(lastScrollTo(scrollTo)).toEqual({ animated: true, y: PAGE_STEP_PX });
+
+        // Pressing a chevron re-renders the rail, and a page that lands against
+        // an end unmounts the pressed chevron from under the cursor. The browser
+        // re-delivers pointerEnter when it remounts (relatedTarget is gone, so
+        // it cannot be recognised as a move within the rail) — which must not
+        // undo the move the reader explicitly asked for.
+        await hoverRail(screen, true);
+
+        expect(lastScrollTo(scrollTo)).toEqual({ animated: true, y: PAGE_STEP_PX });
+    });
+
     it('schedules no timer per frame while the reader scrolls the rail', async () => {
         const { screen, scrollTo } = await renderRail();
 
@@ -368,6 +419,26 @@ describe('TranscriptNavigationRail overflow affordance', () => {
 
         await emitRailScrollTo(overflowing.screen, 300);
         expect(overflowing.screen.findByTestId('transcript-navigation-rail.chevron.top')).toBeTruthy();
+    });
+
+    it('keeps the chevron press lane outside the marker column so no marker loses its hit area', async () => {
+        const { screen } = await renderRail();
+        // Mid-scroll, so both edges overflow and both chevrons are mounted.
+        await emitRailScrollTo(screen, 300);
+        // Measured revealed: that is the state in which the chevron accepts the
+        // pointer, and it is also exactly when the reader is aiming at markers.
+        await hoverRail(screen, true);
+
+        const top = chevronLaneBounds(screen, 'top');
+        const bottom = chevronLaneBounds(screen, 'bottom');
+
+        expect(top.bottomPx - top.topPx).toBeGreaterThan(0);
+        expect(bottom.bottomPx - bottom.topPx).toBeGreaterThan(0);
+        // Markers tile the whole viewport at a contiguous 12px pitch, so every
+        // pixel the chevron takes inside 0..viewport is a marker that can no
+        // longer be clicked or previewed.
+        expect(top.bottomPx).toBeLessThanOrEqual(0);
+        expect(bottom.topPx).toBeGreaterThanOrEqual(VIEWPORT_HEIGHT_PX);
     });
 
     it('keeps the chevron hidden until the rail is hovered or holds keyboard focus', async () => {
