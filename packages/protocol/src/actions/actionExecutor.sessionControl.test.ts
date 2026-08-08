@@ -126,14 +126,14 @@ describe('createActionExecutor (session control)', () => {
 
   it.each([
     {
-      label: 'unsupported',
+      label: 'control unavailable',
       dependencyResult: {
         success: false as const,
-        message: 'Update the session runtime',
-        code: 'session_stop_unsupported',
-        recovery: 'upgrade_runtime' as const,
+        message: 'Session controls are unavailable',
+        code: 'session_stop_control_unavailable',
+        recovery: 'retry_when_runtime_available' as const,
       },
-      errorCode: 'session_stop_unsupported',
+      errorCode: 'session_stop_control_unavailable',
     },
     {
       label: 'rejected',

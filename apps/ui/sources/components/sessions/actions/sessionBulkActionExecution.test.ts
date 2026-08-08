@@ -189,7 +189,7 @@ describe('executeSessionBulkAction', () => {
         expect(result.succeeded.map((entry) => entry.target.sessionId)).toEqual(['active', 'inactive']);
     });
 
-    it('preserves actionable Stop upgrade recovery in bulk results', async () => {
+    it('preserves actionable unavailable-control recovery in bulk results', async () => {
         const result = await executeSessionBulkAction({
             action: { id: SESSION_BULK_ACTION_IDS.stop },
             targets: [target({ key: 'server-a:upgrade', sessionId: 'upgrade', active: true })],
@@ -197,16 +197,16 @@ describe('executeSessionBulkAction', () => {
                 stopSession: vi.fn(async () => ({
                     success: false,
                     message: 'RPC method not available',
-                    code: 'session_stop_unsupported',
-                    recovery: 'upgrade_runtime' as const,
+                    code: 'session_stop_control_unavailable',
+                    recovery: 'retry_when_runtime_available' as const,
                 })),
             },
         });
 
         expect(result.failed).toEqual([
             expect.objectContaining({
-                reasonCode: 'session_stop_unsupported',
-                reason: 'Update Happier on the session machine, then try stopping again.',
+                reasonCode: 'session_stop_control_unavailable',
+                reason: 'Happier could not reach the session controls. Make sure the session machine and daemon are online, then try again.',
             }),
         ]);
     });

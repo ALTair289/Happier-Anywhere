@@ -5640,7 +5640,7 @@ export const en = {
         killSessionConfirm: 'Are you sure you want to terminate this session?',
         stopSession: 'Stop Session',
         stopSessionConfirm: 'Are you sure you want to stop this session?',
-        stopSessionUpgradeRequired: 'Update Happier on the session machine, then try stopping again.',
+        stopSessionControlUnavailable: 'Happier could not reach the session controls. Make sure the session machine and daemon are online, then try again.',
         archiveSession: 'Archive Session',
         archiveSessionConfirm: 'Are you sure you want to archive this session?',
         workspaceTitle: 'Workspace',

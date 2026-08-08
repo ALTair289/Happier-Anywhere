@@ -738,8 +738,8 @@ export async function sessionBash(sessionId: string, request: SessionBashRequest
 export interface SessionStopResponse {
     success: boolean;
     message?: string;
-    code?: 'session_stop_requested' | 'session_stop_not_found' | 'session_stop_unsupported' | 'session_stop_failed';
-    recovery?: 'wait_for_inactive' | 'upgrade_runtime';
+    code?: import('./sessionStopContract').SessionStopResponseCode;
+    recovery?: import('./sessionStopContract').SessionStopRecovery;
 }
 
 /**
@@ -747,7 +747,7 @@ export interface SessionStopResponse {
  *
  * Primary behavior: stop through the supervising daemon when the hosting machine is reachable.
  * Compatibility fallback: ask the runner to terminate via session RPC.
- * If neither lifecycle owner supports Stop, return explicit upgrade recovery without changing reachability.
+ * If neither lifecycle owner is reachable, report unavailable control without changing reachability.
  */
 export async function sessionStop(sessionId: string): Promise<SessionStopResponse> {
     return await sessionStopWithServerScope(sessionId, {
@@ -780,11 +780,11 @@ export async function sessionStopWithServerScope(
         return { success: false, message: stopResult.message, code: 'session_stop_not_found' };
     }
 
-    if (stopResult.reason === 'unsupported') {
+    if (stopResult.reason === 'control_unavailable') {
         return {
             success: false,
             message: stopResult.message,
-            code: 'session_stop_unsupported',
+            code: 'session_stop_control_unavailable',
             recovery: stopResult.recovery,
         };
     }

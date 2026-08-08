@@ -5831,7 +5831,7 @@ export const zhHans: TranslationStructure = {
     killSessionConfirm: "您确定要终止此会话吗？",
     stopSession: "停止会话",
     stopSessionConfirm: "您确定要停止此会话吗？",
-    stopSessionUpgradeRequired: "请更新会话所在机器上的 Happier，然后重试停止操作。",
+    stopSessionControlUnavailable: "Happier 无法连接会话控制。请确认会话所在机器和守护进程在线，然后重试。",
     archiveSession: "归档会话",
     archiveSessionConfirm: "您确定要归档此会话吗？",
     workspaceTitle: "工作区",

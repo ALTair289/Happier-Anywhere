@@ -184,7 +184,7 @@ describe('executeSessionAction', () => {
         })).rejects.toMatchObject({ message: 'stop failed' });
     });
 
-    it('preserves Stop upgrade recovery through the single-target action surface', async () => {
+    it('preserves unavailable-control recovery through the single-target action surface', async () => {
         await expect(executeSessionAction({
             actionId: SESSION_ACTION_STOP_ID,
             target: createTarget({ active: true }),
@@ -193,14 +193,14 @@ describe('executeSessionAction', () => {
                     stopSession: vi.fn(async () => ({
                         success: false as const,
                         message: 'RPC method not available',
-                        code: 'session_stop_unsupported',
-                        recovery: 'upgrade_runtime' as const,
+                        code: 'session_stop_control_unavailable',
+                        recovery: 'retry_when_runtime_available' as const,
                     })),
                     archiveSession: vi.fn(async () => ({ success: true as const })),
                 },
             },
         })).rejects.toMatchObject({
-            message: t('sessionInfo.stopSessionUpgradeRequired'),
+            message: t('sessionInfo.stopSessionControlUnavailable'),
         });
     });
 

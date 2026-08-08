@@ -6293,7 +6293,7 @@ localTailscale: {
     killSessionConfirm: "このセッションを終了してもよろしいですか？",
     stopSession: "セッションを停止",
     stopSessionConfirm: "このセッションを停止してもよろしいですか？",
-    stopSessionUpgradeRequired: "セッションを実行しているマシンの Happier を更新してから、もう一度停止してください。",
+    stopSessionControlUnavailable: "セッションの制御に接続できませんでした。セッションのマシンとデーモンがオンラインであることを確認してから、もう一度お試しください。",
     archiveSession: "セッションをアーカイブ",
     archiveSessionConfirm: "このセッションをアーカイブしてもよろしいですか？",
     workspaceTitle: "ワークスペース",

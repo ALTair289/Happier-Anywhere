@@ -1,6 +1,7 @@
 import type { Session } from '@/sync/domains/state/storageTypes';
 import type { SessionReadStateAction } from '@/sync/domains/session/readState/sessionReadState';
 import type { SessionListRenderableSession } from '@/sync/domains/session/listing/sessionListRenderable';
+import type { SessionStopRecovery } from '@/sync/ops/sessionStopContract';
 
 export type SessionActionSurface =
     | 'rowMenu'
@@ -46,7 +47,7 @@ export type SessionActionOperationResult = Readonly<{
     success: boolean;
     message?: string;
     code?: string;
-    recovery?: 'wait_for_inactive' | 'upgrade_runtime';
+    recovery?: SessionStopRecovery;
 }>;
 
 export type SessionActionExecutionInput = Readonly<{

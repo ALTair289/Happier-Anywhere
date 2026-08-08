@@ -333,7 +333,7 @@ describe('sessionStopWithServerScope', () => {
     expect(mockStorageState.applySessions).not.toHaveBeenCalled();
   });
 
-  it('returns typed upgrade recovery without mutating reachability when lifecycle RPCs are unavailable', async () => {
+  it('reports unavailable control without claiming the runtime needs an upgrade', async () => {
     const err = Object.assign(new Error('RPC method not available'), {
       rpcErrorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE,
     });
@@ -342,8 +342,33 @@ describe('sessionStopWithServerScope', () => {
     expect(res).toEqual({
       success: false,
       message: 'RPC method not available',
-      code: 'session_stop_unsupported',
-      recovery: 'upgrade_runtime',
+      code: 'session_stop_control_unavailable',
+      recovery: 'retry_when_runtime_available',
+    });
+    expect(mockStorageState.applySessionListRenderablePatches).not.toHaveBeenCalled();
+    expect(mockStorageState.applySessions).not.toHaveBeenCalled();
+  });
+
+  it('preserves daemon not-found evidence when the disconnected runner has no RPC route', async () => {
+    mockStorageState.sessions = {
+      'sid-stale-active': {
+        active: true,
+        metadata: { machineId: 'machine-1', path: '/repo' },
+      },
+    };
+    mockStorageState.machines = {
+      'machine-1': { id: 'machine-1', active: true, activeAt: Date.now() },
+    };
+    mockMachineRpcWithServerScope.mockResolvedValue({ status: 'not_found' });
+    mockSessionRpcWithServerScope.mockRejectedValue(Object.assign(
+      new Error('RPC method not available'),
+      { rpcErrorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE },
+    ));
+
+    await expect(sessionStopWithServerScope('sid-stale-active', { serverId: 'server-a' })).resolves.toEqual({
+      success: false,
+      message: 'Session not found',
+      code: 'session_stop_not_found',
     });
     expect(mockStorageState.applySessionListRenderablePatches).not.toHaveBeenCalled();
     expect(mockStorageState.applySessions).not.toHaveBeenCalled();

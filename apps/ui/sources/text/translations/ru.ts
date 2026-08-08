@@ -5224,7 +5224,7 @@ export const ru: TranslationStructure = {
     killSessionConfirm: "Вы уверены, что хотите завершить эту сессию?",
     stopSession: "Остановить сессию",
     stopSessionConfirm: "Вы уверены, что хотите остановить эту сессию?",
-    stopSessionUpgradeRequired: "Обновите Happier на компьютере сессии и попробуйте остановить её снова.",
+    stopSessionControlUnavailable: "Happier не удалось подключиться к управлению сессией. Убедитесь, что компьютер сессии и демон подключены к сети, затем повторите попытку.",
     archiveSession: "Архивировать сессию",
     archiveSessionConfirm: "Вы уверены, что хотите архивировать эту сессию?",
     workspaceTitle: "Рабочее пространство",

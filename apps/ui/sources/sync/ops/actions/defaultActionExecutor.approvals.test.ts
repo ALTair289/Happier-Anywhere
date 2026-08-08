@@ -309,7 +309,7 @@ describe('createDefaultActionExecutor approvals', () => {
         expect(sessionStopWithServerScope).toHaveBeenCalledWith('s1', { serverId: undefined });
     });
 
-    it('reports unsupported session.stop as an action failure with upgrade recovery details', async () => {
+    it('reports unavailable session control as an action failure with retry recovery details', async () => {
         state.settings.actionsSettingsV1.actions['session.stop'] = {
             enabledPlacements: [],
             disabledSurfaces: [],
@@ -318,9 +318,9 @@ describe('createDefaultActionExecutor approvals', () => {
         };
         sessionStopWithServerScope.mockResolvedValueOnce({
             success: false,
-            message: 'Update Happier on the session machine, then try stopping again.',
-            code: 'session_stop_unsupported',
-            recovery: 'upgrade_runtime',
+            message: 'Happier could not reach the session controls. Make sure the session machine and daemon are online, then try again.',
+            code: 'session_stop_control_unavailable',
+            recovery: 'retry_when_runtime_available',
         });
 
         const { createDefaultActionExecutor } = await import('./defaultActionExecutor');
@@ -333,13 +333,13 @@ describe('createDefaultActionExecutor approvals', () => {
 
         expect(result).toEqual({
             ok: false,
-            errorCode: 'session_stop_unsupported',
-            error: 'Update Happier on the session machine, then try stopping again.',
+            errorCode: 'session_stop_control_unavailable',
+            error: 'Happier could not reach the session controls. Make sure the session machine and daemon are online, then try again.',
             details: {
                 success: false,
-                message: 'Update Happier on the session machine, then try stopping again.',
-                code: 'session_stop_unsupported',
-                recovery: 'upgrade_runtime',
+                message: 'Happier could not reach the session controls. Make sure the session machine and daemon are online, then try again.',
+                code: 'session_stop_control_unavailable',
+                recovery: 'retry_when_runtime_available',
             },
         });
     });

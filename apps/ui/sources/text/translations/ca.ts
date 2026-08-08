@@ -5674,7 +5674,7 @@ deps: {
         killSessionConfirm: 'Segur que vols finalitzar aquesta sessió?',
         stopSession: 'Atura la sessió',
         stopSessionConfirm: 'Segur que vols aturar aquesta sessió?',
-        stopSessionUpgradeRequired: 'Actualitza Happier a la màquina de la sessió i torna-ho a provar.',
+        stopSessionControlUnavailable: 'Happier no ha pogut contactar amb els controls de la sessió. Assegura\'t que la màquina de la sessió i el daemon estiguin en línia i torna-ho a provar.',
         archiveSession: 'Arxiva la sessió',
         archiveSessionConfirm: 'Segur que vols arxivar aquesta sessió?',
         workspaceTitle: 'Espai de treball',

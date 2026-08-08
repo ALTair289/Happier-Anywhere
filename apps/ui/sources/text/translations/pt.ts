@@ -6152,7 +6152,7 @@ export const pt: TranslationStructure = {
     killSessionConfirm: "Tem certeza de que deseja encerrar esta sessão?",
     stopSession: "Parar sessão",
     stopSessionConfirm: "Tem certeza de que deseja parar esta sessão?",
-    stopSessionUpgradeRequired: "Atualize o Happier na máquina da sessão e tente parar novamente.",
+    stopSessionControlUnavailable: "O Happier não conseguiu acessar os controles da sessão. Verifique se a máquina da sessão e o daemon estão online e tente novamente.",
     archiveSession: "Arquivar sessão",
     archiveSessionConfirm: "Tem certeza de que deseja arquivar esta sessão?",
     workspaceTitle: "Espaço de trabalho",

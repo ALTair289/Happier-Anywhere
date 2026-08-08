@@ -5067,7 +5067,7 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         killSessionConfirm: '您確定要終止此工作階段嗎？',
         stopSession: '停止工作階段',
         stopSessionConfirm: '您確定要停止此工作階段嗎？',
-        stopSessionUpgradeRequired: '請更新工作階段所在機器上的 Happier，然後重試停止操作。',
+        stopSessionControlUnavailable: 'Happier 無法連線工作階段控制。請確認工作階段所在機器和守護程序在線上，然後重試。',
         archiveSession: '封存工作階段',
         archiveSessionConfirm: '您確定要封存此工作階段嗎？',
         workspaceTitle: '工作區',

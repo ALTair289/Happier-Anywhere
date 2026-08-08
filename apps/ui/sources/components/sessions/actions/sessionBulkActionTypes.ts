@@ -1,4 +1,5 @@
 import type { FeatureDecision } from '@happier-dev/protocol';
+import type { SessionStopRecovery } from '@/sync/ops/sessionStopContract';
 
 export const SESSION_BULK_ACTION_IDS = {
     stop: 'ui.session.stop',
@@ -52,7 +53,7 @@ export type SessionBulkMutationResult = Readonly<{
     success: boolean;
     message?: string;
     code?: string;
-    recovery?: 'wait_for_inactive' | 'upgrade_runtime';
+    recovery?: SessionStopRecovery;
 }>;
 
 export type SessionBulkOperation<T = SessionBulkMutationResult> = (

@@ -6373,7 +6373,7 @@ export const it: TranslationStructure = {
     killSessionConfirm: "Sei sicuro di voler terminare questa sessione?",
     stopSession: "Ferma sessione",
     stopSessionConfirm: "Sei sicuro di voler fermare questa sessione?",
-    stopSessionUpgradeRequired: "Aggiorna Happier sul computer della sessione, quindi riprova.",
+    stopSessionControlUnavailable: "Happier non è riuscito a raggiungere i controlli della sessione. Assicurati che il computer della sessione e il daemon siano online, quindi riprova.",
     archiveSession: "Archivia sessione",
     archiveSessionConfirm: "Sei sicuro di voler archiviare questa sessione?",
     workspaceTitle: "Area di lavoro",

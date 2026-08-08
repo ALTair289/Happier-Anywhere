@@ -21,7 +21,12 @@ type LegacySessionKillResponse = Readonly<{
 export type DaemonMachineSessionStopAttempt =
     | Readonly<{ type: 'stopped' }>
     | Readonly<{ type: 'requested' }>
-    | Readonly<{ type: 'fallback'; message: string; errorCode?: string }>
+    | Readonly<{
+        type: 'fallback';
+        reason: 'not_found' | 'control_unavailable';
+        message: string;
+        errorCode?: string;
+    }>
     | Readonly<{ type: 'failed'; message: string; errorCode?: string }>;
 
 export type SessionStopStrategyOutcome =
@@ -35,15 +40,15 @@ export type SessionStopStrategyOutcome =
     }>
     | Readonly<{
         success: false;
-        failedAt: 'session_rpc';
+        failedAt: 'daemon_machine_rpc' | 'session_rpc';
         reason: 'not_found';
         message: string;
     }>
     | Readonly<{
         success: false;
         failedAt: 'daemon_machine_rpc' | 'session_rpc';
-        reason: 'unsupported';
-        recovery: 'upgrade_runtime';
+        reason: 'control_unavailable';
+        recovery: 'retry_when_runtime_available';
         message: string;
         errorCode?: string;
     }>
@@ -85,7 +90,11 @@ function isDaemonSessionNotFoundOrFailedToStopMessage(message: string): boolean 
     return message === 'Session not found or failed to stop';
 }
 
-function readFallbackRpcErrorEnvelope(response: unknown): Readonly<{ message: string; errorCode?: string }> | null {
+function readFallbackRpcErrorEnvelope(response: unknown): Readonly<{
+    reason: 'control_unavailable';
+    message: string;
+    errorCode?: string;
+}> | null {
     if (!response || typeof response !== 'object') return null;
     const envelope = response as { error?: unknown; errorCode?: unknown };
     if (typeof envelope.error !== 'string') return null;
@@ -103,6 +112,7 @@ function readFallbackRpcErrorEnvelope(response: unknown): Readonly<{ message: st
     }
 
     return {
+        reason: 'control_unavailable',
         message: envelope.error,
         ...(carrier.rpcErrorCode ? { errorCode: carrier.rpcErrorCode } : {}),
     };
@@ -130,7 +140,9 @@ export async function stopSessionViaDaemonMachineRpc(params: Readonly<{
         const strictResult = readStrictStopSessionResult(response);
         if (strictResult?.status === 'stopped') return { type: 'stopped' };
         if (strictResult?.status === 'requested') return { type: 'requested' };
-        if (strictResult?.status === 'not_found') return { type: 'fallback', message: 'Session not found' };
+        if (strictResult?.status === 'not_found') {
+            return { type: 'fallback', reason: 'not_found', message: 'Session not found' };
+        }
         if (strictResult?.status === 'incomplete') {
             return { type: 'failed', message: `Session stop incomplete: ${strictResult.reason}` };
         }
@@ -140,6 +152,7 @@ export async function stopSessionViaDaemonMachineRpc(params: Readonly<{
         if (fallbackEnvelope) {
             return {
                 type: 'fallback',
+                reason: fallbackEnvelope.reason,
                 message: fallbackEnvelope.message,
                 ...(fallbackEnvelope.errorCode ? { errorCode: fallbackEnvelope.errorCode } : {}),
             };
@@ -151,6 +164,7 @@ export async function stopSessionViaDaemonMachineRpc(params: Readonly<{
         if (shouldFallbackFromMachineRpc(error)) {
             return {
                 type: 'fallback',
+                reason: 'control_unavailable',
                 message,
                 ...(errorCode ? { errorCode } : {}),
             };
@@ -188,6 +202,7 @@ export async function stopSessionUsingCanonicalStrategy(params: Readonly<{
     sessionId: string;
     serverId?: string | null;
 }>): Promise<SessionStopStrategyOutcome> {
+    let daemonFallback: Extract<DaemonMachineSessionStopAttempt, { type: 'fallback' }> | null = null;
     const machineTarget = readMachineControlTargetForSession(params.sessionId);
     if (machineTarget) {
         const daemonStop = await stopSessionViaDaemonMachineRpc({
@@ -216,6 +231,7 @@ export async function stopSessionUsingCanonicalStrategy(params: Readonly<{
                 ...(daemonStop.errorCode ? { errorCode: daemonStop.errorCode } : {}),
             };
         }
+        daemonFallback = daemonStop;
     }
 
     const killResult = await stopSessionViaRunnerRpc({
@@ -269,11 +285,19 @@ export async function stopSessionUsingCanonicalStrategy(params: Readonly<{
     const errorCode = releasedAcknowledgement?.errorCode;
     const rpcError = { rpcErrorCode: errorCode, message };
     if (isRpcMethodNotAvailableError(rpcError) || isRpcMethodNotFoundError(rpcError)) {
+        if (daemonFallback?.reason === 'not_found') {
+            return {
+                success: false,
+                failedAt: 'daemon_machine_rpc',
+                reason: 'not_found',
+                message: daemonFallback.message,
+            };
+        }
         return {
             success: false,
             failedAt: 'session_rpc',
-            reason: 'unsupported',
-            recovery: 'upgrade_runtime',
+            reason: 'control_unavailable',
+            recovery: 'retry_when_runtime_available',
             message,
             ...(errorCode ? { errorCode } : {}),
         };

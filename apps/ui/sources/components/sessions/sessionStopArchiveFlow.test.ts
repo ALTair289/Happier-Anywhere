@@ -151,12 +151,12 @@ describe('stopSessionAndMaybeArchive', () => {
         expect(archiveSpy).not.toHaveBeenCalled();
     });
 
-    it('surfaces actionable upgrade recovery when the runtime cannot stop the session', async () => {
+    it('surfaces truthful recovery when session control is unavailable', async () => {
         const stopSpy = vi.fn(async () => ({
             success: false,
             message: 'RPC method not available',
-            code: 'session_stop_unsupported',
-            recovery: 'upgrade_runtime' as const,
+            code: 'session_stop_control_unavailable',
+            recovery: 'retry_when_runtime_available' as const,
         }));
 
         const { stopSessionAndMaybeArchive } = await import('./sessionStopArchiveFlow');
@@ -171,7 +171,7 @@ describe('stopSessionAndMaybeArchive', () => {
             stopErrorMessage: 'stop failed',
             archiveErrorMessage: 'archive failed',
         })).rejects.toMatchObject({
-            message: 'sessionInfo.stopSessionUpgradeRequired',
+            message: 'sessionInfo.stopSessionControlUnavailable',
         });
     });
 
