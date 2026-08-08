@@ -5,6 +5,7 @@ import {
   parseClaudePastedTextMarkerLineCount,
   pastedTextLineCountMatchesPrompt,
 } from './claudePastedTextMarker';
+import { normalizeClaudeUnifiedComposerRenderingText } from './promptIdentity';
 import { parseClaudeScreenState } from './tuiControls/screenState';
 
 function normalizeNewlines(value: string): string {
@@ -12,26 +13,6 @@ function normalizeNewlines(value: string): string {
 }
 
 const COMPOSER_LINE_PROMPT = /(?:^|[│|]\s*)[>›❯](?!\s*(?:\d+\.|[◯◉○●◐◑]))/u;
-
-function readCurrentPastedTextLineCount(screenText: string): number | null {
-  const lines = normalizeCapturedScreen(screenText).split('\n');
-  let lastContentLineIndex = lines.length - 1;
-  while (lastContentLineIndex >= 0 && lines[lastContentLineIndex]?.trim().length === 0) {
-    lastContentLineIndex -= 1;
-  }
-
-  for (let index = lastContentLineIndex; index >= 0; index -= 1) {
-    const line = lines[index] ?? '';
-    const pastedLineCount = parseClaudePastedTextMarkerLineCount(line);
-    if (pastedLineCount === null) continue;
-
-    if (index === lastContentLineIndex || COMPOSER_LINE_PROMPT.test(line)) {
-      return pastedLineCount;
-    }
-    return null;
-  }
-  return null;
-}
 
 function isLikelyTerminalFooterLine(line: string): boolean {
   const trimmed = line.trim();
@@ -68,33 +49,8 @@ function readPostSubmitPastedTextLineCount(screenText: string): number | null {
   return null;
 }
 
-function shouldVerifyBeforeSubmit(promptText: string): boolean {
-  return normalizeNewlines(promptText).trim().length > 0;
-}
-
 function shouldVerifyAfterSubmit(promptText: string): boolean {
   return normalizeNewlines(promptText).trim().length > 0;
-}
-
-function verifyScreenBeforeSubmit(params: Readonly<{
-  promptText: string;
-  screenText: string;
-}>): boolean {
-  const promptText = normalizeNewlines(params.promptText).trim();
-  const screenText = normalizeNewlines(params.screenText);
-  const composerContent = parseClaudeScreenState(screenText).composerContent;
-  if (
-    promptText.length > 0
-    && composerContent !== null
-    && normalizeNewlines(composerContent).trim() === promptText
-  ) {
-    return true;
-  }
-
-  const pastedLineCount = readCurrentPastedTextLineCount(screenText);
-  if (pastedLineCount === null) return false;
-
-  return pastedTextLineCountMatchesPrompt({ promptText, pastedLineCount });
 }
 
 function isPromptStillPendingAfterSubmit(params: Readonly<{
@@ -112,20 +68,18 @@ function isExactPromptStillInComposerAfterSubmit(params: Readonly<{
   promptText: string;
   screenText: string;
 }>): boolean {
-  const promptText = normalizeNewlines(params.promptText).trim();
+  const promptText = normalizeClaudeUnifiedComposerRenderingText(params.promptText);
   if (!promptText) return false;
   const state = parseClaudeScreenState(params.screenText);
   const composerContent = state.composerContent === null
     ? null
-    : normalizeNewlines(state.composerContent).trim();
+    : normalizeClaudeUnifiedComposerRenderingText(state.composerContent);
   return composerContent === promptText;
 }
 
 export function createClaudePromptSubmitVerificationPolicy(): TerminalPromptSubmitVerificationPolicy {
   return {
-    shouldVerifyBeforeSubmit,
     shouldVerifyAfterSubmit,
-    verifyScreenBeforeSubmit,
     isPromptStillPendingAfterSubmit: (params) => (
       isPromptStillPendingAfterSubmit(params)
       || isExactPromptStillInComposerAfterSubmit(params)

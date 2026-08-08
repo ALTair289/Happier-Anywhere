@@ -1515,21 +1515,6 @@ export function createZellijTerminalHostAdapter(params: Readonly<{
         duplicateRisk = 'likely';
         const submission = await runTerminalPromptSubmission({
           promptText: textToWrite,
-          ...(promptSubmitVerification?.shouldVerifyBeforeSubmit(textToWrite)
-            ? {
-              verifyBeforeSubmit: async ({ promptText, remainingTimeoutMs }) => {
-                const screenText = await actions.dumpScreen({
-                  zellijBinary: params.zellijBinary,
-                  env: sessionEnv(env, handle.sessionName),
-                  paneId,
-                  ...(remainingTimeoutMs !== undefined
-                    ? { timeoutMs: remainingTimeoutMs }
-                    : { timeoutMs: actionTimeoutMs }),
-                });
-                return promptSubmitVerification.verifyScreenBeforeSubmit({ promptText, screenText });
-              },
-            }
-            : {}),
           submitEnter: async ({ remainingTimeoutMs }) => {
             await actions.sendEnter({
               zellijBinary: params.zellijBinary,

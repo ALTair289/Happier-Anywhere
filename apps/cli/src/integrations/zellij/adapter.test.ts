@@ -1059,7 +1059,7 @@ describe('createZellijTerminalHostAdapter', () => {
       },
       dumpScreen: async () => {
         dumpCount += 1;
-        return dumpCount === 1 ? '❯ prompt' : '';
+        return '';
       },
       closePane: async () => undefined,
       killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
@@ -1139,7 +1139,7 @@ describe('createZellijTerminalHostAdapter', () => {
     ]);
   });
 
-  it('checks large zellij paste before submitting and retries Enter when it remains pending', async () => {
+  it('submits a large zellij paste and retries Enter when it remains pending', async () => {
     const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
     expect(Buffer.byteLength(prompt, 'utf8')).toBeGreaterThan(250_000);
     const calls: string[] = [];
@@ -1163,7 +1163,7 @@ describe('createZellijTerminalHostAdapter', () => {
       dumpScreen: async (params) => {
         calls.push(`dump:${params.paneId}`);
         dumpCount += 1;
-        return dumpCount <= 2 ? '[Pasted text #1 +5999 lines]' : '';
+        return dumpCount === 1 ? '[Pasted text #1 +5999 lines]' : '';
       },
       closePane: async () => undefined,
       killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
@@ -1194,7 +1194,6 @@ describe('createZellijTerminalHostAdapter', () => {
 
     expect(calls).toEqual([
       'paste:terminal_1',
-      'dump:terminal_1',
       'enter:terminal_1',
       'dump:terminal_1',
       'enter:terminal_1',
@@ -1224,7 +1223,7 @@ describe('createZellijTerminalHostAdapter', () => {
       dumpScreen: async (params) => {
         dumpCount += 1;
         calls.push(`dump:${params.paneId}`);
-        return dumpCount <= 2 ? '[Pasted text #1 +40 lines]' : '';
+        return dumpCount === 1 ? '[Pasted text #1 +40 lines]' : '';
       },
       closePane: async () => undefined,
       killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
@@ -1255,7 +1254,6 @@ describe('createZellijTerminalHostAdapter', () => {
 
     expect(calls).toEqual([
       'paste:terminal_1',
-      'dump:terminal_1',
       'enter:terminal_1',
       'dump:terminal_1',
       'enter:terminal_1',
@@ -1320,7 +1318,6 @@ describe('createZellijTerminalHostAdapter', () => {
 
     expect(calls).toEqual([
       'paste:terminal_1',
-      'dump:terminal_1',
       'enter:terminal_1',
       'dump:terminal_1',
       'enter:terminal_1',
@@ -1328,7 +1325,7 @@ describe('createZellijTerminalHostAdapter', () => {
     ]);
   });
 
-  it('does not submit a large zellij paste when pre-submit screen proof is inconclusive', async () => {
+  it('submits a large zellij paste without requiring pre-submit screen proof', async () => {
     const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
     const calls: string[] = [];
     const actions: ZellijActions = {
@@ -1376,87 +1373,16 @@ describe('createZellijTerminalHostAdapter', () => {
         origin: { kind: 'ui_pending', nonce: 'nonce-large-zellij-unverified' },
         scheduling: { timeoutMs: 1 },
       },
-    )).resolves.toMatchObject({
-      status: 'failed',
-      phase: 'after_write_before_enter',
-      duplicateRisk: 'possible',
-    });
+    )).resolves.toMatchObject({ status: 'injected' });
 
     expect(calls[0]).toBe('paste:terminal_1');
     expect(calls.some((call) => call === 'dump:terminal_1')).toBe(true);
-    expect(calls.some((call) => call === 'enter:terminal_1')).toBe(false);
-  });
-
-  it('waits for a delayed pre-submit collapsed marker before pressing Enter', async () => {
-    const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
-    const calls: string[] = [];
-    let dumpCount = 0;
-    let enterCount = 0;
-    const actions: ZellijActions = {
-      attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-      runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
-      pasteText: async (params) => {
-        calls.push(`paste:${params.paneId}`);
-      },
-      writeBytesChunked: async () => {
-        throw new Error('safe zellij prompt delivery should use action paste');
-      },
-      sendEnter: async (params) => {
-        enterCount += 1;
-        calls.push(`enter:${params.paneId}`);
-      },
-      sendEscape: async () => {
-        throw new Error('should not interrupt');
-      },
-      listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
-      dumpScreen: async (params) => {
-        dumpCount += 1;
-        calls.push(`dump:${params.paneId}:${dumpCount}`);
-        if (enterCount > 0) return '';
-        return dumpCount < 3 ? 'old composer contents' : '❯ [Pasted text #1 +5999 lines]';
-      },
-      closePane: async () => undefined,
-      killSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-      deleteSession: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
-    };
-    const adapter = createClaudeZellijTerminalHostAdapter({
-      zellijBinary: '/tools/zellij',
-      happyHomeDir: '/home/happier',
-      actions,
-      actionTimeoutMs: 1_000,
-      pasteMaxBytes: 1024 * 1024,
-    });
-
-    const injection = adapter.injectUserPrompt(
-      {
-        kind: 'zellij',
-        sessionName: 'session-a',
-        paneId: 'terminal_1',
-        attachMetadata: { attachStrategy: 'terminal_host', topology: 'shared' },
-      },
-      {
-        text: prompt,
-        multiline: true,
-        origin: { kind: 'ui_pending', nonce: 'nonce-large-zellij-delayed-marker' },
-        scheduling: {},
-      },
-    );
-
-    await expect(injection).resolves.toMatchObject({ status: 'injected' });
-    expect(calls).toEqual([
-      'paste:terminal_1',
-      'dump:terminal_1:1',
-      'dump:terminal_1:2',
-      'dump:terminal_1:3',
-      'enter:terminal_1',
-      'dump:terminal_1:4',
-    ]);
+    expect(calls.some((call) => call === 'enter:terminal_1')).toBe(true);
   });
 
   it('does not treat a stale visible placeholder as a still-pending submitted paste', async () => {
     const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
     const calls: string[] = [];
-    let dumpCount = 0;
     const actions: ZellijActions = {
       attachCreateBackground: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
       runCommand: async () => ({ exitCode: 0, stdout: 'terminal_1', stderr: '' }),
@@ -1475,8 +1401,6 @@ describe('createZellijTerminalHostAdapter', () => {
       listPanes: async () => [{ id: 1, is_plugin: false, is_focused: true }],
       dumpScreen: async (params) => {
         calls.push(`dump:${params.paneId}`);
-        dumpCount += 1;
-        if (dumpCount === 1) return '[Pasted text #2 +5999 lines]';
         return [
           'previous prompt already submitted',
           '[Pasted text +5999 lines]',
@@ -1513,7 +1437,6 @@ describe('createZellijTerminalHostAdapter', () => {
 
     expect(calls).toEqual([
       'paste:terminal_1',
-      'dump:terminal_1',
       'enter:terminal_1',
       'dump:terminal_1',
     ]);

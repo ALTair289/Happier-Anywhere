@@ -204,14 +204,6 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
               },
             }
           : {}),
-        ...(promptSubmitVerification?.shouldVerifyBeforeSubmit(input.text)
-          ? {
-            verifyBeforeSubmit: async ({ text }) => promptSubmitVerification.verifyScreenBeforeSubmit({
-              promptText: text,
-              screenText: await tmux.captureCurrentInput(targetFromHandle(handle)),
-            }),
-          }
-          : {}),
         ...(promptSubmitVerification?.shouldVerifyAfterSubmit(input.text)
           ? {
             verifyAfterSubmit: async ({ text }) => promptSubmitVerification.isPromptStillPendingAfterSubmit({

@@ -6,3 +6,11 @@ export function normalizeClaudeUnifiedPromptIdentityText(value: string): string 
     .join('\n')
     .trim();
 }
+
+/**
+ * Claude may render one logical composer value across several terminal rows. Treat those visual
+ * whitespace breaks as presentation only while retaining the exact normalized word sequence.
+ */
+export function normalizeClaudeUnifiedComposerRenderingText(value: string): string {
+  return normalizeClaudeUnifiedPromptIdentityText(value).replace(/\s+/g, ' ');
+}

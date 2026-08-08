@@ -3,38 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { createClaudePromptSubmitVerificationPolicy } from './claudePromptSubmitVerification';
 
 describe('createClaudePromptSubmitVerificationPolicy', () => {
-  it('requires screen proof that a non-empty prompt landed before submission', () => {
+  it('verifies every non-empty prompt after submit', () => {
     const policy = createClaudePromptSubmitVerificationPolicy();
 
-    expect(policy.shouldVerifyBeforeSubmit('first line\nsecond line')).toBe(true);
-    expect(policy.shouldVerifyBeforeSubmit('first line\r\nsecond line')).toBe(true);
-    expect(policy.shouldVerifyBeforeSubmit('   ')).toBe(false);
     expect(policy.shouldVerifyAfterSubmit('first line\nsecond line')).toBe(true);
-  });
-
-  it('verifies every non-empty single-line prompt after submit', () => {
-    const policy = createClaudePromptSubmitVerificationPolicy();
-
-    expect(policy.shouldVerifyBeforeSubmit('single line prompt')).toBe(true);
+    expect(policy.shouldVerifyAfterSubmit('first line\r\nsecond line')).toBe(true);
     expect(policy.shouldVerifyAfterSubmit('single line prompt')).toBe(true);
     expect(policy.shouldVerifyAfterSubmit('   ')).toBe(false);
-  });
-
-  it('does not use an earlier transcript echo as pre-submit composer proof', () => {
-    const policy = createClaudePromptSubmitVerificationPolicy();
-
-    expect(policy.verifyScreenBeforeSubmit({
-      promptText: 'continue',
-      screenText: [
-        '❯ continue',
-        'Claude acted on the earlier prompt.',
-        '│ > │',
-      ].join('\n'),
-    })).toBe(false);
-    expect(policy.verifyScreenBeforeSubmit({
-      promptText: 'continue',
-      screenText: '❯ continue',
-    })).toBe(true);
   });
 
   it('detects a single-line prompt that remains exactly in the composer after submit', () => {
@@ -54,6 +29,24 @@ describe('createClaudePromptSubmitVerificationPolicy', () => {
         '│ > │',
       ].join('\n'),
     })).toBe(false);
+  });
+
+  it('detects a single-line prompt that remains visually wrapped in the composer after submit', () => {
+    const policy = createClaudePromptSubmitVerificationPolicy();
+    const prompt = [
+      'can you please give me a complete report as an assistant message of everything you analysed, all the reports,',
+      'all the issues, improvements, suggestions, and your recommendations',
+    ].join(' ');
+
+    expect(policy.isPromptStillPendingAfterSubmit({
+      promptText: prompt,
+      screenText: [
+        '─'.repeat(120),
+        '❯ can you please give me a complete report as an assistant message of everything you analysed, all the reports,',
+        '  all the issues, improvements, suggestions, and your recommendations',
+        '─'.repeat(120),
+      ].join('\n'),
+    })).toBe(true);
   });
 
   it('recognizes a current collapsed pasted prompt after submit with footer rows below it', () => {

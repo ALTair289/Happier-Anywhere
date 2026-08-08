@@ -4,7 +4,10 @@ import {
   parseExactClaudePastedTextMarkerLineCount,
 } from './claudePastedTextMarker';
 
-import { normalizeClaudeUnifiedPromptIdentityText } from './promptIdentity';
+import {
+  normalizeClaudeUnifiedComposerRenderingText,
+  normalizeClaudeUnifiedPromptIdentityText,
+} from './promptIdentity';
 
 const DEFAULT_LIMIT = 32;
 const DEFAULT_PREFIX_RESIDUE_WINDOW_MS = 2 * 60_000;
@@ -39,10 +42,6 @@ function normalize(value: string): string {
  * across lines, so equality must ignore WHERE whitespace breaks fall — but every word must still
  * match exactly (a genuine user draft never collapses to a recorded text).
  */
-function collapseWhitespace(value: string): string {
-  return value.replace(/\s+/g, ' ');
-}
-
 type OwnComposerTextLogEntry = Readonly<{
   text: string;
   collapsedText: string;
@@ -125,7 +124,7 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
     shortPrefixResidueUntilMs?: number | undefined,
     minShortPrefixResidueChars = MIN_CONTEXTUAL_PREFIX_RESIDUE_CHARS,
   ): OwnComposerTextLogEntry => {
-    const collapsedText = collapseWhitespace(normalized);
+    const collapsedText = normalizeClaudeUnifiedComposerRenderingText(normalized);
     const newlineCount = countPromptNewlines(normalized);
     return {
       text: normalized,
@@ -178,7 +177,7 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
     matches(draft) {
       const normalized = normalize(draft);
       if (normalized.length === 0) return false;
-      const collapsed = collapseWhitespace(normalized);
+      const collapsed = normalizeClaudeUnifiedComposerRenderingText(normalized);
       const referenceMs = nowMs();
       const collapsedPasteLineCount = parseExactClaudePastedTextMarkerLineCount(normalized);
       return entries.some((entry) => (

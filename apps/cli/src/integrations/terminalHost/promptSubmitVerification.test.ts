@@ -3,48 +3,23 @@ import { describe, expect, it } from 'vitest';
 import { runTerminalPromptSubmission } from './promptSubmitVerification';
 
 describe('runTerminalPromptSubmission', () => {
-  it('verifies the paste before sending enter', async () => {
+  it('submits immediately and then verifies the composer', async () => {
     const calls: string[] = [];
 
     await expect(runTerminalPromptSubmission({
       promptText: 'first\nsecond',
-      verifyBeforeSubmit: async () => {
-        calls.push('verify-before');
-        return true;
-      },
       submitEnter: async () => {
         calls.push('enter');
         return 'success';
       },
-    })).resolves.toEqual({ success: true });
-
-    expect(calls).toEqual(['verify-before', 'enter']);
-  });
-
-  it('does not submit when pre-submit verification never proves the paste landed', async () => {
-    const calls: string[] = [];
-
-    await expect(runTerminalPromptSubmission({
-      promptText: 'first\nsecond',
-      verifyBeforeSubmit: async () => {
-        calls.push('verify-before');
+      verifyAfterSubmit: async () => {
+        calls.push('verify-after');
         return false;
       },
-      submitEnter: async () => {
-        calls.push('enter');
-        return 'success';
-      },
       wait: async () => {},
-      maxPreSubmitPollMs: 0,
-    })).resolves.toEqual({
-      success: false,
-      reason: 'verification_failed',
-      phase: 'after_write_before_enter',
-      duplicateRisk: 'possible',
-      submitMayHaveReachedPane: false,
-    });
+    })).resolves.toEqual({ success: true });
 
-    expect(calls).toEqual(['verify-before']);
+    expect(calls).toEqual(['enter', 'verify-after']);
   });
 
   it('settles before verifying and retries enter once when the pasted prompt remains in the composer', async () => {
