@@ -36,6 +36,11 @@ import {
 } from "./readCursor/resolveSessionReadCursorOperation";
 import { parseSessionMessageRole, resolveSessionMessageRole } from "./messageRole/resolveSessionMessageRole";
 import {
+    resolveSessionUnreadSinceWrite,
+    type SessionUnreadInputs,
+    type StoredSessionUnreadSince,
+} from "./attention/sessionAttentionFacts";
+import {
     applySessionTurnMutationToTurns,
     type SessionTurnNoOpReason,
 } from "./turns/applySessionTurnMutation";
@@ -183,6 +188,9 @@ export function resolveReadyProjectionEventType(params: Readonly<{
 function selectSessionActivityBadgeInputs() {
     return {
         seq: true,
+        // Not a badge input: `resolveSessionUnreadSinceWrite` decides the edge against the *stored*
+        // instant, so every writer that folds the fragment into its statement reads it here.
+        unreadSince: true,
         latestReadyEventSeq: true,
         pendingCount: true,
         pendingBlockedCount: true,
@@ -210,6 +218,25 @@ function toSessionActivityBadgeInputs(
         lastRuntimeIssue: value?.lastRuntimeIssue ?? null,
         active: value?.active ?? true,
         archivedAt: value?.archivedAt ?? null,
+    };
+}
+
+/**
+ * The **post-write** unread inputs for a writer that moves only one of them: start from the row as
+ * stored and layer the column this statement writes.
+ *
+ * Only `seq` and `lastViewedSessionSeq` appear, because `unreadSince` is the only attention fact
+ * application code maintains. The other three arms of the attention predicate move
+ * `Session.needsAttention`, which the database generates.
+ */
+function toSessionUnreadInputs(
+    stored: SessionActivityBadgeInputs,
+    after: Partial<SessionUnreadInputs> = {},
+): SessionUnreadInputs {
+    return {
+        seq: stored.seq ?? 0,
+        lastViewedSessionSeq: stored.lastViewedSessionSeq ?? null,
+        ...after,
     };
 }
 
@@ -536,6 +563,9 @@ export async function reassertSessionLatestTurnStatus(params: {
                 data: {
                     latestTurnStatus: latestTurnStatus.data,
                     latestTurnStatusObservedAt: BigInt(latestTurnStatusObservedAt),
+                    // `latestTurnStatus = 'failed'` is an attention arm, so this statement moves the
+                    // session into or out of attention — and nothing here has to say so:
+                    // `Session.needsAttention` is generated from this very column.
                     ...buildLegacyThinkingProjectionWriteData({
                         latestTurnId: session.latestTurnId ?? null,
                         latestTurnStatus: latestTurnStatus.data,
@@ -574,7 +604,7 @@ export async function applySessionTurnMutationInTx(params: Readonly<{
     tx: Tx;
     sessionId: string;
     mutation: SessionTurnMutationV1;
-    session: SessionActivityBadgeInputs & {
+    session: SessionActivityBadgeInputs & StoredSessionUnreadSince & {
         latestTurnId?: string | null;
         latestTurnStatusObservedAt?: unknown;
     };
@@ -672,6 +702,9 @@ export async function applySessionTurnMutationInTx(params: Readonly<{
                 lastRuntimeIssue: decision.materialized.lastRuntimeIssue === null
                     ? null
                     : JSON.stringify(decision.materialized.lastRuntimeIssue),
+                // `latestTurnStatus = 'failed'` is an attention arm, so this statement moves the
+                // session into or out of attention — and nothing here has to say so:
+                // `Session.needsAttention` is generated from this very column.
                 ...buildLegacyThinkingProjectionWriteData(decision.materialized),
             },
         });
@@ -1055,11 +1088,28 @@ export async function createSessionMessage(
             });
             const normalizedBeforeBadgeInputs = toSessionActivityBadgeInputs(beforeBadgeInputs);
 
+            // The unread fact moves with `seq`, so it is maintained inside the same statement that
+            // advances it. `shouldAdvanceReadCursorForNonUnreadMessage` depends only on the
+            // pre-write badge inputs, so the post-write cursor is known before the write.
+            const willAdvanceReadCursor = !attentionImpact.affectsUnread
+                && shouldAdvanceReadCursorForNonUnreadMessage(normalizedBeforeBadgeInputs);
+            const nextSeq = (normalizedBeforeBadgeInputs.seq ?? 0) + 1;
+
             const next = await tx.session.update({
                 where: { id: sessionId },
                 select: { seq: true },
                 data: {
                     seq: { increment: 1 },
+                    ...resolveSessionUnreadSinceWrite({
+                        stored: { unreadSince: beforeBadgeInputs?.unreadSince ?? null },
+                        after: toSessionUnreadInputs(normalizedBeforeBadgeInputs, {
+                            seq: nextSeq,
+                            lastViewedSessionSeq: willAdvanceReadCursor
+                                ? nextSeq
+                                : normalizedBeforeBadgeInputs.lastViewedSessionSeq,
+                        }),
+                        now: new Date(),
+                    }),
                 },
             });
 
@@ -1094,10 +1144,8 @@ export async function createSessionMessage(
                 }),
             });
 
-            const shouldAdvanceReadCursor = !attentionImpact.affectsUnread
-                && shouldAdvanceReadCursorForNonUnreadMessage(normalizedBeforeBadgeInputs);
             let nextLastViewedSessionSeq = normalizedBeforeBadgeInputs.lastViewedSessionSeq ?? null;
-            if (shouldAdvanceReadCursor) {
+            if (willAdvanceReadCursor) {
                 const { count } = await tx.session.updateMany({
                     where: {
                         id: sessionId,
@@ -1292,7 +1340,16 @@ export async function updateSessionMetadata(params: {
 
                 const { count } = await tx.session.updateMany({
                     where: { id: sessionId, metadataVersion: expectedVersion },
-                    data: { lastViewedSessionSeq: nextLastViewedSessionSeq },
+                    data: {
+                        lastViewedSessionSeq: nextLastViewedSessionSeq,
+                        ...resolveSessionUnreadSinceWrite({
+                            stored: session,
+                            after: toSessionUnreadInputs(session, {
+                                lastViewedSessionSeq: nextLastViewedSessionSeq,
+                            }),
+                            now: new Date(),
+                        }),
+                    },
                 });
 
                 if (count === 0) {
@@ -1332,7 +1389,18 @@ export async function updateSessionMetadata(params: {
                 data: {
                     metadata: metadataCiphertext,
                     metadataVersion: expectedVersion + 1,
-                    ...(typeof nextLastViewedSessionSeq === "number" ? { lastViewedSessionSeq: nextLastViewedSessionSeq } : {}),
+                    ...(typeof nextLastViewedSessionSeq === "number"
+                        ? {
+                            lastViewedSessionSeq: nextLastViewedSessionSeq,
+                            ...resolveSessionUnreadSinceWrite({
+                                stored: session,
+                                after: toSessionUnreadInputs(session, {
+                                    lastViewedSessionSeq: nextLastViewedSessionSeq,
+                                }),
+                                now: new Date(),
+                            }),
+                        }
+                        : {}),
                 },
             });
 
@@ -1463,6 +1531,9 @@ export async function updateSessionAgentState(params: {
                     ...(hasPendingRequestCountUpdate
                         ? { pendingRequestObservedAt: pendingRequestObservedAt === null ? null : new Date(pendingRequestObservedAt) }
                         : {}),
+                    // Both pending counters are attention arms, so crossing zero in either direction
+                    // moves the session into or out of attention — and nothing here has to say so:
+                    // `Session.needsAttention` is generated from these very columns.
                 },
             });
 
@@ -1718,7 +1789,14 @@ export async function applySessionReadCursorOperation(params: {
                         id: sessionId,
                         OR: [{ lastViewedSessionSeq: { lt: nextCursor } }, { lastViewedSessionSeq: null }],
                     },
-                data: { lastViewedSessionSeq: nextCursor },
+                data: {
+                    lastViewedSessionSeq: nextCursor,
+                    ...resolveSessionUnreadSinceWrite({
+                        stored: session,
+                        after: toSessionUnreadInputs(session, { lastViewedSessionSeq: nextCursor }),
+                        now: new Date(),
+                    }),
+                },
             });
 
             if (count === 0) {

@@ -71,16 +71,6 @@ const sessionDbMocks = createDbMocks({
     sessionOrganizationCheckpoint: ["findUnique"],
 } as const);
 
-export const sessionLastViewedSessionSeqFieldRef = Object.freeze({
-    modelName: "Session",
-    name: "lastViewedSessionSeq",
-    typeName: "Int",
-    isList: false,
-});
-Object.assign(sessionDbMocks.db.session, {
-    fields: { lastViewedSessionSeq: sessionLastViewedSessionSeqFieldRef },
-});
-
 const txDbMocks = createDbMocks({
     account: ["findUnique"],
     session: ["create", "findFirst", "findMany", "findUnique", "findUniqueOrThrow", "update", "updateMany"],

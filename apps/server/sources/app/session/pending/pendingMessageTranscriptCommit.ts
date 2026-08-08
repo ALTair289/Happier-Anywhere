@@ -1,4 +1,5 @@
 import { parseSessionMessageRole } from "@/app/session/messageRole/resolveSessionMessageRole";
+import { stampMissingSessionUnreadSince } from "@/app/session/attention/sessionAttentionFacts";
 import type { Tx } from "@/storage/inTx";
 import {
     readPendingLocalId,
@@ -113,6 +114,16 @@ export async function createSessionMessageFromPending(tx: Tx, params: {
         data: {
             seq: { increment: 1 },
         },
+    });
+    // Materializing a pending message advances `seq` without moving the read cursor, so the session
+    // is unread afterwards. `stampMissingSessionUnreadSince` only writes where nothing is stored, so
+    // a session that was already unread keeps its original edge instant. The attention flag itself
+    // needs no write: `Session.needsAttention` is generated from `seq` and the read cursor, so the
+    // `seq` increment above has already moved it.
+    await stampMissingSessionUnreadSince({
+        client: tx,
+        unreadSessionIds: [sessionId],
+        now: messageCreatedAt,
     });
 
     const created = await tx.sessionMessage.create({

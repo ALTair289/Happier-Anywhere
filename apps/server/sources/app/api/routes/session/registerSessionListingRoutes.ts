@@ -14,23 +14,31 @@ import { type Fastify } from "../../types";
 import {
     encodeSessionDataEncryptionKey,
     mapStoredSessionRuntimeActivityProjection,
+    omitSessionListProjectionFallbackColumns,
     parseStoredSessionLatestTurnStatus,
     parseStoredSessionRuntimeIssue,
 } from "./v2SessionListRows";
 import {
+    createV2ActiveSessionListRowsWhere,
     createV2SessionListCursorWhere,
     createV2SessionListPage,
+    createV2SessionListVisibilityArmsReader,
     findV2SessionListRowById,
     findV2SessionListRows,
     mapV2SessionListRows,
     resolveV2SessionListCursorForVisibleRows,
+    runWithSessionListProjectionFallback,
+    V2_ACTIVE_SESSION_LIST_ORDER_BY,
+    V2_ACTIVE_SESSION_LIST_ROW_LIMIT,
     V2_SESSION_LIST_ORDER_BY,
 } from "./v2SessionListPage";
 import { createV2SessionListInitialPage } from "./v2SessionListInitialPage";
 import { createV2SessionListServerTiming } from "./v2SessionListServerTiming";
 
 const V2_ACTIVE_SESSION_LIST_QUERYSTRING_SCHEMA = z.object({
-    limit: z.coerce.number().int().min(1).max(500).default(150),
+    limit: z.coerce.number().int().min(1)
+        .max(V2_ACTIVE_SESSION_LIST_ROW_LIMIT)
+        .default(V2_ACTIVE_SESSION_LIST_ROW_LIMIT),
 }).optional();
 
 const OPTIONAL_BOOLEAN_QUERY_PARAM_SCHEMA = z.preprocess((value) => {
@@ -43,11 +51,16 @@ const V2_PAGED_SESSION_LIST_QUERYSTRING_SCHEMA = z.object({
     cursor: z.string().optional(),
     limit: z.coerce.number().int().min(1).max(200).default(50),
     includeAttention: OPTIONAL_BOOLEAN_QUERY_PARAM_SCHEMA,
+    /**
+     * Merge the active-session family into this response instead of leaving the client to fetch it
+     * from `GET /v2/sessions/active`. Additive and optional: a server that predates it simply drops
+     * the key, which is why a client only stops issuing the separate call once the server advertises
+     * the capability.
+     */
+    includeActive: OPTIONAL_BOOLEAN_QUERY_PARAM_SCHEMA,
 }).optional();
 
-const ACTIVE_SESSION_WINDOW_MS = 1000 * 60 * 15;
-
-function parseInitialIncludeAttention(value: unknown): boolean {
+function parseInitialIncludeFlag(value: unknown): boolean {
     return value === true || value === "true" || value === "1";
 }
 
@@ -70,6 +83,7 @@ const V1_SESSION_LIST_ROW_SELECT = {
     agentState: true,
     agentStateVersion: true,
     lastViewedSessionSeq: true,
+    unreadSince: true,
     pendingPermissionRequestCount: true,
     pendingUserActionRequestCount: true,
     latestTurnId: true,
@@ -99,12 +113,26 @@ function createV1SessionShareSelect(sessionSelect: Prisma.SessionSelect): Prisma
     };
 }
 
+const V1_SESSION_LIST_ROW_LEGACY_SELECT = omitSessionListProjectionFallbackColumns(V1_SESSION_LIST_ROW_SELECT);
+
+/**
+ * The legacy list shares the v2 projection-fallback seam: a binary running ahead of
+ * `prisma migrate deploy` asks the old schema for a column it does not have, and the old-schema-safe
+ * projection answers instead of the request failing outright.
+ */
 async function findV1SessionListRows(userId: string) {
-    return await findV1SessionListRowsWithSelect({
-        userId,
-        sessionSelect: V1_SESSION_LIST_ROW_SELECT,
-        shareSessionSelect: V1_SESSION_LIST_ROW_SELECT,
-    });
+    return await runWithSessionListProjectionFallback(
+        () => findV1SessionListRowsWithSelect({
+            userId,
+            sessionSelect: V1_SESSION_LIST_ROW_SELECT,
+            shareSessionSelect: V1_SESSION_LIST_ROW_SELECT,
+        }),
+        () => findV1SessionListRowsWithSelect({
+            userId,
+            sessionSelect: V1_SESSION_LIST_ROW_LEGACY_SELECT,
+            shareSessionSelect: V1_SESSION_LIST_ROW_LEGACY_SELECT,
+        }),
+    );
 }
 
 async function findV1SessionListRowsWithSelect(params: Readonly<{
@@ -156,6 +184,7 @@ export function registerSessionListingRoutes(app: Fastify) {
                 agentState: v.agentState,
                 agentStateVersion: v.agentStateVersion,
                 lastViewedSessionSeq: v.lastViewedSessionSeq ?? null,
+                unreadSince: v.unreadSince?.getTime() ?? null,
                 pendingPermissionRequestCount: v.pendingPermissionRequestCount,
                 pendingUserActionRequestCount: v.pendingUserActionRequestCount,
                 latestTurnId: v.latestTurnId ?? null,
@@ -186,6 +215,7 @@ export function registerSessionListingRoutes(app: Fastify) {
                     agentState: v.agentState,
                     agentStateVersion: v.agentStateVersion,
                     lastViewedSessionSeq: v.lastViewedSessionSeq ?? null,
+                    unreadSince: v.unreadSince?.getTime() ?? null,
                     pendingPermissionRequestCount: v.pendingPermissionRequestCount,
                     pendingUserActionRequestCount: v.pendingUserActionRequestCount,
                     latestTurnId: v.latestTurnId ?? null,
@@ -224,16 +254,13 @@ export function registerSessionListingRoutes(app: Fastify) {
         },
     }, async (request, reply) => {
         const userId = request.userId;
-        const limit = request.query?.limit || 150;
+        const limit = request.query?.limit || V2_ACTIVE_SESSION_LIST_ROW_LIMIT;
         const timing = createV2SessionListServerTiming(request);
 
         const sessions = await timing.measureAsync("query", async () => findV2SessionListRows({
             userId,
-            where: {
-                active: true,
-                lastActiveAt: { gt: new Date(Date.now() - ACTIVE_SESSION_WINDOW_MS) },
-            },
-            orderBy: { lastActiveAt: 'desc' },
+            where: createV2ActiveSessionListRowsWhere(),
+            orderBy: V2_ACTIVE_SESSION_LIST_ORDER_BY,
             take: limit,
         }));
 
@@ -263,11 +290,13 @@ export function registerSessionListingRoutes(app: Fastify) {
             cursor,
             limit = 50,
             includeAttention = false,
+            includeActive = false,
         } = request.query || {};
         const initialPinnedSessionIds = !cursor
             ? await timing.measureAsync("cursor", async () => fetchSessionOrganizationPinnedSessionIds(userId))
             : [];
-        const includeInitialAttention = !cursor && parseInitialIncludeAttention(includeAttention);
+        const includeInitialAttention = !cursor && parseInitialIncludeFlag(includeAttention);
+        const includeInitialActive = !cursor && parseInitialIncludeFlag(includeActive);
 
         let decodedCursor: { sessionId: string; meaningfulActivityAt: number } | undefined;
         if (cursor) {
@@ -287,21 +316,28 @@ export function registerSessionListingRoutes(app: Fastify) {
             ...createV2SessionListCursorWhere(decodedCursor),
         };
 
+        // One reader for the whole request: the viewer's shared-session ids are the same for the page
+        // read and for every family read the initial page issues, and resolving them per read cost a
+        // `SessionShare` statement each.
+        const visibilityArms = createV2SessionListVisibilityArmsReader(userId);
         const sessions = await timing.measureAsync("query", async () => findV2SessionListRows({
             userId,
             where,
             orderBy: V2_SESSION_LIST_ORDER_BY,
             take: limit + 1,
+            visibilityArms,
         }));
 
         let payload;
-        if (!cursor && (initialPinnedSessionIds.length > 0 || includeInitialAttention)) {
+        if (!cursor && (initialPinnedSessionIds.length > 0 || includeInitialAttention || includeInitialActive)) {
             payload = await createV2SessionListInitialPage({
                 userId,
                 pageRows: sessions,
                 limit,
                 pinnedSessionIds: initialPinnedSessionIds,
                 includeAttentionRows: includeInitialAttention,
+                includeActiveRows: includeInitialActive,
+                visibilityArms,
                 timing: timing.initialPageTiming(),
             });
         } else {

@@ -320,6 +320,42 @@ model Session {
     runtimeActivityObservedAt BigInt?
     runtimeActivityRevision BigInt @default(0)
     meaningfulActivityAt DateTime?
+    // Materialized unread fact. NULL means the session is read; a timestamp is the instant the
+    // session crossed the read -> unread edge. It is never advanced while a session merely stays
+    // unread, so it doubles as a stable ordering key for the attention page. Maintained by
+    // `sources/app/session/attention/sessionAttentionFacts.ts` at every `seq` /
+    // `lastViewedSessionSeq` writer; it replaces the unindexable `seq > lastViewedSessionSeq`
+    // column comparison.
+    unreadSince       DateTime?
+    // Materialized attention fact: true while the session needs the user, false once it does not.
+    // The reasons are exactly the arms of the attention predicate: unread, a failed latest turn, a
+    // pending permission request, or a pending user-action request. It collapses that 4-way
+    // disjunction (which no index on any engine can serve) into `needsAttention = true`.
+    //
+    // READ-ONLY. It is a **database-generated column**, not a writer-maintained one: every arm is a
+    // column of this same row, so the fact is a pure function of the row and the database computes
+    // it. That is deliberate and load-bearing — a materialized fact maintained by application
+    // writers is only as correct as the version of the writer that last touched the row, so a
+    // rolling deploy or a rollback could give a session a reason while leaving the flag false and
+    // the indexed reader could not see it. Nothing can write this column (the engines reject it), so
+    // that skew class does not exist and needs neither writer wiring nor reader repair. The
+    // per-provider DDL lives in `20260808120000_add_session_needs_attention` (PostgreSQL STORED,
+    // MySQL/SQLite VIRTUAL), which is the single place the expression is written; `dbgenerated()` is
+    // what keeps Prisma Client from putting the column in its INSERTs, and it is deliberately given
+    // NO argument. An argument would be a second copy of the predicate — one per datasource schema,
+    // free to drift from the DDL that actually computes the value, and quoted for one engine's
+    // identifier syntax while three engines read it. It would also never produce this column: from an
+    // expression `prisma migrate dev` emits a plain column with a DEFAULT, evaluated once at INSERT
+    // and stale forever after, which is exactly the failure mode a generated column exists to remove.
+    //
+    // It is a boolean rather than an edge timestamp because the attention read also orders by
+    // `meaningfulActivityAt DESC, id DESC` and takes a limit. A boolean is an *equality* key, so
+    // `[accountId, needsAttention, meaningfulActivityAt desc, id desc]` binds both leading columns
+    // and then walks that ordering in index order — no sort, and the limit stops the scan. A
+    // timestamp fact cannot serve the ordering at all, so the engine sorts every matched row, which
+    // costs more than the filter saves as soon as an account has more attention rows than the limit
+    // (measured on MySQL at ~40% attention selectivity: 0.177 ms here vs 1.94 ms for a timestamp).
+    needsAttention    Boolean             @default(dbgenerated())
     active            Boolean             @default(false)
     archivedAt        DateTime?
     lastActiveAt      DateTime            @default(now())
@@ -345,6 +381,57 @@ model Session {
     @@unique([accountId, tag])
     @@index([accountId, updatedAt])
     @@index([accountId, meaningfulActivityAt, id])
+    // The attention read, exactly: `accountId = ? AND needsAttention = true` (equality on both) then
+    // `ORDER BY meaningfulActivityAt DESC, id DESC LIMIT ?` walked in index order. Both the filter
+    // and the sort are served, so the limit — not the account's attention count — bounds the work.
+    // There is deliberately no `[accountId, unreadSince]` index: nothing can seek it (the attention
+    // predicate no longer names `unreadSince`, and the repair path is primary-key driven), so it was
+    // pure write amplification on this table.
+    //
+    // This index is a deliberate LATENCY trade, not a total-work saving, and the limits below are
+    // part of the deal. Measured on the statements Prisma actually issues — the read fans out over
+    // four visibility/activity arms, and on PostgreSQL/MySQL each carries the `shares` relation join
+    // — against production-median row widths (`metadata` p50 ≈ 9.2 kB, so rows are off-page and a
+    // filtered scan costs real heap I/O). Only one arm, the `accountId` +
+    // `meaningfulActivityAt IS NOT NULL` one, is the arm this index serves.
+    //
+    // What it buys, at the selectivity accounts actually run at (an account normally holds far fewer
+    // than 100 attention sessions): PostgreSQL 17 3.56 ms → 0.19 ms and MySQL 8.0.46 9.62 ms →
+    // 0.099 ms at 0.5% attention; 3.21 → 0.40 ms and 10.3 → 0.24 ms at 2%. The win shrinks as
+    // selectivity rises (at 42% PostgreSQL 0.60 → 0.44 ms) because a dense attention set lets the
+    // baseline plan hit the limit early too.
+    //
+    // What it costs: `meaningfulActivityAt` is a key column here and every meaningful session
+    // message moves it (`updateSessionMessageActivityProjection`), so this index is maintained on
+    // the hottest write in the product. Measured per 2,000-row activity burst: +135 bytes of WAL per
+    // row on PostgreSQL (+6.7% over the same burst without it), +0.9% WAL pages on SQLite, ~+13%
+    // redo on MySQL. Activity writes outnumber session-list opens by roughly three to four orders of
+    // magnitude on a real heavy account, so on total work this index loses; it is kept because the
+    // cost lands on a background write and the saving lands on a user-facing open.
+    //
+    // Optimizer boundary (MySQL): index selection is a cost-model decision, not a guarantee. At the
+    // row widths above, MySQL 8.0.46 chose this index with no sort at every selectivity measured
+    // from 0.5% to 90%. On a slim-row fixture an earlier measurement saw MySQL abandon it between
+    // 60% and 70% in favour of `[accountId, archivedAt]` plus a sort over the whole account. That
+    // degradation is graceful — the fallback is exactly the plan this index does not exist for — and
+    // `FORCE INDEX` recovered ~28x there, so the boundary is a documented limit, not a hazard.
+    //
+    // SQLite statistics: nothing in `apps/server` runs `ANALYZE` or `PRAGMA optimize`, so a shipped
+    // light/self-hosted database has no `sqlite_stat1`. That is not load-bearing: on the real schema
+    // at 50k rows, SQLite 3.51 chose this index at 2–78% selectivity both with and without collected
+    // statistics. (An earlier measurement reported that statistics flip the planner off this index;
+    // that did not reproduce.)
+    //
+    // Partial index (`WHERE needsAttention`, PostgreSQL/SQLite only): measured to read identically
+    // and to be ~13x smaller, and to remove 100% of the write amplification — but only for rows
+    // *outside* the predicate, and the hot path does not produce those. The write that moves
+    // `meaningfulActivityAt` is a session message, and the same write advances `seq` past
+    // `lastViewedSessionSeq`; because `needsAttention` is generated, the engine recomputes it from
+    // that row as part of the very same write, so the row is inside the predicate by the time the
+    // index is maintained. A message that leaves the session read is by construction one that skips
+    // the activity write entirely. So the partial form would skip nothing on the hot path, and MySQL
+    // has no equivalent, so adopting it would also diverge the three datasources.
+    @@index([accountId, needsAttention, meaningfulActivityAt, id])
     @@index([accountId, archivedAt])
     @@index([lastActiveAt, updatedAt])
 }

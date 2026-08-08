@@ -12,12 +12,10 @@ import {
     resetSessionRouteMocks,
     sessionFindFirst,
     sessionFindMany,
-    sessionLastViewedSessionSeqFieldRef,
     sessionPinFindMany,
 } from "./sessionRoutes.testkit";
-import {
-    DEFAULT_V2_SESSION_LIST_INITIAL_ATTENTION_ROW_LIMIT,
-} from "./v2SessionListInitialPage";
+import { DEFAULT_V2_SESSION_LIST_INITIAL_ATTENTION_ROW_LIMIT } from "./v2SessionListInitialPage";
+import { V2_ACTIVE_SESSION_LIST_ROW_LIMIT } from "./v2SessionListPage";
 
 function pagedSessionRow(
     id: string,
@@ -186,36 +184,123 @@ describe("sessionRoutes v2 sessions snapshot", () => {
             id: "read-ready",
             lastViewedSessionSeq: 742,
         };
+        // Two read rows, which is more than the requested limit — so the page has a next page and the
+        // attention family can extend past it. A page that is already the whole visible list holds
+        // every attention row it could, and the read is skipped outright.
+        const readPageRows = [9_000, 8_000].map((activityAt, index) => ({
+            ...pagedSessionRow(`page-${index === 0 ? "a" : "b"}`, { meaningfulActivityAt: new Date(activityAt) }),
+            lastViewedSessionSeq: 1,
+        }));
         sessionPinFindMany.mockResolvedValue([]);
-        sessionFindMany
-            .mockResolvedValueOnce([])
-            .mockResolvedValueOnce([])
-            .mockResolvedValueOnce([unreadClaudeRow, readReadyRow])
-            .mockResolvedValueOnce([]);
+        // The attention read is issued as one statement per (visibility arm x activity branch), so
+        // this double answers by predicate shape rather than by call index. Returning the same rows
+        // from both visibility arms also proves the merge de-duplicates them.
+        sessionFindMany.mockImplementation(async (args: any) => {
+            const where = args?.where ?? {};
+            const isAttentionRead = JSON.stringify(where).includes("needsAttention");
+            const isActivityBranch = where.meaningfulActivityAt != null;
+            if (!isActivityBranch) return [];
+            return isAttentionRead ? [unreadClaudeRow, readReadyRow] : readPageRows;
+        });
 
         const route = await createSessionRouteTestBuilder("GET", "/v2/sessions");
         const { response } = await route.invoke({
-            query: { includeAttention: true, limit: 10 },
+            query: { includeAttention: true, limit: 1 },
         });
 
         expect(response).toEqual(expect.objectContaining({
-            sessions: [expect.objectContaining({ id: "claude-unread" })],
+            sessions: [
+                expect.objectContaining({ id: "claude-unread" }),
+                expect.objectContaining({ id: "page-a" }),
+            ],
         }));
-        expect(sessionFindMany).toHaveBeenCalledTimes(4);
-        expect(sessionFindMany).toHaveBeenNthCalledWith(3, expect.objectContaining({
-            where: expect.objectContaining({
-                archivedAt: null,
-                AND: [{
-                    OR: expect.arrayContaining([
-                        { lastViewedSessionSeq: null, seq: { gt: 0 } },
-                        { seq: { gt: sessionLastViewedSessionSeqFieldRef } },
-                    ]),
-                }],
-            }),
-            take: DEFAULT_V2_SESSION_LIST_INITIAL_ATTENTION_ROW_LIMIT + 1,
-        }));
+
+        const attentionCalls = sessionFindMany.mock.calls
+            .map(([args]: any[]) => args)
+            .filter((args: any) => JSON.stringify(args?.where ?? {}).includes("needsAttention"));
+        expect(attentionCalls.length).toBeGreaterThan(0);
+        for (const args of attentionCalls) {
+            expect(args).toEqual(expect.objectContaining({
+                where: expect.objectContaining({
+                    archivedAt: null,
+                    // Attention must be a single index seek on the materialized `needsAttention`
+                    // fact. The predicate it replaces is a four-way disjunction over four different
+                    // columns, which no engine can serve from an index, so it scanned every session
+                    // of the account on every attention refresh.
+                    needsAttention: true,
+                }),
+                // The family's budget, undiminished: none of the page's own rows needs attention, so
+                // the read still asks for the whole cap (plus the branch's own has-next probe row).
+                take: DEFAULT_V2_SESSION_LIST_INITIAL_ATTENTION_ROW_LIMIT + 1,
+            }));
+            // The read starts where the page ends, so the rows the page already carries are not
+            // fetched a second time.
+            expect(JSON.stringify(args.where)).toContain("page-b");
+            // Anti-regression: keeping the raw arms beside the materialized column would satisfy the
+            // matcher above while leaving the unservable disjunction on the hot path.
+            expect(JSON.stringify(args.where)).not.toContain("pendingPermissionRequestCount");
+            expect(JSON.stringify(args.where)).not.toContain("lastViewedSessionSeq");
+        }
     });
 
+
+    it("merges the active-session family into the initial page when includeActive is set", async () => {
+        const pageRow = pagedSessionRow("page-row", { meaningfulActivityAt: new Date(9_000) });
+        // Live on a machine but far enough down the ordered list that the page itself misses it —
+        // the exact row the separate `/v2/sessions/active` round trip existed to recover.
+        const activeRow = pagedSessionRow("live-elsewhere", {
+            meaningfulActivityAt: new Date(1),
+            active: true,
+            lastActiveAt: new Date(),
+        });
+        sessionPinFindMany.mockResolvedValue([]);
+        sessionFindMany.mockImplementation(async (args: any) => {
+            const where = args?.where ?? {};
+            if (where.active === true) return [activeRow];
+            return where.meaningfulActivityAt != null ? [pageRow] : [];
+        });
+
+        const route = await createSessionRouteTestBuilder("GET", "/v2/sessions");
+        const { response } = await route.invoke({
+            query: { includeActive: true, limit: 10 },
+        });
+
+        expect(response).toEqual(expect.objectContaining({
+            sessions: [
+                expect.objectContaining({ id: "live-elsewhere" }),
+                expect.objectContaining({ id: "page-row" }),
+            ],
+        }));
+
+        const activeCalls = sessionFindMany.mock.calls
+            .map(([args]: any[]) => args)
+            .filter((args: any) => args?.where?.active === true);
+        expect(activeCalls).toEqual([
+            expect.objectContaining({
+                where: expect.objectContaining({
+                    archivedAt: null,
+                    active: true,
+                    lastActiveAt: { gt: expect.any(Date) },
+                }),
+                orderBy: { lastActiveAt: "desc" },
+                // Same symbol the standalone `/v2/sessions/active` endpoint is bounded by: one family,
+                // one bound. The two readers previously took 500 and 150 for the same rows.
+                take: V2_ACTIVE_SESSION_LIST_ROW_LIMIT,
+            }),
+        ]);
+    });
+
+    it("does not read the active family when includeActive is absent", async () => {
+        sessionPinFindMany.mockResolvedValue([]);
+        sessionFindMany.mockResolvedValue([]);
+
+        const route = await createSessionRouteTestBuilder("GET", "/v2/sessions");
+        await route.invoke({ query: { limit: 10 } });
+
+        expect(
+            sessionFindMany.mock.calls.filter(([args]: any[]) => args?.where?.active === true),
+        ).toEqual([]);
+    });
 
     it("exposes diagnostic route timing headers only when explicitly requested", async () => {
         sessionFindMany.mockResolvedValue([]);

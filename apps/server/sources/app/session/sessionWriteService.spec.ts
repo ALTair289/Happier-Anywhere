@@ -131,6 +131,9 @@ describe("sessionWriteService", () => {
                 data: {
                     latestTurnStatus: "completed",
                     latestTurnStatusObservedAt: BigInt(200),
+                    // `latestTurnStatus` moves no fact this statement has to write: `unreadSince`
+                    // does not depend on it, and `needsAttention` is generated from this very
+                    // column, so the write is exactly the columns the caller asked for.
                     thinking: false,
                     thinkingAt: new Date(200),
                 },
@@ -563,7 +566,10 @@ describe("sessionWriteService", () => {
                 where: { id: "s1" },
                 select: { seq: true },
                 data: {
+                    // The message auto-advances the read cursor, so the session stays read and the
+                    // unread edge instant is cleared in the same statement that moves `seq`.
                     seq: { increment: 1 },
+                    unreadSince: null,
                 },
             });
             expect(currentTx.session.updateMany).toHaveBeenCalledWith({
@@ -1665,7 +1671,10 @@ describe("sessionWriteService", () => {
                 where: { id: "s1" },
                 select: { seq: true },
                 data: {
+                    // A read session crossing into unread stamps the unread edge instant, taken as
+                    // the statement is built so it can never post-date the message that causes it.
                     seq: { increment: 1 },
+                    unreadSince: beforeLock,
                 },
             });
             expect(currentTx.sessionMessage.create).toHaveBeenCalledWith(
@@ -1943,6 +1952,8 @@ describe("sessionWriteService", () => {
                     pendingPermissionRequestCount: 2,
                     pendingUserActionRequestCount: 1,
                     pendingRequestObservedAt: expect.any(Date),
+                    // The pending counters are attention arms, but `needsAttention` is generated
+                    // from them, so this statement writes the counters and nothing else.
                 },
             });
             expect(res).toEqual({
@@ -2182,7 +2193,7 @@ describe("sessionWriteService", () => {
                     id: "s1",
                     OR: [{ lastViewedSessionSeq: { lt: 8 } }, { lastViewedSessionSeq: null }],
                 },
-                data: { lastViewedSessionSeq: 8 },
+                data: { lastViewedSessionSeq: 8, unreadSince: null },
             });
             expect(res).toEqual({
                 ok: true,
@@ -2198,6 +2209,9 @@ describe("sessionWriteService", () => {
                 .mockResolvedValueOnce({
                     seq: 8,
                     lastViewedSessionSeq: null,
+                    // The session stays unread after this cursor move (8 > 4) and already carries its
+                    // edge instant, so the write must not touch `unreadSince`.
+                    unreadSince: new Date("2026-01-01T00:00:00.000Z"),
                     pendingCount: 0,
                     pendingPermissionRequestCount: 0,
                     pendingUserActionRequestCount: 0,
@@ -2220,6 +2234,8 @@ describe("sessionWriteService", () => {
                     id: "s1",
                     OR: [{ lastViewedSessionSeq: { lt: 4 } }, { lastViewedSessionSeq: null }],
                 },
+                // The session is still unread afterwards and already carries its edge instant, so
+                // the statement writes only the cursor — the original instant survives untouched.
                 data: { lastViewedSessionSeq: 4 },
             });
             expect(res).toEqual({
@@ -3474,7 +3490,7 @@ describe("sessionWriteService", () => {
                     id: "s1",
                     lastViewedSessionSeq: { gt: 7 },
                 },
-                data: { lastViewedSessionSeq: 7 },
+                data: { lastViewedSessionSeq: 7, unreadSince: expect.any(Date) },
             });
             expect(res).toEqual({
                 ok: true,
@@ -3557,7 +3573,7 @@ describe("sessionWriteService", () => {
                     id: "s1",
                     lastViewedSessionSeq: { gt: 738 },
                 },
-                data: { lastViewedSessionSeq: 738 },
+                data: { lastViewedSessionSeq: 738, unreadSince: expect.any(Date) },
             });
             expect(res).toEqual({
                 ok: true,
@@ -3662,7 +3678,7 @@ describe("sessionWriteService", () => {
                     id: "s1",
                     OR: [{ lastViewedSessionSeq: { lt: 8 } }, { lastViewedSessionSeq: null }],
                 },
-                data: { lastViewedSessionSeq: 8 },
+                data: { lastViewedSessionSeq: 8, unreadSince: null },
             });
             expect(res).toEqual({
                 ok: true,

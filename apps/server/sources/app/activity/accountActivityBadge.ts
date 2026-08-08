@@ -1,3 +1,4 @@
+import { isSessionUnread } from "@/app/session/attention/sessionAttentionFacts";
 import { db } from "@/storage/db";
 import {
     PrimaryTurnStatusV1Schema,
@@ -68,10 +69,7 @@ export function computeSessionContributesToActivityBadge(session: SessionActivit
     const latestTurnStatus = parseStoredTurnStatus(session.latestTurnStatus);
     const lastRuntimeIssue = parseStoredRuntimeIssue(session.lastRuntimeIssue);
 
-    const hasUnread =
-        typeof lastViewedSessionSeq === "number"
-            ? seq > lastViewedSessionSeq
-            : seq > 0;
+    const hasUnread = isSessionUnread({ seq, lastViewedSessionSeq });
     const hasFailedRuntimeIssue = latestTurnStatus === "failed" && lastRuntimeIssue !== null;
     return hasFailedRuntimeIssue
         || hasUnread

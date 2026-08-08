@@ -141,12 +141,24 @@ installDbModuleMock(() => ({
     db,
 }));
 
+/**
+ * `mark-unread` resolves the newest unread-affecting main-transcript message before it decides where
+ * to put the cursor, so the transaction it runs in must expose `sessionMessage` too. While it did
+ * not, every `mark-unread` case threw a TypeError that `applySessionReadCursorOperation`'s own catch
+ * turned into `{ ok: false, error: "internal" }` — the tests below reached their assertions with the
+ * write never issued.
+ */
+const txSessionMessageFindMany = vi.hoisted(() => vi.fn(async (): Promise<unknown[]> => []));
+
 vi.mock("@/storage/inTx", () => {
     const { inTx, afterTx } = createInTxHarness(() => ({
             session: {
                 findUnique: sessionFindUnique,
                 updateMany: sessionUpdateMany,
                 update: txSessionUpdate,
+            },
+            sessionMessage: {
+                findMany: txSessionMessageFindMany,
             },
     }));
 
@@ -163,6 +175,8 @@ describe("sessionUpdateHandler (session state AccountChange integration)", () =>
         markAccountChanged.mockClear();
         markSessionInactive.mockClear();
         sessionUpdateMany.mockClear();
+        txSessionMessageFindMany.mockClear();
+        txSessionMessageFindMany.mockResolvedValue([]);
         txSessionUpdate.mockClear();
         txSessionUpdate.mockResolvedValue({ id: "s1" });
         resetDbMocks();
@@ -204,6 +218,14 @@ describe("sessionUpdateHandler (session state AccountChange integration)", () =>
 
         const callback = vi.fn();
         await handler({ sid: "s1", lastViewedSessionSeq: 9 }, callback);
+
+        // The badge refresh is debounced (`SESSION_PARTICIPANT_BADGE_REFRESH_DEBOUNCE_MS`), so it is
+        // scheduled rather than sent by the time the handler resolves. Reading the spy immediately
+        // could only ever observe zero calls, which is how this expectation stopped running at all.
+        await vi.waitFor(() => expect(sendPushNotificationsAsyncSpy).toHaveBeenCalled(), {
+            timeout: 10_000,
+            interval: 25,
+        });
 
         const [chunk] = sendPushNotificationsAsyncSpy.mock.calls[0] ?? [];
         expect(Array.isArray(chunk)).toBe(true);
@@ -363,7 +385,9 @@ describe("sessionUpdateHandler (session state AccountChange integration)", () =>
 
         expect(sessionUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
             where: { id: "s1", OR: [{ lastViewedSessionSeq: { lt: 7 } }, { lastViewedSessionSeq: null }] },
-            data: { lastViewedSessionSeq: 7 },
+            // Catching the cursor up clears the unread edge instant in the same statement. The
+            // attention flag needs no write: it is generated from the very cursor being moved.
+            data: { lastViewedSessionSeq: 7, unreadSince: null },
         }));
         expect(buildUpdateSessionUpdate).toHaveBeenNthCalledWith(1, "s1", 201, "upd-g", undefined, undefined, {
             lastViewedSessionSeq: 7,
@@ -416,7 +440,9 @@ describe("sessionUpdateHandler (session state AccountChange integration)", () =>
 
         expect(sessionUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
             where: { id: "s1", lastViewedSessionSeq: { gt: 6 } },
-            data: { lastViewedSessionSeq: 6 },
+            // Marking unread stamps the read -> unread edge instant in the same statement. The
+            // attention flag needs no write: it is generated from the very cursor being moved.
+            data: { lastViewedSessionSeq: 6, unreadSince: expect.any(Date) },
         }));
         expect(buildUpdateSessionUpdate).toHaveBeenNthCalledWith(1, "s1", 201, "upd-g", undefined, undefined, {
             lastViewedSessionSeq: 6,
@@ -473,7 +499,9 @@ describe("sessionUpdateHandler (session state AccountChange integration)", () =>
 
         expect(sessionUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
             where: { id: "s1", OR: [{ lastViewedSessionSeq: { lt: 7 } }, { lastViewedSessionSeq: null }] },
-            data: { lastViewedSessionSeq: 7 },
+            // Catching the cursor up clears the unread edge instant in the same statement. The
+            // attention flag needs no write: it is generated from the very cursor being moved.
+            data: { lastViewedSessionSeq: 7, unreadSince: null },
         }));
         expect(callback).toHaveBeenCalledWith({
             result: "success",
@@ -524,7 +552,9 @@ describe("sessionUpdateHandler (session state AccountChange integration)", () =>
 
         expect(sessionUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
             where: { id: "s1", lastViewedSessionSeq: { gt: 6 } },
-            data: { lastViewedSessionSeq: 6 },
+            // Marking unread stamps the read -> unread edge instant in the same statement. The
+            // attention flag needs no write: it is generated from the very cursor being moved.
+            data: { lastViewedSessionSeq: 6, unreadSince: expect.any(Date) },
         }));
         expect(callback).toHaveBeenCalledWith({
             result: "success",
