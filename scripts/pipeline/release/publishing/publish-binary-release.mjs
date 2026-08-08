@@ -156,7 +156,7 @@ async function computePublishVersion(productSpec, channel, baseVersion, opts) {
 /**
  * @param {string[]} argv
  */
-function parsePublishBinaryReleaseArgs(argv) {
+export function parsePublishBinaryReleaseArgs(argv) {
   return parseArgs({
     args: argv,
     options: {
@@ -171,6 +171,10 @@ function parsePublishBinaryReleaseArgs(argv) {
       'candidate-dir': { type: 'string', default: '' },
       'authorized-sha': { type: 'string', default: '' },
       'github-output': { type: 'string', default: '' },
+      'publish-rolling': { type: 'string', default: 'true' },
+      'prepared-artifacts': { type: 'boolean', default: false },
+      'finalized-artifacts': { type: 'boolean', default: false },
+      'resolve-version-only': { type: 'boolean', default: false },
       'base-version': { type: 'string', default: '' },
       'dry-run': { type: 'boolean', default: false },
     },
@@ -213,10 +217,10 @@ export async function publishBinaryReleaseMain(options = {}) {
   const releaseMessage = String(values['release-message'] ?? '').trim();
   const explicitVersion = String(values.version ?? '').trim();
   const phase = String(values.phase ?? 'publish').trim();
-  if (!['publish', 'build-candidate', 'finalize-candidate', 'promote-rolling'].includes(phase)) {
-    throw new Error('--phase must be publish|build-candidate|finalize-candidate|promote-rolling');
+  if (!['publish', 'publish-immutable', 'build-candidate', 'finalize-candidate', 'promote-rolling'].includes(phase)) {
+    throw new Error('--phase must be publish|publish-immutable|build-candidate|finalize-candidate|promote-rolling');
   }
-  if (phase !== 'publish' && phase !== 'promote-rolling' && productSpec.id !== 'server') {
+  if (phase !== 'publish' && phase !== 'publish-immutable' && phase !== 'promote-rolling' && productSpec.id !== 'server') {
     throw new Error('candidate phases are supported only for server runtime publishing');
   }
 
@@ -246,6 +250,12 @@ export async function publishBinaryReleaseMain(options = {}) {
             dryRun: opts.dryRun,
           },
         );
+  if (values['resolve-version-only'] === true) {
+    const githubOutput = String(values['github-output'] ?? '').trim();
+    if (!githubOutput) throw new Error('--github-output is required with --resolve-version-only');
+    fs.appendFileSync(githubOutput, `version=${version}\n`, 'utf8');
+    return;
+  }
   const rollingTag = `${productSpec.rollingTagPrefix}-${resolveRollingReleaseTagSuffix(channel)}`;
   const rollingTitle = `${productSpec.releaseTitleBase} ${resolveRollingReleaseLabel(channel)}`;
   const prerelease = resolveRollingPrerelease(channel);
@@ -255,9 +265,12 @@ export async function publishBinaryReleaseMain(options = {}) {
   const versionTitle = `${productSpec.releaseTitleBase} v${version}`;
   const versionNotes = `${productSpec.versionNotesSubject} ${releaseRing.publicLabel} build v${version}.`;
   const authorizedSha = String(values['authorized-sha'] ?? '').trim();
-  const targetSha = phase === 'finalize-candidate' || phase === 'promote-rolling'
-    ? authorizedSha
-    : run(opts, 'git', ['rev-parse', 'HEAD'], { cwd: repoRoot, stdio: 'pipe' }).trim() || 'UNKNOWN_SHA';
+  if (authorizedSha && !/^[a-f0-9]{40}$/u.test(authorizedSha)) {
+    throw new Error('--authorized-sha must be a full lowercase 40-character commit SHA');
+  }
+  const targetSha = authorizedSha
+    || run(opts, 'git', ['rev-parse', 'HEAD'], { cwd: repoRoot, stdio: 'pipe' }).trim()
+    || 'UNKNOWN_SHA';
   if ((phase === 'finalize-candidate' || phase === 'promote-rolling') && !targetSha) {
     throw new Error('--authorized-sha is required for privileged publish and rolling recovery phases');
   }
@@ -355,9 +368,15 @@ export async function publishBinaryReleaseMain(options = {}) {
       HAPPIER_EMBEDDED_POLICY_ENV: process.env.HAPPIER_EMBEDDED_POLICY_ENV ?? embeddedPolicy,
     },
     ...(phase === 'finalize-candidate' ? {
-      candidateDir: String(values['candidate-dir'] ?? ''),
+      ...(values['prepared-artifacts'] === true
+        ? { preparedArtifacts: true }
+        : { candidateDir: String(values['candidate-dir'] ?? '') }),
       authorizedSha,
     } : {}),
+    ...(phase !== 'finalize-candidate' && values['prepared-artifacts'] === true
+      ? { preparedArtifacts: true }
+      : {}),
+    ...(values['finalized-artifacts'] === true ? { finalizedArtifacts: true } : {}),
   });
 
   const artifactsDir = withinRepo(repoRoot, productSpec.artifactsDir);
@@ -378,19 +397,24 @@ export async function publishBinaryReleaseMain(options = {}) {
     ...(opts.dryRun ? ['--dry-run'] : []),
   ], { cwd: repoRoot });
 
-  run(opts, process.execPath, [
-    ROLLING_PROMOTION_SCRIPT_RELATIVE_PATH,
-    '--source-tag', versionTag,
-    '--rolling-tag', rollingTag,
-    '--title', rollingTitle,
-    '--target-sha', targetSha,
-    '--prerelease', prerelease,
-    '--notes', notes,
-    '--release-message', releaseMessage,
-    '--repo', repoSlug,
-    '--public-key', RELEASE_PUBLIC_KEY_RELATIVE_PATH,
-    ...(opts.dryRun ? ['--dry-run'] : []),
-  ], { cwd: repoRoot });
+  if (phase === 'publish' && parseBool(values['publish-rolling'], '--publish-rolling')) {
+    run(opts, process.execPath, [
+      ROLLING_PROMOTION_SCRIPT_RELATIVE_PATH,
+      '--source-tag', versionTag,
+      '--rolling-tag', rollingTag,
+      '--title', rollingTitle,
+      '--target-sha', targetSha,
+      '--prerelease', prerelease,
+      '--notes', notes,
+      '--release-message', releaseMessage,
+      '--repo', repoSlug,
+      '--public-key', RELEASE_PUBLIC_KEY_RELATIVE_PATH,
+      ...(opts.dryRun ? ['--dry-run'] : []),
+    ], { cwd: repoRoot });
+  }
+
+  const githubOutput = String(values['github-output'] ?? '').trim();
+  if (githubOutput) fs.appendFileSync(githubOutput, `version=${version}\n`, 'utf8');
 
   if (!opts.dryRun && productSpec.id === 'cli') {
     console.log(`[pipeline] published GitHub rolling release: ${rollingTag}`);

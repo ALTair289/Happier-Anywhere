@@ -2,11 +2,12 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { lstat, mkdir, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { normalizePublicReleaseChannel } from '../lib/public-release-rings.mjs';
+import { parseArtifactFilename } from '../lib/manifests.mjs';
 import { resolveArtifactVerifyExecution, resolveArtifactVerifyTarget } from './artifact-verify-target.mjs';
 import { getBinaryPublishProductSpec } from './product-specs.mjs';
 import { finalizeServerRuntimeCandidate } from './server-runtime-candidate.mjs';
@@ -82,6 +83,117 @@ export async function ensureCleanBinaryArtifactsDir(repoRoot, productSpec, opts)
 }
 
 /**
+ * Canonical admission and signing owner for a complete native artifact matrix.
+ * Both Darwin notarization records are release artifacts and are covered by the
+ * same checksum/minisign envelope as the five native archives.
+ */
+export async function finalizePreparedBinaryArtifacts(params) {
+  const artifactsDir = path.resolve(params.artifactsDir);
+  const channel = normalizePublicReleaseChannel(params.channel);
+  if (!channel) throw new Error('prepared binary artifact channel must be stable|preview|dev');
+  const version = String(params.version ?? '').trim();
+  if (!version) throw new Error('prepared binary artifacts require a version');
+
+  let targets = params.targets;
+  let writeChecksums = params.writeChecksums;
+  let signFile = params.signFile;
+  if (!targets || !writeChecksums || !signFile) {
+    const binaryRelease = await import('../lib/binary-release.mjs');
+    targets ??= params.productSpec.id === 'server'
+      ? binaryRelease.SERVER_TARGETS
+      : binaryRelease.CLI_STACK_TARGETS;
+    writeChecksums ??= binaryRelease.writeChecksumsFile;
+    signFile ??= binaryRelease.maybeSignFile;
+  }
+
+  const expectedArtifacts = targets.map((target) => ({
+    ...target,
+    name: `${params.productSpec.manifestProduct}-v${version}-${target.os}-${target.arch}.tar.gz`,
+  }));
+  const preparedNames = (await readdir(artifactsDir)).sort();
+  const expectedNames = new Set(expectedArtifacts.map((artifact) => artifact.name));
+  const archiveNames = preparedNames
+    .filter((name) => name.endsWith('.tar.gz'))
+    .sort();
+  for (const name of archiveNames) {
+    if (!parseArtifactFilename(name) || !expectedNames.has(name)) {
+      throw new Error(`unexpected prepared artifact for ${params.productSpec.id} ${version}: ${name}`);
+    }
+  }
+  for (const artifact of expectedArtifacts) {
+    if (!archiveNames.includes(artifact.name)) {
+      throw new Error(
+        `missing prepared artifact for ${params.productSpec.id} ${version}: ${artifact.os}-${artifact.arch} (${artifact.name})`,
+      );
+    }
+  }
+
+  const evidenceSuffix = params.productSpec.notarizationEvidenceSuffix;
+  const expectedEvidenceNames = [
+    `darwin-arm64.${evidenceSuffix}.json`,
+    `darwin-x64.${evidenceSuffix}.json`,
+  ];
+  const evidenceNames = preparedNames
+    .filter((name) => name.endsWith(`.${evidenceSuffix}.json`))
+    .sort();
+  const missingEvidenceNames = expectedEvidenceNames.filter((name) => !evidenceNames.includes(name));
+  if (missingEvidenceNames.length > 0) {
+    throw new Error(
+      `missing prepared Darwin notarization evidence for ${params.productSpec.id} ${version}: ${missingEvidenceNames.join(', ')}`,
+    );
+  }
+  if (
+    evidenceNames.length !== expectedEvidenceNames.length
+    || evidenceNames.some((name, index) => name !== expectedEvidenceNames[index])
+  ) {
+    throw new Error(`unexpected prepared evidence set for ${params.productSpec.id} ${version}`);
+  }
+  const admittedNames = new Set([...expectedNames, ...expectedEvidenceNames]);
+  const unexpectedNames = preparedNames.filter((name) => !admittedNames.has(name));
+  if (unexpectedNames.length > 0) {
+    throw new Error(
+      `unexpected prepared file for ${params.productSpec.id} ${version}: ${unexpectedNames.join(', ')}`,
+    );
+  }
+
+  const artifacts = [
+    ...expectedArtifacts.map((artifact) => ({
+      name: artifact.name,
+      path: path.join(artifactsDir, artifact.name),
+      os: artifact.os,
+      arch: artifact.arch,
+    })),
+    ...evidenceNames.map((name) => ({
+      name,
+      path: path.join(artifactsDir, name),
+      os: 'darwin',
+      arch: name.includes('arm64') ? 'arm64' : 'x64',
+    })),
+  ];
+  for (const artifact of artifacts) {
+    const metadata = await lstat(artifact.path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1) {
+      throw new Error(`prepared artifact must be a regular non-empty file: ${artifact.name}`);
+    }
+  }
+
+  const checksumsPath = await writeChecksums({
+    product: params.productSpec.manifestProduct,
+    version,
+    artifacts,
+    outDir: artifactsDir,
+  });
+  const signaturePath = await signFile({
+    path: checksumsPath,
+    trustedComment: `${params.productSpec.manifestProduct} ${version} ${channel}`,
+  });
+  if (!signaturePath) {
+    throw new Error(`prepared ${params.productSpec.id} artifacts require a minisign signature`);
+  }
+  return { artifacts, checksumsPath, signaturePath };
+}
+
+/**
  * @param {{
  *   repoRoot: string;
  *   productId: string;
@@ -95,6 +207,9 @@ export async function ensureCleanBinaryArtifactsDir(repoRoot, productSpec, opts)
  *   env?: Record<string, string | undefined>;
  *   candidateDir?: string;
  *   authorizedSha?: string;
+ *   preparedArtifacts?: boolean;
+ *   finalizedArtifacts?: boolean;
+ *   finalizePrepared?: typeof finalizePreparedBinaryArtifacts;
  * }} params
  */
 export async function prepareBinaryReleaseAssets(params) {
@@ -130,9 +245,28 @@ export async function prepareBinaryReleaseAssets(params) {
       }
     }
 
-    await ensureCleanBinaryArtifactsDir(repoRoot, productSpec, opts);
+    if (params.preparedArtifacts === true) {
+      if (params.finalizedArtifacts === true) {
+        console.log(
+          `${opts.dryRun ? '[dry-run]' : '[pipeline]'} preserve authenticated finalized artifacts under ${productSpec.artifactsDir}`,
+        );
+      } else if (!opts.dryRun || params.finalizePrepared) {
+        await (params.finalizePrepared ?? finalizePreparedBinaryArtifacts)({
+          artifactsDir: withinRepo(repoRoot, productSpec.artifactsDir),
+          productSpec,
+          channel,
+          version,
+        });
+      } else {
+        console.log(`[dry-run] would finalize prepared artifacts under ${productSpec.artifactsDir}`);
+      }
+    } else {
+      await ensureCleanBinaryArtifactsDir(repoRoot, productSpec, opts);
+    }
 
-    if (params.candidateDir) {
+    if (params.preparedArtifacts === true) {
+      // The workflow already assembled the exact native matrix in the canonical artifacts directory.
+    } else if (params.candidateDir) {
       if (productSpec.id !== 'server') throw new Error('candidate finalization is supported only for server runtime assets');
       if (opts.dryRun) {
         console.log(`[dry-run] validate opaque candidate files from ${params.candidateDir}`);
@@ -212,6 +346,9 @@ export async function prepareBinaryReleaseAssets(params) {
         skipSmoke: params.skipSmoke === true,
       },
     });
+    if (params.finalizedArtifacts === true) {
+      artifactVerifyExecution.args.push('--require-all-artifacts-checksummed', '--require-signature');
+    }
     runBinaryAssetStep(opts, artifactVerifyExecution.command, artifactVerifyExecution.args, {
       cwd: artifactVerifyExecution.cwd,
     });
@@ -230,9 +367,11 @@ function parsePrepareBinaryAssetsArgs(argv) {
       product: { type: 'string' },
       channel: { type: 'string' },
       version: { type: 'string' },
+      'artifacts-dir': { type: 'string', default: '' },
       'assets-base-url': { type: 'string' },
       'commit-sha': { type: 'string' },
       'workflow-run-id': { type: 'string', default: '' },
+      'finalize-prepared-only': { type: 'boolean', default: false },
       'skip-smoke': { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
     },
@@ -241,11 +380,25 @@ function parsePrepareBinaryAssetsArgs(argv) {
 }
 
 /**
- * @param {{ argv?: string[]; cwd?: string }} [options]
+ * @param {{ argv?: string[]; cwd?: string; finalizePrepared?: typeof finalizePreparedBinaryArtifacts }} [options]
  */
 export async function prepareBinaryAssetsMain(options = {}) {
   const repoRoot = path.resolve(options.cwd ?? process.cwd());
   const values = parsePrepareBinaryAssetsArgs(options.argv ?? process.argv.slice(2));
+  if (values['finalize-prepared-only'] === true) {
+    if (values['dry-run'] === true) {
+      throw new Error('--finalize-prepared-only cannot be combined with --dry-run');
+    }
+    const artifactsDir = String(values['artifacts-dir'] ?? '').trim();
+    if (!artifactsDir) throw new Error('--artifacts-dir is required with --finalize-prepared-only');
+    await (options.finalizePrepared ?? finalizePreparedBinaryArtifacts)({
+      artifactsDir: path.resolve(repoRoot, artifactsDir),
+      productSpec: getBinaryPublishProductSpec(String(values.product ?? '')),
+      channel: String(values.channel ?? ''),
+      version: String(values.version ?? ''),
+    });
+    return;
+  }
   await prepareBinaryReleaseAssets({
     repoRoot,
     productId: String(values.product ?? ''),
