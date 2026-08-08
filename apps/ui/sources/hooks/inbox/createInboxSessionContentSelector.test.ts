@@ -243,7 +243,7 @@ describe('createInboxSessionContentSelector', () => {
                 rebuiltSessionListViewData: true,
             },
         }));
-        expect(evaluate).toHaveBeenCalledTimes(1);
+        expect(evaluate).toHaveBeenCalledTimes(2);
         const sortSpy = vi.spyOn(Array.prototype, 'sort');
 
         expect(selectInboxSessionContent(createState({
@@ -287,7 +287,7 @@ describe('createInboxSessionContentSelector', () => {
             },
         }))).toBe(true);
 
-        expect(evaluate).toHaveBeenCalledTimes(2);
+        expect(evaluate).toHaveBeenCalledTimes(3);
         expect(evaluate).toHaveBeenLastCalledWith({
             sessionsById: {},
             sessionRowsById: {
@@ -333,9 +333,17 @@ describe('createInboxSessionContentSelector', () => {
         }, [state.sessions, state.sessionListRenderables]);
 
         expect(result).toBe(true);
+        // One derivation path: the account pass evaluates the same session-scoped
+        // records the delta path does, so the two can never disagree.
         expect(evaluate).toHaveBeenCalledWith({
-            sessionsById: state.sessions,
-            sessionRowsById: state.sessionListRenderables,
+            sessionsById: {},
+            sessionRowsById: { 'session-2': state.sessionListRenderables['session-2'] },
+            sessionMessagesById: state.sessionMessages,
+            nowMs: expect.any(Number),
+        });
+        expect(evaluate).toHaveBeenCalledWith({
+            sessionsById: { 'session-1': state.sessions['session-1'] },
+            sessionRowsById: {},
             sessionMessagesById: state.sessionMessages,
             nowMs: expect.any(Number),
         });

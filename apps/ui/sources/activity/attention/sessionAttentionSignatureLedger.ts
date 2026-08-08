@@ -41,6 +41,12 @@ export type SessionSignatureLedger<TValue> = Readonly<{
         readValue: (id: string) => TValue,
     ) => number;
     readSignature: (id: string) => string;
+    /**
+     * Ids whose signature moved (added, changed, or removed) during the most
+     * recent `sync`. This is the per-wave change set a consumer needs to update
+     * a derived cache incrementally instead of rebuilding it.
+     */
+    readChangedIds: () => readonly string[];
 }>;
 
 type SignatureLedgerEntry<TValue> = {
@@ -53,9 +59,11 @@ export function createSessionSignatureLedger<TValue>(
 ): SessionSignatureLedger<TValue> {
     const entries = new Map<string, SignatureLedgerEntry<TValue>>();
     let revision = 0;
+    let changedIds: string[] = [];
 
     return {
         sync: (anchor, readValue) => {
+            changedIds = [];
             let anchoredCount = 0;
             for (const id in anchor) {
                 if (!Object.prototype.hasOwnProperty.call(anchor, id)) continue;
@@ -64,7 +72,10 @@ export function createSessionSignatureLedger<TValue>(
                 const entry = entries.get(id);
                 if (entry !== undefined && entry.value === value) continue;
                 const signature = buildSignature(value, id);
-                if (entry === undefined || entry.signature !== signature) revision += 1;
+                if (entry === undefined || entry.signature !== signature) {
+                    revision += 1;
+                    changedIds.push(id);
+                }
                 entries.set(id, { value, signature });
             }
             if (entries.size !== anchoredCount) {
@@ -72,11 +83,13 @@ export function createSessionSignatureLedger<TValue>(
                     if (Object.prototype.hasOwnProperty.call(anchor, id)) continue;
                     entries.delete(id);
                     revision += 1;
+                    changedIds.push(id);
                 }
             }
             return revision;
         },
         readSignature: (id) => entries.get(id)?.signature ?? '',
+        readChangedIds: () => changedIds,
     };
 }
 
@@ -191,6 +204,7 @@ export type SessionRuntimeFreshnessLedger = Readonly<{
      * skip the sync entirely.
      */
     readNextBoundaryAtMs: () => number | null;
+    readChangedIds: () => readonly string[];
 }>;
 
 type SessionFreshnessLedgerEntry = {
@@ -205,10 +219,13 @@ export function createSessionRuntimeFreshnessLedger(): SessionRuntimeFreshnessLe
     const pendingRequestObservedAtCache = new Map<string, PendingRequestObservedAtCacheEntry>();
     let revision = 0;
     let nextBoundaryAtMs: number | null = null;
+    let changedIds: string[] = [];
 
     return {
         readNextBoundaryAtMs: () => nextBoundaryAtMs,
+        readChangedIds: () => changedIds,
         sync: (input) => {
+            changedIds = [];
             let sessionCount = 0;
             let earliestBoundaryAtMs: number | null = null;
             const observeBoundary = (boundaryAtMs: number | null) => {
@@ -254,7 +271,10 @@ export function createSessionRuntimeFreshnessLedger(): SessionRuntimeFreshnessLe
                     pendingRequestObservedAt,
                 ], input.nowMs);
 
-                if (entry === undefined || entry.signature !== probe.signature) revision += 1;
+                if (entry === undefined || entry.signature !== probe.signature) {
+                    revision += 1;
+                    changedIds.push(id);
+                }
                 observeBoundary(probe.nextBoundaryAtMs);
                 entries.set(id, {
                     session,
@@ -274,6 +294,7 @@ export function createSessionRuntimeFreshnessLedger(): SessionRuntimeFreshnessLe
                     if (activeSessionIds.has(id)) continue;
                     entries.delete(id);
                     revision += 1;
+                    changedIds.push(id);
                 }
                 prunePendingRequestObservedAtCache(pendingRequestObservedAtCache, activeSessionIds);
             }
@@ -288,6 +309,7 @@ export type RenderableRuntimeFreshnessLedger = Readonly<{
         nowMs: number,
     ) => number;
     readNextBoundaryAtMs: () => number | null;
+    readChangedIds: () => readonly string[];
 }>;
 
 type RenderableFreshnessLedgerEntry = {
@@ -300,10 +322,13 @@ export function createRenderableRuntimeFreshnessLedger(): RenderableRuntimeFresh
     const entries = new Map<string, RenderableFreshnessLedgerEntry>();
     let revision = 0;
     let nextBoundaryAtMs: number | null = null;
+    let changedIds: string[] = [];
 
     return {
         readNextBoundaryAtMs: () => nextBoundaryAtMs,
+        readChangedIds: () => changedIds,
         sync: (renderables, nowMs) => {
+            changedIds = [];
             let renderableCount = 0;
             let earliestBoundaryAtMs: number | null = null;
             const observeBoundary = (boundaryAtMs: number | null) => {
@@ -331,7 +356,10 @@ export function createRenderableRuntimeFreshnessLedger(): RenderableRuntimeFresh
                     renderable.meaningfulActivityAt,
                     renderable.pendingRequestObservedAt,
                 ], nowMs);
-                if (entry === undefined || entry.signature !== probe.signature) revision += 1;
+                if (entry === undefined || entry.signature !== probe.signature) {
+                    revision += 1;
+                    changedIds.push(id);
+                }
                 observeBoundary(probe.nextBoundaryAtMs);
                 entries.set(id, {
                     renderable,
@@ -345,6 +373,7 @@ export function createRenderableRuntimeFreshnessLedger(): RenderableRuntimeFresh
                     if (Object.prototype.hasOwnProperty.call(renderables, id)) continue;
                     entries.delete(id);
                     revision += 1;
+                    changedIds.push(id);
                 }
             }
             return revision;

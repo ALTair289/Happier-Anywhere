@@ -1,19 +1,14 @@
+import { resolveActivityAttentionSessionsFromRecords } from '@/activity/attention/activityAttentionSessions';
+import {
+    createRenderableRuntimeFreshnessLedger,
+    createSessionRuntimeFreshnessLedger,
+    createSessionSignatureLedger,
+    isBeforeFreshnessBoundary,
+} from '@/activity/attention/sessionAttentionSignatureLedger';
 import type { SessionListRenderableSession } from '@/sync/domains/session/listing/sessionListRenderable';
 import type { Session } from '@/sync/domains/state/storageTypes';
 import type { StorageState } from '@/sync/store/types';
-import {
-    isFreshTimestamp,
-    SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS,
-} from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
-import {
-    prunePendingRequestObservedAtCache,
-    readCachedPendingRequestObservedAt,
-    type PendingRequestObservedAtCacheEntry,
-} from '@/sync/domains/session/pending/pendingRequestObservedAtCache';
-import {
-    collectRecordIds,
-    hasRecordValues,
-} from '@/sync/store/sessionRecordProjection';
+import { collectRecordIds } from '@/sync/store/sessionRecordProjection';
 import {
     hasInboxSessionContentForRecords,
     type InboxSessionContentRecordInput,
@@ -21,18 +16,8 @@ import {
 
 type InboxSessionContentEvaluator = (input: InboxSessionContentRecordInput) => boolean;
 
-type SignatureCacheEntry<T> = Readonly<{
-    signature: string;
-    value: T;
-}>;
-
 function readNumber(value: unknown): number | null {
     return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : null;
-}
-
-function readFreshnessBit(value: unknown, nowMs: number): 0 | 1 {
-    const timestamp = readNumber(value);
-    return isFreshTimestamp(timestamp, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS) ? 1 : 0;
 }
 
 function readRequestSignature(value: unknown): string {
@@ -64,54 +49,6 @@ function readCompletedRequestSignature(value: unknown): string {
             readNumber(request?.createdAt) ?? '',
         ].join(':');
     }).join('|');
-}
-
-function hasCompletedRequest(completedValue: unknown, requestId: string): boolean {
-    if (!completedValue || typeof completedValue !== 'object') return false;
-    const completed = completedValue as Record<string, { completedAt?: unknown } | undefined>;
-    return completed[requestId]?.completedAt != null;
-}
-
-function readLatestPendingAgentRequestCreatedAt(value: unknown, completedValue: unknown): number | null {
-    if (!value || typeof value !== 'object') return null;
-    const requests = value as Record<string, { createdAt?: unknown } | undefined>;
-    let latest: number | null = null;
-    for (const requestId in requests) {
-        if (!Object.prototype.hasOwnProperty.call(requests, requestId)) continue;
-        if (hasCompletedRequest(completedValue, requestId)) continue;
-        const createdAt = readNumber(requests[requestId]?.createdAt);
-        if (createdAt === null) continue;
-        latest = latest === null ? createdAt : Math.max(latest, createdAt);
-    }
-    return latest;
-}
-
-function hasProjectedPendingRequestCounts(session: Session): boolean {
-    return typeof session.pendingPermissionRequestCount === 'number'
-        || typeof session.pendingUserActionRequestCount === 'number';
-}
-
-function hasPendingAgentRequests(session: Session): boolean {
-    return hasRecordValues(session.agentState?.requests ?? {});
-}
-
-function buildRuntimeFreshnessSignature(
-    session: Session,
-    nowMs: number,
-    transcriptPendingRequestObservedAt: number | null,
-): string {
-    const agentState = session.agentState;
-    const pendingRequestObservedAt =
-        readLatestPendingAgentRequestCreatedAt(agentState?.requests, agentState?.completedRequests)
-        ?? readNumber(session.pendingRequestObservedAt)
-        ?? transcriptPendingRequestObservedAt;
-
-    return [
-        readFreshnessBit(session.thinkingAt, nowMs),
-        readFreshnessBit(session.latestTurnStatusObservedAt, nowMs),
-        readFreshnessBit(session.meaningfulActivityAt, nowMs),
-        readFreshnessBit(pendingRequestObservedAt, nowMs),
-    ].join(':');
 }
 
 function buildSessionInboxSignature(session: Session): string {
@@ -183,182 +120,199 @@ function buildRenderableInboxSignature(renderable: SessionListRenderableSession)
     ].join('\u001f');
 }
 
-function buildCachedRecordSignature<T>(
-    record: Readonly<Record<string, T>>,
-    cache: Map<string, SignatureCacheEntry<T>>,
-    buildValueSignature: (value: T) => string,
-): string {
-    const ids = collectRecordIds(record);
-    for (const cachedId of cache.keys()) {
-        if (!Object.prototype.hasOwnProperty.call(record, cachedId)) {
-            cache.delete(cachedId);
-        }
-    }
-    return ids.map((id) => {
-        const value = record[id];
-        const cached = cache.get(id);
-        const signature = cached !== undefined && cached.value === value
-            ? cached.signature
-            : buildValueSignature(value);
-        if (cached?.value !== value) {
-            cache.set(id, { signature, value });
-        }
-        return `${id}\u001e${signature}`;
-    }).join('\u001d');
-}
-
-function buildSessionMessagesRecordSignature(
-    sessions: Readonly<Record<string, Session>>,
-    sessionMessages: StorageState['sessionMessages'],
-    cache: Map<string, SignatureCacheEntry<StorageState['sessionMessages'][string]>>,
-): string {
-    const ids = collectRecordIds(sessions);
-    for (const cachedId of cache.keys()) {
-        if (!Object.prototype.hasOwnProperty.call(sessions, cachedId)) {
-            cache.delete(cachedId);
-        }
-    }
-    return ids.map((id) => {
-        const value = sessionMessages[id];
-        const cached = cache.get(id);
-        const signature = cached !== undefined && cached.value === value
-            ? cached.signature
-            : buildSessionMessagesInboxSignature(value);
-        if (value) {
-            cache.set(id, { signature, value });
-        } else {
-            cache.delete(id);
-        }
-        return `${id}\u001e${signature}`;
-    }).join('\u001d');
-}
-
-function buildRuntimeFreshnessRecordSignature(
-    sessions: Readonly<Record<string, Session>>,
-    sessionMessages: StorageState['sessionMessages'],
-    nowMs: number,
-    pendingRequestObservedAtCache: Map<string, PendingRequestObservedAtCacheEntry>,
-    sessionSignatureCache: ReadonlyMap<string, SignatureCacheEntry<Session>>,
-    sessionMessagesSignatureCache: ReadonlyMap<string, SignatureCacheEntry<StorageState['sessionMessages'][string]>>,
-): string {
-    const ids = collectRecordIds(sessions);
-    prunePendingRequestObservedAtCache(pendingRequestObservedAtCache, new Set(ids));
-
-    return ids.map((id) => {
-        const session = sessions[id];
-        const sessionMessagesForSession = sessionMessages[id];
-        const sessionSignature = sessionSignatureCache.get(id)?.signature
-            ?? buildSessionInboxSignature(session);
-        const sessionMessagesSignature = sessionMessagesSignatureCache.get(id)?.signature
-            ?? buildSessionMessagesInboxSignature(sessionMessagesForSession);
-        const transcriptPendingRequestObservedAt = needsTranscriptPendingFreshnessProbe(
-            session,
-            sessionMessagesForSession,
-        )
-            ? readCachedPendingRequestObservedAt({
-                cache: pendingRequestObservedAtCache,
-                session,
-                sessionMessages: sessionMessagesForSession,
-                sessionSignature,
-                sessionMessagesSignature,
-            })
-            : null;
-        return `${id}\u001e${buildRuntimeFreshnessSignature(
-            session,
-            nowMs,
-            transcriptPendingRequestObservedAt,
-        )}`;
-    }).join('\u001d');
-}
-
-function needsTranscriptPendingFreshnessProbe(
-    session: Session,
-    sessionMessages: StorageState['sessionMessages'][string] | undefined,
-): boolean {
-    return session.active === true
-        && session.presence === 'online'
-        && sessionMessages?.isLoaded === true
-        && readNumber(session.pendingRequestObservedAt) === null
-        && !hasProjectedPendingRequestCounts(session)
-        && !hasPendingAgentRequests(session);
-}
+type InboxSourceIdentity = Readonly<{
+    sessions: StorageState['sessions'];
+    sessionListRenderables: StorageState['sessionListRenderables'];
+    sessionMessages: StorageState['sessionMessages'];
+    deltaRevision: number | null;
+}>;
 
 export function createInboxSessionContentSelector(
     evaluateInboxSessionContent: InboxSessionContentEvaluator = hasInboxSessionContentForRecords,
 ): (state: StorageState) => boolean {
-    const sessionSignatureCache = new Map<string, SignatureCacheEntry<Session>>();
-    const renderableSignatureCache = new Map<string, SignatureCacheEntry<SessionListRenderableSession>>();
-    const sessionMessagesSignatureCache = new Map<string, SignatureCacheEntry<StorageState['sessionMessages'][string]>>();
-    const pendingRequestObservedAtCache = new Map<string, PendingRequestObservedAtCacheEntry>();
+    const sessionLedger = createSessionSignatureLedger<Session>(buildSessionInboxSignature);
+    const renderableLedger = createSessionSignatureLedger<SessionListRenderableSession>(
+        buildRenderableInboxSignature,
+    );
+    const sessionMessagesLedger = createSessionSignatureLedger<StorageState['sessionMessages'][string] | undefined>(
+        buildSessionMessagesInboxSignature,
+    );
+    const sessionFreshnessLedger = createSessionRuntimeFreshnessLedger();
+    const renderableFreshnessLedger = createRenderableRuntimeFreshnessLedger();
+    // Which sessions currently carry inbox content. The dot is `size > 0`, so a
+    // wave only has to re-evaluate the sessions it actually moved — including
+    // the case where the dot is already showing and the changed session has no
+    // content, which previously forced a rescan of the whole account.
+    const contentSessionIds = new Set<string>();
+    // Whether `contentSessionIds` holds every session. Only a full derivation
+    // establishes that; until it has run once, an incremental update would be
+    // applied to an empty set and report no content.
+    let hasSeededContentCache = false;
     let previousSignature: string | null = null;
     let previousDeltaRevision: number | null = null;
+    let previousSourceIdentity: InboxSourceIdentity | null = null;
     let previousResult = false;
+
+    const evaluateSession = (state: StorageState, sessionId: string, nowMs: number): boolean => {
+        const session = state.sessions[sessionId];
+        const renderable = state.sessionListRenderables[sessionId];
+        if (!session && !renderable) return false;
+        return evaluateInboxSessionContent({
+            sessionsById: session ? { [sessionId]: session } : {},
+            sessionRowsById: renderable ? { [sessionId]: renderable } : {},
+            sessionMessagesById: state.sessionMessages,
+            nowMs,
+        });
+    };
+
+    // Every input that can move one session's inbox content is covered by exactly
+    // one ledger, so the union of their change sets is the complete set of
+    // sessions whose contribution can have moved this wave.
+    const collectLedgerChangedSessionIds = (): readonly string[] => {
+        const ids = new Set<string>();
+        for (const id of sessionLedger.readChangedIds()) ids.add(id);
+        for (const id of renderableLedger.readChangedIds()) ids.add(id);
+        for (const id of sessionMessagesLedger.readChangedIds()) ids.add(id);
+        for (const id of sessionFreshnessLedger.readChangedIds()) ids.add(id);
+        for (const id of renderableFreshnessLedger.readChangedIds()) ids.add(id);
+        return [...ids];
+    };
+
+    const rebuildContentSessionIds = (state: StorageState, nowMs: number): boolean => {
+        hasSeededContentCache = true;
+        contentSessionIds.clear();
+        for (const session of resolveActivityAttentionSessionsFromRecords({
+            sessionsById: state.sessions,
+            sessionRowsById: state.sessionListRenderables,
+        })) {
+            if (evaluateSession(state, session.id, nowMs)) contentSessionIds.add(session.id);
+        }
+        return contentSessionIds.size > 0;
+    };
+
+    const applyContentDelta = (
+        state: StorageState,
+        changedSessionIds: readonly string[],
+        removedSessionIds: readonly string[],
+        nowMs: number,
+    ): boolean => {
+        for (const sessionId of removedSessionIds) {
+            contentSessionIds.delete(sessionId);
+        }
+        for (const sessionId of changedSessionIds) {
+            if (evaluateSession(state, sessionId, nowMs)) {
+                contentSessionIds.add(sessionId);
+            } else {
+                contentSessionIds.delete(sessionId);
+            }
+        }
+        return contentSessionIds.size > 0;
+    };
 
     return (state: StorageState): boolean => {
         const nowMs = Date.now();
         const delta = state.sessionListRenderableDelta;
-        const canApplyDelta = previousSignature !== null
+        const deltaRevision = delta?.revision ?? null;
+        // Runtime freshness is the only input that moves without the store
+        // moving, so every reuse path below stays inside the earliest recorded
+        // freshness boundary.
+        const isFreshnessStable = isBeforeFreshnessBoundary(nowMs, [
+            sessionFreshnessLedger.readNextBoundaryAtMs(),
+            renderableFreshnessLedger.readNextBoundaryAtMs(),
+        ]);
+
+        // A store notification that moved none of this selector's inputs cannot
+        // change the dot, so it must cost O(1) rather than a derivation pass.
+        if (
+            previousSignature !== null
+            && previousSourceIdentity !== null
+            && previousSourceIdentity.sessions === state.sessions
+            && previousSourceIdentity.sessionListRenderables === state.sessionListRenderables
+            && previousSourceIdentity.sessionMessages === state.sessionMessages
+            && previousSourceIdentity.deltaRevision === deltaRevision
+            && isFreshnessStable
+        ) {
+            return previousResult;
+        }
+        previousSourceIdentity = {
+            sessions: state.sessions,
+            sessionListRenderables: state.sessionListRenderables,
+            sessionMessages: state.sessionMessages,
+            deltaRevision,
+        };
+
+        const canApplyDelta = hasSeededContentCache
+            && previousSignature !== null
+            && isFreshnessStable
             && delta
             && previousDeltaRevision !== null
             && delta.revision !== previousDeltaRevision
             && delta.rebuiltSessionListViewData !== true;
         if (canApplyDelta) {
-            for (const sessionId of delta.changedSessionIds) {
-                const nextResult = evaluateInboxSessionContent({
-                    sessionsById: state.sessions[sessionId] ? { [sessionId]: state.sessions[sessionId] } : {},
-                    sessionRowsById: state.sessionListRenderables[sessionId]
-                        ? { [sessionId]: state.sessionListRenderables[sessionId] }
-                        : {},
-                    sessionMessagesById: state.sessionMessages,
-                    nowMs,
-                });
-                if (nextResult) {
-                    previousDeltaRevision = delta.revision;
-                    previousResult = true;
-                    previousSignature = `${delta.revision}\u001c1`;
-                    return true;
-                }
-            }
-
-            if (previousResult === false) {
-                previousDeltaRevision = delta.revision;
-                previousSignature = `${delta.revision}\u001c0`;
-                return false;
-            }
-        }
-        const nextSignature = [
-            buildCachedRecordSignature(state.sessions, sessionSignatureCache, buildSessionInboxSignature),
-            buildCachedRecordSignature(
-                state.sessionListRenderables,
-                renderableSignatureCache,
-                buildRenderableInboxSignature,
-            ),
-            buildSessionMessagesRecordSignature(
-                state.sessions,
-                state.sessionMessages,
-                sessionMessagesSignatureCache,
-            ),
-            buildRuntimeFreshnessRecordSignature(
-                state.sessions,
-                state.sessionMessages,
+            previousDeltaRevision = delta.revision;
+            previousResult = applyContentDelta(
+                state,
+                delta.changedSessionIds,
+                delta.removedSessionIds,
                 nowMs,
-                pendingRequestObservedAtCache,
-                sessionSignatureCache,
-                sessionMessagesSignatureCache,
-            ),
-        ].join('\u001c');
+            );
+            previousSignature = `${delta.revision}${previousResult ? 1 : 0}`;
+            return previousResult;
+        }
+
+        const sessionRevision = sessionLedger.sync(state.sessions, (id) => state.sessions[id]);
+        const renderableRevision = renderableLedger.sync(
+            state.sessionListRenderables,
+            (id) => state.sessionListRenderables[id],
+        );
+        const sessionMessagesRevision = sessionMessagesLedger.sync(
+            state.sessions,
+            (id) => state.sessionMessages[id],
+        );
+        const sessionFreshnessRevision = sessionFreshnessLedger.sync({
+            sessions: state.sessions,
+            sessionMessages: state.sessionMessages,
+            nowMs,
+            readSessionSignature: sessionLedger.readSignature,
+            readSessionMessagesSignature: sessionMessagesLedger.readSignature,
+        });
+        const renderableFreshnessRevision = renderableFreshnessLedger.sync(
+            state.sessionListRenderables,
+            nowMs,
+        );
+        const nextSignature = [
+            sessionRevision,
+            renderableRevision,
+            sessionMessagesRevision,
+            sessionFreshnessRevision,
+            renderableFreshnessRevision,
+        ].join('');
         if (previousSignature === nextSignature) {
             return previousResult;
         }
 
+        if (previousSignature !== null) {
+            const changedSessionIds = new Set<string>([
+                ...sessionLedger.readChangedIds(),
+                ...renderableLedger.readChangedIds(),
+                ...sessionMessagesLedger.readChangedIds(),
+                ...sessionFreshnessLedger.readChangedIds(),
+                ...renderableFreshnessLedger.readChangedIds(),
+            ]);
+            previousSignature = nextSignature;
+            previousDeltaRevision = deltaRevision;
+            previousResult = applyContentDelta(state, [...changedSessionIds], [], nowMs);
+            return previousResult;
+        }
+
+        // The ledgers just told us exactly which sessions moved, so only the very
+        // first evaluation has to derive the whole account.
+        const changedSessionIds = hasSeededContentCache ? collectLedgerChangedSessionIds() : null;
         previousSignature = nextSignature;
-        previousDeltaRevision = delta?.revision ?? null;
-        previousResult = evaluateInboxSessionContent({
-            sessionsById: state.sessions,
-            sessionRowsById: state.sessionListRenderables,
-            sessionMessagesById: state.sessionMessages,
-            nowMs,
-        });
+        previousDeltaRevision = deltaRevision;
+        previousResult = changedSessionIds
+            ? applyContentDelta(state, changedSessionIds, [], nowMs)
+            : rebuildContentSessionIds(state, nowMs);
         return previousResult;
     };
 }
