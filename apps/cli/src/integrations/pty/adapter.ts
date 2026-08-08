@@ -319,6 +319,14 @@ export function createPtyTerminalHostAdapter(params?: Readonly<{
       }
       const submission = await runTerminalPromptSubmission({
         promptText: input.text,
+        ...(promptSubmitVerification?.shouldVerifyBeforeSubmit(input.text)
+          ? {
+              verifyBeforeSubmit: async ({ promptText }) => promptSubmitVerification.verifyScreenBeforeSubmit({
+                promptText,
+                screenText: session.screen.capture(),
+              }),
+            }
+          : {}),
         submitEnter: async () => {
           if (!writeToSession(session, '\r')) return 'failed';
           return await waitForPostWriteLiveness(session) ? 'success' : 'failed';

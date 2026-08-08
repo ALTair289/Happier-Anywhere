@@ -23,6 +23,10 @@ import {
 import { executeTerminalHostDisposition } from '@/terminal/attachment/terminalHostDisposition';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 import { logger } from '@/ui/logger';
+import {
+  requireExactTerminalControlServiceabilityRetirement,
+  type ExactTerminalControlServiceabilityRetirement,
+} from './retireTerminalControlServiceability';
 
 import {
   readSessionMarkerForPid as readDefaultSessionMarkerForPid,
@@ -33,7 +37,8 @@ type TerminalHostAdapters = Readonly<Partial<Record<TerminalHostAdapter['kind'],
 
 export type ClaudeEndpointRecoveryFenceReason =
   | 'live_attachment_adoption_unavailable'
-  | 'recovery_probe_inconclusive';
+  | 'recovery_probe_inconclusive'
+  | 'serviceability_retirement_failed';
 
 export class ClaudeEndpointRecoveryFenceError extends Error {
   readonly code = 'claude_endpoint_recovery_fenced';
@@ -41,7 +46,9 @@ export class ClaudeEndpointRecoveryFenceError extends Error {
   constructor(readonly reason: ClaudeEndpointRecoveryFenceReason) {
     super(reason === 'recovery_probe_inconclusive'
       ? 'Claude terminal attachment liveness could not be established safely'
-      : 'Claude terminal attachment is alive but its exact adoption proof is unavailable');
+      : reason === 'serviceability_retirement_failed'
+        ? 'Claude terminal attachment retirement could not be committed safely'
+        : 'Claude terminal attachment is alive but its exact adoption proof is unavailable');
     this.name = 'ClaudeEndpointRecoveryFenceError';
   }
 }
@@ -136,6 +143,11 @@ export async function resolveClaudeEndpointRecoverySpawnOptions(params: Readonly
     sessionId: string;
     attachmentInfo: BoundTerminalAttachmentInfo;
   }>) => Promise<void>;
+  retireExactTerminalControlServiceability?: (input: Readonly<{
+    happyHomeDir: string;
+    sessionId: string;
+    attachmentInfo: BoundTerminalAttachmentInfo;
+  }>) => Promise<ExactTerminalControlServiceabilityRetirement | void>;
 }>): Promise<SpawnSessionOptions> {
   if (!isClaudeSpawnOptions(params.defaultOptions)) return params.defaultOptions;
   const freshSpawnOptions = clearClaudeEndpointStateFromSpawnOptions(params.defaultOptions);
@@ -172,6 +184,18 @@ export async function resolveClaudeEndpointRecoverySpawnOptions(params: Readonly
   const terminalHostAdapters = params.terminalHostAdapters ?? await params.loadTerminalHostAdapters?.();
   const adapter = terminalHostAdapters?.[handle.kind];
   if (!adapter) return freshSpawnOptions;
+  const beforeDescriptorRetirement = params.retireExactTerminalControlServiceability
+    ? async ({ attachmentInfo: currentAttachmentInfo }: Readonly<{
+        attachmentInfo: BoundTerminalAttachmentInfo;
+      }>): Promise<void> => {
+        const retirement = await params.retireExactTerminalControlServiceability!({
+          happyHomeDir,
+          sessionId: params.sessionId,
+          attachmentInfo: currentAttachmentInfo,
+        });
+        requireExactTerminalControlServiceabilityRetirement(retirement);
+      }
+    : undefined;
 
   const probe = await evaluateTerminalHostLivenessForRecovery(adapter, handle);
   if (probe.status === 'alive') {
@@ -202,6 +226,7 @@ export async function resolveClaudeEndpointRecoverySpawnOptions(params: Readonly
       adapter,
       readAttachmentInfo: params.readTerminalAttachmentInfo ?? readDefaultTerminalAttachmentInfo,
       removeAttachmentInfo: params.removeTerminalAttachmentInfo ?? removeDefaultTerminalAttachmentInfo,
+      beforeDescriptorRetirement,
     }).catch(() => ({ status: 'parked' as const, reason: 'destroy_failed' as const }));
     if (disposition.status !== 'destroyed' || disposition.descriptorRetained) {
       throw new ClaudeEndpointRecoveryFenceError('live_attachment_adoption_unavailable');
@@ -234,8 +259,11 @@ export async function resolveClaudeEndpointRecoverySpawnOptions(params: Readonly
       adapter,
       readAttachmentInfo: params.readTerminalAttachmentInfo ?? readDefaultTerminalAttachmentInfo,
       removeAttachmentInfo: params.removeTerminalAttachmentInfo ?? removeDefaultTerminalAttachmentInfo,
+      beforeDescriptorRetirement,
     }).catch(() => ({ status: 'parked' as const, reason: 'destroy_failed' as const }));
-    if (disposition.status !== 'retired') return freshSpawnOptions;
+    if (disposition.status !== 'retired') {
+      throw new ClaudeEndpointRecoveryFenceError('serviceability_retirement_failed');
+    }
     await (params.onExactTerminalAttachmentRetired ?? notifyTerminalAttachmentRetiredThroughCatalog)({
       happyHomeDir,
       sessionId: params.sessionId,

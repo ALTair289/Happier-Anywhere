@@ -353,7 +353,7 @@ export class TmuxUtilities {
     if (result && result.returncode === 0) {
       return result.stdout;
     }
-    return '';
+    throw new Error('Failed to capture the current tmux pane');
   }
 
   async captureCursorPosition(session?: string, window?: string, pane?: string): Promise<TmuxCursorPosition | null> {

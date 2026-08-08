@@ -470,6 +470,11 @@ describe('claude endpoint recovery respawn options', () => {
     const onExactTerminalAttachmentRetired = vi.fn(async () => {
       throw new Error('provider cleanup failed');
     });
+    const retirementOrder: string[] = [];
+    const retireExactTerminalControlServiceability = vi.fn(async () => {
+      retirementOrder.push('remote-serviceability');
+      return 'retired' as const;
+    });
 
     await expect(resolveClaudeEndpointRecoverySpawnOptions({
       previousPid: 111,
@@ -479,6 +484,7 @@ describe('claude endpoint recovery respawn options', () => {
       readTerminalAttachmentInfo: async () => boundAttachment,
       removeTerminalAttachmentInfo,
       onExactTerminalAttachmentRetired,
+      retireExactTerminalControlServiceability,
       terminalHostAdapters: { tmux: adapter },
     })).resolves.toBe(defaultOptions);
 
@@ -494,6 +500,58 @@ describe('claude endpoint recovery respawn options', () => {
       sessionId: 'sess-claude',
       attachmentInfo: boundAttachment,
     });
+    expect(retireExactTerminalControlServiceability).toHaveBeenCalledWith({
+      happyHomeDir: '/tmp/happy',
+      sessionId: 'sess-claude',
+      attachmentInfo: boundAttachment,
+    });
+    expect(retirementOrder).toEqual(['remote-serviceability']);
+  });
+
+  it('fences fresh respawn and retains local evidence when serviceability retirement is superseded', async () => {
+    const attachmentId = 'attachment-dead-superseded' as NonNullable<TerminalHostHandle['attachmentId']>;
+    const boundHandle: TerminalHostHandle & { attachmentId: NonNullable<TerminalHostHandle['attachmentId']> } = {
+      ...handle,
+      attachmentId,
+    };
+    const boundAttachment: TerminalAttachmentInfo = {
+      version: 2,
+      attachmentId,
+      sessionId: 'sess-claude',
+      handle: boundHandle,
+      terminal: attachment.terminal,
+      updatedAt: 1,
+    };
+    const removeTerminalAttachmentInfo = vi.fn(async () => true);
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(),
+      injectUserPrompt: vi.fn(),
+      interruptTurn: vi.fn(),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: false, paneDead: true, observedAt: 1 })),
+      dispose: vi.fn(async () => undefined),
+    };
+    const defaultOptions: SpawnSessionOptions = {
+      directory: '/workspace/project',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      existingSessionId: 'sess-claude',
+    };
+
+    await expect(resolveClaudeEndpointRecoverySpawnOptions({
+      previousPid: 111,
+      sessionId: 'sess-claude',
+      defaultOptions,
+      readSessionMarkerForPid: async () => marker,
+      readTerminalAttachmentInfo: async () => boundAttachment,
+      removeTerminalAttachmentInfo,
+      retireExactTerminalControlServiceability: async () => 'superseded',
+      terminalHostAdapters: { tmux: adapter },
+    })).rejects.toMatchObject({
+      name: 'ClaudeEndpointRecoveryFenceError',
+      reason: 'serviceability_retirement_failed',
+    });
+
+    expect(removeTerminalAttachmentInfo).not.toHaveBeenCalled();
   });
 
   it('retains the durable attachment when endpoint recovery probes remain inconclusive', async () => {

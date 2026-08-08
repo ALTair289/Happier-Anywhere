@@ -94,4 +94,28 @@ describe('runTerminalPromptSubmission', () => {
       submitMayHaveReachedPane: true,
     });
   });
+
+  it('keeps delivery ambiguous when post-submit verification is unavailable', async () => {
+    let submitCount = 0;
+
+    await expect(runTerminalPromptSubmission({
+      promptText: 'first\nsecond',
+      submitEnter: async () => {
+        submitCount += 1;
+        return 'success';
+      },
+      verifyAfterSubmit: async () => {
+        throw new Error('screen capture unavailable');
+      },
+      wait: async () => {},
+    })).resolves.toEqual({
+      success: false,
+      reason: 'verification_failed',
+      phase: 'after_enter_unknown',
+      duplicateRisk: 'likely',
+      submitMayHaveReachedPane: true,
+    });
+
+    expect(submitCount).toBe(1);
+  });
 });

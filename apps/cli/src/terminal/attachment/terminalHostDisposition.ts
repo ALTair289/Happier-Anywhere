@@ -2,6 +2,7 @@ import type { TerminalAttachmentId, TerminalHostAdapter } from '@/integrations/t
 import {
   readTerminalAttachmentInfo,
   removeTerminalAttachmentInfo,
+  type BoundTerminalAttachmentInfo,
   type TerminalAttachmentInfo,
 } from './terminalAttachmentInfo';
 
@@ -23,10 +24,15 @@ export type TerminalHostDispositionIntent =
 export type TerminalHostDispositionResult =
   | Readonly<{ status: 'preserved'; attachmentId: TerminalAttachmentId }>
   | Readonly<{ status: 'retired'; attachmentId: TerminalAttachmentId }>
-  | Readonly<{ status: 'destroyed'; attachmentId: TerminalAttachmentId; descriptorRetained?: true }>
+  | Readonly<{
+      status: 'destroyed';
+      attachmentId: TerminalAttachmentId;
+      descriptorRetained?: true;
+      retirementFailed?: true;
+    }>
   | Readonly<{
       status: 'parked';
-      reason: 'legacy_attachment' | 'attachment_mismatch' | 'missing_topology_proof' | 'disposition_in_progress' | 'destroy_failed';
+      reason: 'legacy_attachment' | 'attachment_mismatch' | 'missing_topology_proof' | 'disposition_in_progress' | 'destroy_failed' | 'retirement_failed';
     }>;
 
 const activeDispositionClaims = new Set<string>();
@@ -44,6 +50,12 @@ export async function executeTerminalHostDisposition(input: Readonly<{
     expectedAttachmentId: TerminalAttachmentId | string;
     expectedTerminal: TerminalAttachmentInfo['terminal'];
   }>) => Promise<boolean>;
+  /** Runs after physical retirement is proven and before the local retry identity is removed. */
+  beforeDescriptorRetirement?: (input: Readonly<{
+    happyHomeDir: string;
+    sessionId: string;
+    attachmentInfo: BoundTerminalAttachmentInfo;
+  }>) => Promise<void>;
 }>): Promise<TerminalHostDispositionResult> {
   const readAttachment = input.readAttachmentInfo ?? readTerminalAttachmentInfo;
   const removeAttachment = input.removeAttachmentInfo ?? removeTerminalAttachmentInfo;
@@ -76,6 +88,15 @@ export async function executeTerminalHostDisposition(input: Readonly<{
     }
 
     if (input.intent.kind === 'retire_confirmed_dead_attachment') {
+      try {
+        await input.beforeDescriptorRetirement?.({
+          happyHomeDir: input.happyHomeDir,
+          sessionId: input.sessionId,
+          attachmentInfo: current,
+        });
+      } catch {
+        return { status: 'parked', reason: 'retirement_failed' };
+      }
       const removed = await removeAttachment({
         happyHomeDir: input.happyHomeDir,
         sessionId: input.sessionId,
@@ -100,6 +121,20 @@ export async function executeTerminalHostDisposition(input: Readonly<{
       await input.adapter.dispose(handle);
     } catch {
       return { status: 'parked', reason: 'destroy_failed' };
+    }
+    try {
+      await input.beforeDescriptorRetirement?.({
+        happyHomeDir: input.happyHomeDir,
+        sessionId: input.sessionId,
+        attachmentInfo: current,
+      });
+    } catch {
+      return {
+        status: 'destroyed',
+        attachmentId: current.attachmentId,
+        descriptorRetained: true,
+        retirementFailed: true,
+      };
     }
     const removed = await removeAttachment({
       happyHomeDir: input.happyHomeDir,

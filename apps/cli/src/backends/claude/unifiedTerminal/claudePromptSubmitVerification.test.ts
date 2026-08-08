@@ -3,20 +3,38 @@ import { describe, expect, it } from 'vitest';
 import { createClaudePromptSubmitVerificationPolicy } from './claudePromptSubmitVerification';
 
 describe('createClaudePromptSubmitVerificationPolicy', () => {
-  it('does not block submission on pre-submit screen proof by default', () => {
+  it('requires screen proof that a non-empty prompt landed before submission', () => {
     const policy = createClaudePromptSubmitVerificationPolicy();
 
-    expect(policy.shouldVerifyBeforeSubmit('first line\nsecond line')).toBe(false);
-    expect(policy.shouldVerifyBeforeSubmit('first line\r\nsecond line')).toBe(false);
+    expect(policy.shouldVerifyBeforeSubmit('first line\nsecond line')).toBe(true);
+    expect(policy.shouldVerifyBeforeSubmit('first line\r\nsecond line')).toBe(true);
+    expect(policy.shouldVerifyBeforeSubmit('   ')).toBe(false);
     expect(policy.shouldVerifyAfterSubmit('first line\nsecond line')).toBe(true);
   });
 
   it('verifies every non-empty single-line prompt after submit', () => {
     const policy = createClaudePromptSubmitVerificationPolicy();
 
-    expect(policy.shouldVerifyBeforeSubmit('single line prompt')).toBe(false);
+    expect(policy.shouldVerifyBeforeSubmit('single line prompt')).toBe(true);
     expect(policy.shouldVerifyAfterSubmit('single line prompt')).toBe(true);
     expect(policy.shouldVerifyAfterSubmit('   ')).toBe(false);
+  });
+
+  it('does not use an earlier transcript echo as pre-submit composer proof', () => {
+    const policy = createClaudePromptSubmitVerificationPolicy();
+
+    expect(policy.verifyScreenBeforeSubmit({
+      promptText: 'continue',
+      screenText: [
+        '❯ continue',
+        'Claude acted on the earlier prompt.',
+        '│ > │',
+      ].join('\n'),
+    })).toBe(false);
+    expect(policy.verifyScreenBeforeSubmit({
+      promptText: 'continue',
+      screenText: '❯ continue',
+    })).toBe(true);
   });
 
   it('detects a single-line prompt that remains exactly in the composer after submit', () => {

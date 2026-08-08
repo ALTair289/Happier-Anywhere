@@ -211,6 +211,23 @@ describe('createStopSession', () => {
     expect(killSpy).not.toHaveBeenCalled();
   });
 
+  it('delegates descriptor-free stranded serviceability recovery to the daemon recovery owner', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const recoverStrandedTerminalControlServiceability = vi.fn(async () => ({
+      status: 'stopped' as const,
+    }));
+    const stop = createStopSession({
+      pidToTrackedSession: new Map(),
+      readAttachmentState: vi.fn(async () => ({ status: 'absent' } as const)),
+      recoverStrandedTerminalControlServiceability,
+    });
+
+    await expect(stop('sess-stranded-dead-host')).resolves.toEqual({ status: 'stopped' });
+    expect(recoverStrandedTerminalControlServiceability).toHaveBeenCalledWith({
+      sessionId: 'sess-stranded-dead-host',
+    });
+  });
+
   it('keeps matched tracked sessions until exit is observed', async () => {
     const { createStopSession } = await import('./stopSession');
 
@@ -1003,6 +1020,7 @@ describe('createStopSession', () => {
     const retireExactTerminalControlServiceability = vi.fn(async () => {
       throw new Error('metadata persistence unavailable');
     });
+    const onExactTerminalAttachmentRetired = vi.fn(async () => undefined);
     vi.spyOn(process, 'kill').mockImplementation(() => true as any);
     const stop = createStopSession({
       pidToTrackedSession: new Map<number, any>([[
@@ -1028,6 +1046,7 @@ describe('createStopSession', () => {
       removeAttachmentInfo: vi.fn(async () => true),
       waitForTrackedRunnersExit: vi.fn(async () => true),
       retireExactTerminalControlServiceability,
+      onExactTerminalAttachmentRetired,
     });
 
     await expect(stop(attachmentInfo.sessionId)).resolves.toEqual({
@@ -1039,6 +1058,51 @@ describe('createStopSession', () => {
       sessionId: attachmentInfo.sessionId,
       attachmentInfo,
     }));
+    expect(onExactTerminalAttachmentRetired).not.toHaveBeenCalled();
+  });
+
+  it('does not retire local evidence when serviceability retirement is superseded by a replacement attachment', async () => {
+    const { createStopSession } = await import('./stopSession');
+    const attachmentInfo = createBoundAttachment(
+      'sess-serviceability-superseded',
+      'attachment-serviceability-superseded',
+    );
+    const removeAttachmentInfo = vi.fn(async () => true);
+    const onExactTerminalAttachmentRetired = vi.fn(async () => undefined);
+    vi.spyOn(process, 'kill').mockImplementation(() => true as any);
+    const stop = createStopSession({
+      pidToTrackedSession: new Map<number, any>([[
+        668,
+        {
+          startedBy: 'terminal',
+          pid: 668,
+          happySessionId: attachmentInfo.sessionId,
+          processCommandHash: 'h8',
+        },
+      ]]),
+      terminalHostAdapters: {
+        zellij: {
+          kind: 'zellij',
+          createOrAttachHost: vi.fn(),
+          injectUserPrompt: vi.fn(),
+          interruptTurn: vi.fn(),
+          evaluateLiveness: vi.fn(),
+          dispose: vi.fn(async () => undefined),
+        } as any,
+      },
+      readAttachmentInfo: vi.fn(async () => attachmentInfo),
+      removeAttachmentInfo,
+      waitForTrackedRunnersExit: vi.fn(async () => true),
+      retireExactTerminalControlServiceability: vi.fn(async () => 'superseded' as const),
+      onExactTerminalAttachmentRetired,
+    });
+
+    await expect(stop(attachmentInfo.sessionId)).resolves.toEqual({
+      status: 'incomplete',
+      reason: 'terminal_control_serviceability_retirement_failed',
+    });
+    expect(removeAttachmentInfo).not.toHaveBeenCalled();
+    expect(onExactTerminalAttachmentRetired).not.toHaveBeenCalled();
   });
 
   it('parks a legacy attachment even when its old host is already missing', async () => {

@@ -10,6 +10,10 @@ import { notifyTerminalAttachmentRetiredThroughCatalog } from '@/backends/catalo
 import { logger } from '@/ui/logger';
 import { executeTerminalHostDisposition } from '@/terminal/attachment/terminalHostDisposition';
 import type { SessionRunnerServiceabilityProbe } from './isSessionRunnerActive';
+import {
+  requireExactTerminalControlServiceabilityRetirement,
+  type ExactTerminalControlServiceabilityRetirement,
+} from './retireTerminalControlServiceability';
 
 export type DisconnectedTerminalHostCandidate = Readonly<{
   sessionId: string;
@@ -53,6 +57,11 @@ export async function superviseDisconnectedTerminalHostCandidate(input: Readonly
     sessionId: string;
     attachmentInfo: BoundTerminalAttachmentInfo;
   }>) => Promise<void>;
+  retireExactTerminalControlServiceability?: (input: Readonly<{
+    happyHomeDir: string;
+    sessionId: string;
+    attachmentInfo: BoundTerminalAttachmentInfo;
+  }>) => Promise<ExactTerminalControlServiceabilityRetirement | void>;
 }>): Promise<DisconnectedTerminalHostSupervisionResult> {
   const readAttachment = input.readTerminalAttachmentInfo ?? readDefaultTerminalAttachmentInfo;
   const current = await readAttachment({
@@ -99,6 +108,25 @@ export async function superviseDisconnectedTerminalHostCandidate(input: Readonly
     adapter,
     readAttachmentInfo: readAttachment,
     removeAttachmentInfo: input.removeTerminalAttachmentInfo ?? removeDefaultTerminalAttachmentInfo,
+    beforeDescriptorRetirement: input.retireExactTerminalControlServiceability
+      ? async ({ attachmentInfo }) => {
+          try {
+            const retirement = await input.retireExactTerminalControlServiceability!({
+              happyHomeDir: input.candidate.happyHomeDir,
+              sessionId: input.candidate.sessionId,
+              attachmentInfo,
+            });
+            requireExactTerminalControlServiceabilityRetirement(retirement);
+          } catch (error) {
+            logger.debug('[DAEMON RUN] Confirmed-dead terminal host retained for serviceability retirement retry', {
+              sessionId: input.candidate.sessionId,
+              attachmentId: input.candidate.attachmentId,
+              error,
+            });
+            throw error;
+          }
+        }
+      : undefined,
   });
   if (disposition.status !== 'retired') return { state: 'unknown', reason: 'retirement_failed' };
   try {

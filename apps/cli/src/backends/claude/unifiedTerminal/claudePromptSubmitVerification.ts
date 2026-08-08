@@ -69,8 +69,7 @@ function readPostSubmitPastedTextLineCount(screenText: string): number | null {
 }
 
 function shouldVerifyBeforeSubmit(promptText: string): boolean {
-  void promptText;
-  return false;
+  return normalizeNewlines(promptText).trim().length > 0;
 }
 
 function shouldVerifyAfterSubmit(promptText: string): boolean {
@@ -81,9 +80,14 @@ function verifyScreenBeforeSubmit(params: Readonly<{
   promptText: string;
   screenText: string;
 }>): boolean {
-  const promptText = normalizeNewlines(params.promptText);
+  const promptText = normalizeNewlines(params.promptText).trim();
   const screenText = normalizeNewlines(params.screenText);
-  if (promptText.length > 0 && screenText.includes(promptText)) {
+  const composerContent = parseClaudeScreenState(screenText).composerContent;
+  if (
+    promptText.length > 0
+    && composerContent !== null
+    && normalizeNewlines(composerContent).trim() === promptText
+  ) {
     return true;
   }
 

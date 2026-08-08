@@ -131,6 +131,7 @@ import {
 } from './sessions/terminalControlServiceabilityProjection';
 import { publishReportedTerminalControlServiceability } from './sessions/publishReportedTerminalControlServiceability';
 import { retireExactTerminalControlServiceability } from './sessions/retireTerminalControlServiceability';
+import { recoverStrandedTerminalControlServiceability } from './sessions/recoverStrandedTerminalControlServiceability';
 import { waitForVisibleConsoleSessionWebhook } from './sessions/visibleConsoleSpawnWaiter';
 import { createStopSession } from './sessions/stopSession';
 import {
@@ -2262,16 +2263,26 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         const loadTerminalHostAdapters = async () => await (
           terminalHostAdaptersPromise ??= createDefaultTerminalHostRegistry()
         );
+        const retireTerminalControlServiceabilityForCurrentAccount = async (
+          input: Omit<Parameters<typeof retireExactTerminalControlServiceability>[0], 'credentials'>,
+        ) => await retireExactTerminalControlServiceability({ credentials, ...input });
         const stopSessionCore = createStopSession({
           pidToTrackedSession,
           loadTerminalHostAdapters,
+          recoverStrandedTerminalControlServiceability: async ({ sessionId }) => await recoverStrandedTerminalControlServiceability({
+            credentials,
+            currentMachineId: machineId,
+            happyHomeDir: configuration.happyHomeDir,
+            sessionId,
+            loadTerminalHostAdapters,
+            retireExactTerminalControlServiceability: retireTerminalControlServiceabilityForCurrentAccount,
+          }),
           onExactTerminalAttachmentRetired: async (input) => {
             physicallyRetiredTerminalAttachmentIdBySessionId.set(input.sessionId, input.attachmentInfo.attachmentId);
             await notifyTerminalAttachmentRetiredThroughCatalog(input);
           },
           retireExactTerminalControlServiceability: async ({ sessionId, attachmentInfo }) => {
-            await retireExactTerminalControlServiceability({
-              credentials,
+            return await retireTerminalControlServiceabilityForCurrentAccount({
               sessionId,
               attachmentId: attachmentInfo.attachmentId,
               terminalMode: attachmentInfo.terminal.mode ?? attachmentInfo.handle.kind,
@@ -2566,6 +2577,13 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   candidate,
                   terminalHostAdapters,
                   probeSessionServiceability: async (sessionId) => await probeSessionRunnerServiceability(sessionId),
+                  retireExactTerminalControlServiceability: async ({ sessionId, attachmentInfo }) => {
+                    return await retireTerminalControlServiceabilityForCurrentAccount({
+                      sessionId,
+                      attachmentId: attachmentInfo.attachmentId,
+                      terminalMode: attachmentInfo.terminal.mode ?? attachmentInfo.handle.kind,
+                    });
+                  },
                 }),
               };
             }));
@@ -3111,6 +3129,13 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     sessionId: normalizedExistingSessionId,
                     defaultOptions: normalizedOptions,
                     loadTerminalHostAdapters,
+                    retireExactTerminalControlServiceability: async ({ sessionId, attachmentInfo }) => (
+                      await retireTerminalControlServiceabilityForCurrentAccount({
+                        sessionId,
+                        attachmentId: attachmentInfo.attachmentId,
+                        terminalMode: attachmentInfo.terminal.mode ?? attachmentInfo.handle.kind,
+                      })
+                    ),
                     proveExactSessionRunnerAbsent: async () => (
                       await probeSessionRunnerServiceability(normalizedExistingSessionId)
                     ).state === 'runner_absent',
@@ -5302,8 +5327,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               }),
               onExactTerminalAttachmentRetired: notifyTerminalAttachmentRetiredThroughCatalog,
               retireExactTerminalControlServiceability: async ({ sessionId, attachmentInfo }) => {
-                await retireExactTerminalControlServiceability({
-                  credentials,
+                return await retireTerminalControlServiceabilityForCurrentAccount({
                   sessionId,
                   attachmentId: attachmentInfo.attachmentId,
                   terminalMode: attachmentInfo.terminal.mode ?? attachmentInfo.handle.kind,

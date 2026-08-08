@@ -140,14 +140,96 @@ describe('disconnected terminal-host supervision', () => {
       },
       terminalHostAdapters: { tmux: adapter },
       readTerminalAttachmentInfo: async () => attachmentInfo,
-      removeTerminalAttachmentInfo: async () => true,
+      removeTerminalAttachmentInfo: async () => {
+        calls.push('local-descriptor');
+        return true;
+      },
+      retireExactTerminalControlServiceability: async (input) => {
+        calls.push('remote-serviceability');
+        expect(input.attachmentInfo).toBe(attachmentInfo);
+      },
       onExactTerminalAttachmentRetired: async (input) => {
         calls.push('provider');
         expect(input.attachmentInfo).toBe(attachmentInfo);
       },
     })).resolves.toEqual({ state: 'stopped' });
 
-    expect(calls).toEqual(['provider']);
+    expect(calls).toEqual(['remote-serviceability', 'local-descriptor', 'provider']);
+  });
+
+  it('retains exact local evidence when remote serviceability retirement fails', async () => {
+    const removeTerminalAttachmentInfo = vi.fn(async () => true);
+    const onExactTerminalAttachmentRetired = vi.fn(async () => undefined);
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(),
+      injectUserPrompt: vi.fn(),
+      interruptTurn: vi.fn(),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: false, paneDead: true, observedAt: 123 })),
+      dispose: vi.fn(async () => {}),
+    };
+
+    await expect(superviseDisconnectedTerminalHostCandidate({
+      candidate: {
+        sessionId: 'session-dead-retirement-failed',
+        pid: 43216,
+        happyHomeDir: '/tmp/happy',
+        attachmentId: handle.attachmentId,
+        handle,
+      },
+      terminalHostAdapters: { tmux: adapter },
+      readTerminalAttachmentInfo: async () => ({
+        version: 2,
+        attachmentId: handle.attachmentId,
+        sessionId: 'session-dead-retirement-failed',
+        handle,
+        terminal: { mode: 'tmux', tmux: { target: 'happier-live-1:claude.1' } },
+        updatedAt: 1,
+      }),
+      removeTerminalAttachmentInfo,
+      retireExactTerminalControlServiceability: async () => {
+        throw new Error('metadata update failed');
+      },
+      onExactTerminalAttachmentRetired,
+    })).resolves.toEqual({ state: 'unknown', reason: 'retirement_failed' });
+
+    expect(removeTerminalAttachmentInfo).not.toHaveBeenCalled();
+    expect(onExactTerminalAttachmentRetired).not.toHaveBeenCalled();
+  });
+
+  it('retains exact local evidence when remote serviceability retirement is superseded', async () => {
+    const removeTerminalAttachmentInfo = vi.fn(async () => true);
+    const adapter: TerminalHostAdapter = {
+      kind: 'tmux',
+      createOrAttachHost: vi.fn(),
+      injectUserPrompt: vi.fn(),
+      interruptTurn: vi.fn(),
+      evaluateLiveness: vi.fn(async () => ({ paneAlive: false, paneDead: true, observedAt: 123 })),
+      dispose: vi.fn(async () => {}),
+    };
+
+    await expect(superviseDisconnectedTerminalHostCandidate({
+      candidate: {
+        sessionId: 'session-dead-retirement-superseded',
+        pid: 43217,
+        happyHomeDir: '/tmp/happy',
+        attachmentId: handle.attachmentId,
+        handle,
+      },
+      terminalHostAdapters: { tmux: adapter },
+      readTerminalAttachmentInfo: async () => ({
+        version: 2,
+        attachmentId: handle.attachmentId,
+        sessionId: 'session-dead-retirement-superseded',
+        handle,
+        terminal: { mode: 'tmux', tmux: { target: 'happier-live-1:claude.1' } },
+        updatedAt: 1,
+      }),
+      removeTerminalAttachmentInfo,
+      retireExactTerminalControlServiceability: async () => 'superseded',
+    })).resolves.toEqual({ state: 'unknown', reason: 'retirement_failed' });
+
+    expect(removeTerminalAttachmentInfo).not.toHaveBeenCalled();
   });
 
   it('does not release marker evidence when provider cleanup fails after successful host retirement', async () => {

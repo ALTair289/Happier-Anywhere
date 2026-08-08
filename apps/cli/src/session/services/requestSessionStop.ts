@@ -105,7 +105,7 @@ async function stopSessionViaMarkersBestEffort(params: Readonly<{
     }),
     onExactTerminalAttachmentRetired: notifyTerminalAttachmentRetiredThroughCatalog,
     retireExactTerminalControlServiceability: async ({ attachmentInfo }) => {
-      await retireExactTerminalControlServiceability({
+      return await retireExactTerminalControlServiceability({
         credentials: params.credentials,
         sessionId,
         attachmentId: attachmentInfo.attachmentId,

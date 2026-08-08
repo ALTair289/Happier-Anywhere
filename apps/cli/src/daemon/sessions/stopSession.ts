@@ -20,11 +20,17 @@ import {
   type StopSessionIncompleteReason,
   type StopSessionResult,
 } from './stopSessionContract';
+import {
+  requireExactTerminalControlServiceabilityRetirement,
+  type ExactTerminalControlServiceabilityRetirement,
+} from './retireTerminalControlServiceability';
 
 function mapDispositionFailureReason(
-  reason: 'legacy_attachment' | 'attachment_mismatch' | 'missing_topology_proof' | 'disposition_in_progress' | 'destroy_failed',
+  reason: 'legacy_attachment' | 'attachment_mismatch' | 'missing_topology_proof' | 'disposition_in_progress' | 'destroy_failed' | 'retirement_failed',
 ): StopSessionIncompleteReason {
-  return reason;
+  return reason === 'retirement_failed'
+    ? 'terminal_control_serviceability_retirement_failed'
+    : reason;
 }
 
 function isTrackedChildStillLiveForPid(session: TrackedSession, pid: number): boolean {
@@ -101,7 +107,10 @@ export function createStopSession(params: Readonly<{
     happyHomeDir: string;
     sessionId: string;
     attachmentInfo: BoundTerminalAttachmentInfo;
-  }>) => Promise<void>;
+  }>) => Promise<ExactTerminalControlServiceabilityRetirement | void>;
+  recoverStrandedTerminalControlServiceability?: (input: Readonly<{
+    sessionId: string;
+  }>) => Promise<StopSessionResult | null>;
   expectedTerminalAttachmentId?: string;
   /** Marker fallback must positively prove plain topology when no attachment descriptor exists. */
   requireTerminalTopologyProof?: boolean;
@@ -212,6 +221,17 @@ export function createStopSession(params: Readonly<{
       if (attachmentInfo?.version === 2) {
         logWarning(`[DAEMON RUN] Refusing to destroy terminal attachment without exact tracked-runner exit proof for session ${normalizedSessionId}`);
         return incompleteStopSession('tracked_runner_absent');
+      }
+      if (!isPidFallback && params.recoverStrandedTerminalControlServiceability) {
+        try {
+          const recovered = await params.recoverStrandedTerminalControlServiceability({
+            sessionId: normalizedSessionId,
+          });
+          if (recovered) return recovered;
+        } catch (error) {
+          logWarning(`[DAEMON RUN] Failed to inspect stranded terminal control for session ${normalizedSessionId}`, error);
+          return incompleteStopSession('missing_topology_proof');
+        }
       }
       logger.debug(`[DAEMON RUN] Session ${normalizedSessionId} not found`);
       return { status: 'not_found' };
@@ -369,28 +389,29 @@ export function createStopSession(params: Readonly<{
         adapter: terminalHostAdapterForDisposition,
         readAttachmentInfo,
         removeAttachmentInfo: params.removeAttachmentInfo ?? removeTerminalAttachmentInfo,
+        beforeDescriptorRetirement: params.retireExactTerminalControlServiceability
+          ? async ({ attachmentInfo: currentAttachmentInfo }) => {
+              const retirement = await params.retireExactTerminalControlServiceability!({
+                happyHomeDir: configuration.happyHomeDir,
+                sessionId: normalizedSessionId,
+                attachmentInfo: currentAttachmentInfo,
+              });
+              requireExactTerminalControlServiceabilityRetirement(retirement);
+            }
+          : undefined,
       });
       if (disposition.status === 'destroyed') {
-        await notifyExactTerminalAttachmentRetired(attachmentInfo);
-        if (params.retireExactTerminalControlServiceability) {
-          try {
-            await params.retireExactTerminalControlServiceability({
-              happyHomeDir: configuration.happyHomeDir,
-              sessionId: normalizedSessionId,
-              attachmentInfo,
-            });
-          } catch (error) {
-            logWarning('[DAEMON RUN] Exact terminal host was destroyed but control serviceability retirement failed', {
-              sessionId: normalizedSessionId,
-              attachmentId: attachmentInfo.attachmentId,
-              error,
-            });
-            return incompleteStopSession('terminal_control_serviceability_retirement_failed');
-          }
+        if (disposition.retirementFailed) {
+          logWarning('[DAEMON RUN] Exact terminal host was destroyed but control serviceability retirement failed', {
+            sessionId: normalizedSessionId,
+            attachmentId: attachmentInfo.attachmentId,
+          });
+          return incompleteStopSession('terminal_control_serviceability_retirement_failed');
         }
         if (disposition.descriptorRetained) {
           return incompleteStopSession('terminal_attachment_descriptor_retirement_failed');
         }
+        await notifyExactTerminalAttachmentRetired(attachmentInfo);
         return { status: 'stopped' };
       }
       return disposition.status === 'parked'

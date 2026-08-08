@@ -87,17 +87,25 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
     // `isUserTyping` sample re-read what `captureCurrentInput` had just read) and fed the parser only
     // the bottom line.
     const target = targetFromHandle(handle);
-    const firstInput = await tmux.captureCurrentInput(target);
-    const firstCursor = await tmux.captureCursorPosition(target);
-    await delay(INPUT_STABILITY_DELAY_MS);
-    const currentInput = await tmux.captureCurrentInput(target);
-    const cursor = await tmux.captureCursorPosition(target);
-    return {
-      stable: firstInput === currentInput && cursorPositionsEqual(firstCursor, cursor),
-      currentInput,
-      ...(cursor !== null ? { cursor } : {}),
-      observedAt: Date.now(),
-    };
+    try {
+      const firstInput = await tmux.captureCurrentInput(target);
+      const firstCursor = await tmux.captureCursorPosition(target);
+      await delay(INPUT_STABILITY_DELAY_MS);
+      const currentInput = await tmux.captureCurrentInput(target);
+      const cursor = await tmux.captureCursorPosition(target);
+      return {
+        stable: firstInput === currentInput && cursorPositionsEqual(firstCursor, cursor),
+        currentInput,
+        ...(cursor !== null ? { cursor } : {}),
+        observedAt: Date.now(),
+      };
+    } catch {
+      return {
+        stable: false,
+        currentInput: '',
+        observedAt: Date.now(),
+      };
+    }
   }
 
   const createOrAttachHost: TerminalHostAdapter['createOrAttachHost'] = async (opts) => {

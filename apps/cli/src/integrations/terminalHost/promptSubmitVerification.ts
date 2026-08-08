@@ -154,7 +154,13 @@ export async function runTerminalPromptSubmission(params: Readonly<{
       remainingTimeoutMs: params.remainingTimeoutMs?.(),
     });
   } catch {
-    stillPending = false;
+    return {
+      success: false,
+      reason: 'verification_failed',
+      phase: 'after_enter_unknown',
+      duplicateRisk: 'likely',
+      submitMayHaveReachedPane: true,
+    };
   }
   if (!stillPending) {
     return { success: true };
@@ -188,7 +194,13 @@ export async function runTerminalPromptSubmission(params: Readonly<{
       remainingTimeoutMs: params.remainingTimeoutMs?.(),
     });
   } catch {
-    stillPending = false;
+    return {
+      success: false,
+      reason: 'verification_failed',
+      phase: 'after_enter_unknown',
+      duplicateRisk: 'likely',
+      submitMayHaveReachedPane: true,
+    };
   }
   if (stillPending) {
     return {

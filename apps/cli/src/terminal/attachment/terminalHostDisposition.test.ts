@@ -116,6 +116,64 @@ describe('executeTerminalHostDisposition', () => {
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
+  it('retires remote ownership evidence before removing the local descriptor', async () => {
+    const events: string[] = [];
+    await expect(executeTerminalHostDisposition({
+      happyHomeDir: '/tmp/happy',
+      sessionId: 'session-retirement-order',
+      expectedAttachmentId: HANDLE.attachmentId!,
+      intent: { kind: 'destroy_owned_host', reason: 'explicit_user_stop' },
+      adapter: buildAdapter(async () => {
+        events.push('destroy');
+      }),
+      readAttachmentInfo: vi.fn(async () => ({
+        version: 2 as const,
+        attachmentId: HANDLE.attachmentId!,
+        sessionId: 'session-retirement-order',
+        handle: HANDLE,
+        terminal: { mode: 'tmux' as const, tmux: { target: 'happy:owned-window' } },
+        updatedAt: 1,
+      })),
+      beforeDescriptorRetirement: async () => {
+        events.push('remote');
+      },
+      removeAttachmentInfo: vi.fn(async () => {
+        events.push('local');
+        return true;
+      }),
+    })).resolves.toEqual({ status: 'destroyed', attachmentId: HANDLE.attachmentId });
+    expect(events).toEqual(['destroy', 'remote', 'local']);
+  });
+
+  it('retains the local descriptor when remote ownership retirement fails after destruction', async () => {
+    const removeAttachmentInfo = vi.fn(async () => true);
+    await expect(executeTerminalHostDisposition({
+      happyHomeDir: '/tmp/happy',
+      sessionId: 'session-retirement-failure',
+      expectedAttachmentId: HANDLE.attachmentId!,
+      intent: { kind: 'destroy_owned_host', reason: 'explicit_user_stop' },
+      adapter: buildAdapter(async () => undefined),
+      readAttachmentInfo: vi.fn(async () => ({
+        version: 2 as const,
+        attachmentId: HANDLE.attachmentId!,
+        sessionId: 'session-retirement-failure',
+        handle: HANDLE,
+        terminal: { mode: 'tmux' as const, tmux: { target: 'happy:owned-window' } },
+        updatedAt: 1,
+      })),
+      beforeDescriptorRetirement: async () => {
+        throw new Error('remote unavailable');
+      },
+      removeAttachmentInfo,
+    })).resolves.toEqual({
+      status: 'destroyed',
+      attachmentId: HANDLE.attachmentId,
+      descriptorRetained: true,
+      retirementFailed: true,
+    });
+    expect(removeAttachmentInfo).not.toHaveBeenCalled();
+  });
+
   it('claims explicit stop once, destroys the persisted handle, and removes by expected-id CAS', async () => {
     const dir = tmp.dirSync({ unsafeCleanup: true });
     try {

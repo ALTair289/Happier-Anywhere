@@ -244,7 +244,39 @@ describe('createTmuxTerminalHostAdapter', () => {
       ['send-keys', '-t', 'happy:claude.1', 'C-m'],
       ['send-keys', '-t', 'happy:claude.1', 'C-m'],
     ]);
-    expect(captureCurrentInput).toHaveBeenCalledTimes(2);
+    expect(captureCurrentInput).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not treat an unavailable Claude screen capture as successful submission', async () => {
+    const tmux = new TmuxUtilities();
+    vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => ({
+      returncode: 0,
+      stdout: args[0] === 'display-message' ? '0\t12345\tclaude\n' : '',
+      stderr: '',
+      command: [...args],
+    }));
+    vi.spyOn(tmux, 'captureCurrentInput').mockRejectedValue(new Error('capture unavailable'));
+    const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
+
+    await expect(adapter.injectUserPrompt(
+      TMUX_HANDLE,
+      {
+        text: 'queued prompt',
+        multiline: false,
+        origin: { kind: 'ui_pending', nonce: 'nonce-capture-unavailable' },
+        scheduling: { timeoutMs: 250 },
+      },
+    )).resolves.toMatchObject({
+      status: 'failed',
+      reason: 'host_unreachable',
+      phase: 'after_write_before_enter',
+      duplicateRisk: 'possible',
+    });
+
+    expect(tmux.executeTmuxCommand).not.toHaveBeenCalledWith(
+      ['send-keys', '-t', 'happy:claude.1', 'C-m'],
+      expect.anything(),
+    );
   });
 
   it('pastes multiline prompts without sending tmux newline keys before submit', async () => {
@@ -303,7 +335,9 @@ describe('createTmuxTerminalHostAdapter', () => {
       stderr: '',
       command: [],
     });
-    const captureCurrentInput = vi.spyOn(tmux, 'captureCurrentInput').mockResolvedValue('');
+    const captureCurrentInput = vi.spyOn(tmux, 'captureCurrentInput')
+      .mockResolvedValueOnce('[Pasted text #1 +6003 lines]')
+      .mockResolvedValue('');
     const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
 
     await expect(
@@ -336,10 +370,10 @@ describe('createTmuxTerminalHostAdapter', () => {
       ['send-keys', '-t', 'happy:claude.1', 'C-m'],
     ]);
     expect(calls.flatMap((call) => call[0])).not.toContain(prompt);
-    expect(captureCurrentInput).toHaveBeenCalledTimes(1);
+    expect(captureCurrentInput).toHaveBeenCalledTimes(2);
   });
 
-  it('submits large tmux paste before checking whether the composer stayed stuck', async () => {
+  it('waits for a large tmux paste to settle before submitting it', async () => {
     const prompt = Array.from({ length: 6_000 }, (_, index) => `line ${index} ${'x'.repeat(36)}`).join('\n');
     expect(Buffer.byteLength(prompt, 'utf8')).toBeGreaterThan(250_000);
     const order: string[] = [];
@@ -382,7 +416,6 @@ describe('createTmuxTerminalHostAdapter', () => {
       'display-message',
       'load-buffer',
       'paste-buffer',
-      'send-keys',
       'capture-current-input',
       'send-keys',
       'capture-current-input',
@@ -398,7 +431,9 @@ describe('createTmuxTerminalHostAdapter', () => {
       stderr: '',
       command: [...args],
     }));
-    const captureCurrentInput = vi.spyOn(tmux, 'captureCurrentInput').mockResolvedValue('old composer contents');
+    const captureCurrentInput = vi.spyOn(tmux, 'captureCurrentInput')
+      .mockResolvedValueOnce('[Pasted text #1 +5999 lines]')
+      .mockResolvedValue('old composer contents');
     const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
 
     await expect(
@@ -421,7 +456,7 @@ describe('createTmuxTerminalHostAdapter', () => {
     expect(executeTmuxCommand.mock.calls.map((call) => call[0]).filter((args) => args[0] === 'send-keys')).toEqual([
       ['send-keys', '-t', 'happy:claude.1', 'C-m'],
     ]);
-    expect(captureCurrentInput).toHaveBeenCalledTimes(1);
+    expect(captureCurrentInput).toHaveBeenCalledTimes(2);
   });
 
   it('does not retry Enter when only a stale visible placeholder matches after submit', async () => {
@@ -433,12 +468,14 @@ describe('createTmuxTerminalHostAdapter', () => {
       stderr: '',
       command: [...args],
     }));
-    vi.spyOn(tmux, 'captureCurrentInput').mockResolvedValue([
-      'previous prompt already submitted',
-      '[Pasted text +5999 lines]',
-      '',
-      '│ > │',
-    ].join('\n'));
+    vi.spyOn(tmux, 'captureCurrentInput')
+      .mockResolvedValueOnce('[Pasted text #2 +5999 lines]')
+      .mockResolvedValue([
+        'previous prompt already submitted',
+        '[Pasted text +5999 lines]',
+        '',
+        '│ > │',
+      ].join('\n'));
     const adapter = createClaudeTmuxTerminalHostAdapter(tmux);
 
     await expect(
@@ -512,7 +549,7 @@ describe('createTmuxTerminalHostAdapter', () => {
     let captureCount = 0;
     vi.spyOn(tmux, 'captureCurrentInput').mockImplementation(async () => {
       captureCount += 1;
-      if (captureCount === 1) {
+      if (captureCount <= 2) {
         return [
           '┄'.repeat(20),
           '› [Pasted text #1 +40 lines]',
