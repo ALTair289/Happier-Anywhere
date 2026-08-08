@@ -203,11 +203,26 @@ function replaceRequestedAssignments(
     replaceAll: boolean | undefined,
 ): Record<string, string | null> {
     if (replaceAll) {
-        return replaceServerRecord(
-            current,
-            serverId,
-            assignments.map((assignment) => [assignment.sessionId, assignment.folderId] as const),
+        // The server only stores rows for assigned sessions, so a full snapshot lists
+        // assignments — not sessions. Dropping the omitted keys would turn "this session
+        // has no folder" (information the snapshot authoritatively carries) back into
+        // "never fetched", and the missing-only fetch policy in
+        // `sync/ops/sessionOrganization/fetchSessionFolderAssignments.ts` would then
+        // re-request every unassigned session one row at a time. Re-value the server's
+        // known sessions instead: assigned ids take the snapshot's folder, every other
+        // known id becomes an explicit null.
+        const entries = new Map<string, string | null>(
+            assignments.map((assignment) => [
+                buildSessionOrganizationServerKey(serverId, assignment.sessionId),
+                assignment.folderId,
+            ] as const),
         );
+        const serverKeyPrefix = `${String(serverId).trim()}:`;
+        for (const key of Object.keys(current)) {
+            if (!key.startsWith(serverKeyPrefix) || entries.has(key)) continue;
+            entries.set(key, null);
+        }
+        return mergeRecordEntries(current, entries.entries());
     }
     const entries = new Map<string, string | null>();
     for (const sessionId of requestedSessionIds ?? []) {

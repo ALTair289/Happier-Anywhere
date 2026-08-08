@@ -40,7 +40,7 @@ function emptySnapshot(input: Partial<SessionOrganizationSnapshot> = {}): Sessio
 }
 
 describe('createSessionOrganizationDomain', () => {
-    it('replaces all folder assignments for a server and keeps the compatibility map unified', () => {
+    it('keeps known sessions known when a full snapshot drops their folder assignment', () => {
         const harness = createHarness();
         harness.get().applySessionOrganizationSnapshot('srv-a', emptySnapshot({
             version: 1,
@@ -63,12 +63,34 @@ describe('createSessionOrganizationDomain', () => {
             ],
         }), { includeAllFolderAssignments: true });
 
+        // A full snapshot is authoritative for its server: the sessions it omits are
+        // known to have no folder, so they stay known (null) instead of reverting to
+        // "never fetched" and re-arming a per-session assignment request.
         expect(harness.get().sessionOrganizationFolderAssignmentsBySessionKey).toEqual({
+            [buildSessionOrganizationServerKey('srv-a', 's1')]: null,
+            [buildSessionOrganizationServerKey('srv-a', 's2')]: null,
             [buildSessionOrganizationServerKey('srv-a', 's3')]: 'folder-c',
             [buildSessionOrganizationServerKey('srv-b', 'other')]: 'folder-other',
         });
         expect(harness.get().sessionFolderAssignmentsBySessionKey)
             .toBe(harness.get().sessionOrganizationFolderAssignmentsBySessionKey);
+    });
+
+    it('keeps the folder assignment record referentially stable when a full snapshot changes nothing', () => {
+        const harness = createHarness();
+        harness.get().applySessionOrganizationSnapshot('srv-a', emptySnapshot({
+            version: 1,
+            folderAssignments: [{ sessionId: 's1', folderId: 'folder-a' }],
+        }), { includeAllFolderAssignments: true });
+        harness.get().applySessionFolderAssignments('srv-a', [{ sessionId: 's2', folderId: null }]);
+        const before = harness.get().sessionOrganizationFolderAssignmentsBySessionKey;
+
+        harness.get().applySessionOrganizationSnapshot('srv-a', emptySnapshot({
+            version: 2,
+            folderAssignments: [{ sessionId: 's1', folderId: 'folder-a' }],
+        }), { includeAllFolderAssignments: true });
+
+        expect(harness.get().sessionOrganizationFolderAssignmentsBySessionKey).toBe(before);
     });
 
     it('clears requested folder assignments that are absent from a scoped snapshot', () => {

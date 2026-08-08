@@ -159,4 +159,130 @@ describe('fetchAndApplySessionFolderAssignments', () => {
             'server-a:s2': null,
         });
     });
+
+    it('keeps missing-only assignment requests O(batches) across a full organization snapshot', async () => {
+        const { getStorage } = await import('@/sync/domains/state/storageStore');
+        const { fetchAndApplySessionFolderAssignments } = await import('./fetchSessionFolderAssignments');
+        const credentials = { token: 'token-a', secret: 'secret-a' };
+        const sessionIds = Array.from({ length: 12 }, (_, index) => `s${index + 1}`);
+        mocks.serverFetch.mockImplementation(async () => jsonResponse(organizationSnapshotResponse([
+            { sessionId: 's1', folderId: 'folder-a' },
+        ])));
+
+        // Arm the known set the way the visible session list does: one batched request
+        // covering every visible row.
+        await fetchAndApplySessionFolderAssignments({
+            credentials,
+            serverId: 'server-a',
+            sessionIds,
+            fetchPolicy: 'missing',
+        });
+        expect(mocks.serverFetch).toHaveBeenCalledTimes(1);
+
+        // A session-list refresh applies the authoritative full snapshot, which lists
+        // only the assigned sessions.
+        getStorage().getState().applySessionOrganizationSnapshot('server-a', {
+            schemaVersion: 1,
+            version: 2,
+            pins: [],
+            folders: [],
+            folderAssignments: [{ sessionId: 's1', folderId: 'folder-a' }],
+            tags: [],
+            tagAssignments: [],
+            orderEntries: [],
+            labels: [],
+        }, {
+            includeFolders: true,
+            includeTags: true,
+            includeLabels: true,
+            includeAllFolderAssignments: true,
+            includeAllTagAssignments: true,
+        });
+
+        // Rows re-entering the visible source one at a time (per-session shell hydration)
+        // must not each cost a request.
+        for (const sessionId of sessionIds) {
+            await fetchAndApplySessionFolderAssignments({
+                credentials,
+                serverId: 'server-a',
+                sessionIds: [sessionId],
+                fetchPolicy: 'missing',
+            });
+        }
+
+        expect(mocks.serverFetch).toHaveBeenCalledTimes(1);
+        expect(getStorage().getState().sessionOrganizationFolderAssignmentsBySessionKey).toMatchObject({
+            'server-a:s1': 'folder-a',
+            'server-a:s7': null,
+            'server-a:s12': null,
+        });
+    });
+
+    it('still fetches sessions a full organization snapshot never covered', async () => {
+        const { getStorage } = await import('@/sync/domains/state/storageStore');
+        const { fetchAndApplySessionFolderAssignments } = await import('./fetchSessionFolderAssignments');
+        const credentials = { token: 'token-a', secret: 'secret-a' };
+        mocks.serverFetch.mockImplementation(async () => jsonResponse(organizationSnapshotResponse([])));
+
+        await fetchAndApplySessionFolderAssignments({
+            credentials,
+            serverId: 'server-a',
+            sessionIds: ['s1'],
+            fetchPolicy: 'missing',
+        });
+        getStorage().getState().applySessionOrganizationSnapshot('server-a', {
+            schemaVersion: 1,
+            version: 2,
+            pins: [],
+            folders: [],
+            folderAssignments: [],
+            tags: [],
+            tagAssignments: [],
+            orderEntries: [],
+            labels: [],
+        }, { includeAllFolderAssignments: true, includeAllTagAssignments: true });
+        mocks.serverFetch.mockClear();
+
+        await fetchAndApplySessionFolderAssignments({
+            credentials,
+            serverId: 'server-a',
+            sessionIds: ['s1', 's-new'],
+            fetchPolicy: 'missing',
+        });
+
+        expect(mocks.serverFetch).toHaveBeenCalledTimes(1);
+        expect(mocks.serverFetch).toHaveBeenCalledWith(
+            '/v2/session-organization?includeFolders=false&includeTags=false&includeLabels=false&assignmentSessionIds=s-new',
+            expect.anything(),
+            expect.anything(),
+        );
+    });
+
+    it('adopts an assignment a later full organization snapshot reports for a known-unassigned session', async () => {
+        const { getStorage } = await import('@/sync/domains/state/storageStore');
+        const { fetchAndApplySessionFolderAssignments } = await import('./fetchSessionFolderAssignments');
+        mocks.serverFetch.mockImplementation(async () => jsonResponse(organizationSnapshotResponse([])));
+
+        await fetchAndApplySessionFolderAssignments({
+            credentials: { token: 'token-a', secret: 'secret-a' },
+            serverId: 'server-a',
+            sessionIds: ['s1'],
+            fetchPolicy: 'missing',
+        });
+        expect(getStorage().getState().sessionOrganizationFolderAssignmentsBySessionKey['server-a:s1']).toBeNull();
+
+        getStorage().getState().applySessionOrganizationSnapshot('server-a', {
+            schemaVersion: 1,
+            version: 2,
+            pins: [],
+            folders: [],
+            folderAssignments: [{ sessionId: 's1', folderId: 'folder-later' }],
+            tags: [],
+            tagAssignments: [],
+            orderEntries: [],
+            labels: [],
+        }, { includeAllFolderAssignments: true, includeAllTagAssignments: true });
+
+        expect(getStorage().getState().sessionOrganizationFolderAssignmentsBySessionKey['server-a:s1']).toBe('folder-later');
+    });
 });
