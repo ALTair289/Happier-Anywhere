@@ -590,6 +590,16 @@ describe('pending acknowledgement boundaries', () => {
         await refresh;
 
         expect(publishedLocalIds()).toContain(WITNESS_LOCAL_ID);
+
+        // Bounded: with no predecessor left registered, the next refresh applies normally.
+        await fetchAndApplyPendingMessagesV2({
+            sessionId: SESSION_ID,
+            encryption,
+            outboxScope: scope,
+            isOutboxScopeCurrent: () => true,
+            request: async () => queuedRowsResponse([SEED_LOCAL_ID]),
+        });
+        expect(publishedLocalIds()).toEqual([SEED_LOCAL_ID]);
     });
 
     /** The same ordering against the OTHER moved line: the replay POST's own acknowledgement. */
@@ -655,6 +665,16 @@ describe('pending acknowledgement boundaries', () => {
         await refresh;
 
         expect(publishedLocalIds()).toContain(WITNESS_LOCAL_ID);
+
+        // Bounded: with no predecessor left registered, the next refresh applies normally.
+        await fetchAndApplyPendingMessagesV2({
+            sessionId: SESSION_ID,
+            encryption,
+            outboxScope: scope,
+            isOutboxScopeCurrent: () => true,
+            request: async () => queuedRowsResponse([SEED_LOCAL_ID]),
+        });
+        expect(publishedLocalIds()).toEqual([SEED_LOCAL_ID]);
     });
 
     /**
