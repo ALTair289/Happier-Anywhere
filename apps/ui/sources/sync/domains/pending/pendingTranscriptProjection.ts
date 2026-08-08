@@ -105,17 +105,73 @@ export function isPendingTranscriptMessageHiddenByCrossover(
     return !shouldPreservePendingProjectionAfterCommittedUserLocalId(message);
 }
 
+/**
+ * The committed transcript localIds, optionally restricted to messages the server sequenced ABOVE a
+ * high-water mark.
+ *
+ * `seq` is the server's own monotone per-session message counter, shared by `Session.seq` and
+ * `SessionMessage.seq`, so `aboveSeq` reads as "committed later than everything this client could
+ * already have observed at that mark". A message without a numeric `seq` cannot be proven newer and
+ * is therefore excluded from a bounded collection (never from an unbounded one).
+ */
 export function collectCommittedTranscriptLocalIds(
     messageIdsOldestFirst: readonly string[],
     messagesById: Readonly<Record<string, Message>>,
+    options?: Readonly<{ aboveSeq: number }>,
 ): Set<string> {
+    const aboveSeq = options?.aboveSeq;
     const localIds = new Set<string>();
     for (const messageId of messageIdsOldestFirst) {
         const message = messagesById[messageId];
         if (!message) continue;
+        if (aboveSeq !== undefined && !(typeof message.seq === 'number' && message.seq > aboveSeq)) continue;
         if ('localId' in message && message.localId) localIds.add(message.localId);
     }
     return localIds;
+}
+
+/**
+ * The highest session sequence this client could already have observed for a session, or `null`
+ * when it holds no basis for that judgement.
+ *
+ * `null` is ABSENCE OF BASIS, not emptiness: a client that holds no committed message cannot tell
+ * "this commit is newer than my read" from "I had simply not loaded this commit yet", and the safe
+ * answer for that state is to assert nothing.
+ *
+ * The basis is a LOADED COMMITTED MESSAGE carrying a numeric `seq`, not the `isLoaded` flag and not
+ * `session.seq`:
+ *
+ *   - `isLoaded` can be `true` over an EMPTY transcript — `sync/sync.ts`'s `fetchMessages` marks a
+ *     session loaded and returns without applying anything when it cannot resolve an owner server,
+ *     and `sync/engine/sessions/syncSessions.ts`'s `markMessagesLoaded` runs after an empty initial
+ *     page — so the flag reports a completed attempt, not knowledge.
+ *   - `session.seq` alone cannot carry the mark either: `sync/domains/state/warmCacheAdapters.ts`
+ *     persists and rehydrates it while caching NEITHER `sessionMessages` nor `sessionPending`, so on
+ *     a warm start it can be arbitrarily stale-low, and every commit above it — including a durable
+ *     twin that is old news — would read as newer than the read.
+ *
+ * It is still included once a basis exists, because it can be ahead of the loaded page (the socket
+ * advances it on `new-message`) and a HIGHER mark can only ever withhold LESS.
+ */
+export function resolveCommittedTranscriptSeqHighWaterMark(params: Readonly<{
+    isLoaded: boolean;
+    sessionSeq: number | null | undefined;
+    messageIdsOldestFirst: readonly string[];
+    messagesById: Readonly<Record<string, Message>>;
+}>): number | null {
+    if (!params.isLoaded) return null;
+    let highWaterMark: number | null = null;
+    for (const messageId of params.messageIdsOldestFirst) {
+        const seq = params.messagesById[messageId]?.seq;
+        if (typeof seq !== 'number' || !Number.isFinite(seq)) continue;
+        if (highWaterMark === null || seq > highWaterMark) highWaterMark = seq;
+    }
+    if (highWaterMark === null) return null;
+    const sessionSeq = params.sessionSeq;
+    if (typeof sessionSeq === 'number' && Number.isFinite(sessionSeq) && sessionSeq > highWaterMark) {
+        return sessionSeq;
+    }
+    return highWaterMark;
 }
 
 export function filterCommittedTranscriptMessageIdsForPendingState(params: Readonly<{

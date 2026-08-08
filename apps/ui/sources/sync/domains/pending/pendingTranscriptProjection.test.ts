@@ -8,6 +8,7 @@ import {
     filterCommittedTranscriptMessageIdsForPendingState,
     isCommittedTranscriptMessageHiddenByCrossover,
     isPendingTranscriptMessageHiddenByCrossover,
+    resolveCommittedTranscriptSeqHighWaterMark,
     resolvePendingTranscriptCrossover,
 } from './pendingTranscriptProjection';
 
@@ -128,5 +129,113 @@ describe('pending → committed crossover', () => {
         });
 
         expect(remaining).toEqual([messages[1]!.id]);
+    });
+});
+
+/**
+ * The SEQUENCE BASIS the pending fence reads (`sync/engine/pending/pendingQueueV2.ts`'s
+ * `withholdPendingRowsCommittedAfterSnapshotCapture`): a mark for "everything I could already have
+ * observed", and a bounded walk for "committed above that mark". Withholding a row the mark cannot
+ * prove is newer hides a live queued/blocked message, so both halves are pinned here at the owner
+ * rather than only through the fence that consumes them.
+ */
+describe('committed transcript sequence basis', () => {
+    function sequenced(params: Readonly<{ localId: string; seq?: number }>): Message {
+        return {
+            kind: 'user-text',
+            id: `m-${params.localId}`,
+            localId: params.localId,
+            createdAt: 2,
+            text: 'hello',
+            ...(params.seq === undefined ? {} : { seq: params.seq }),
+        } as Message;
+    }
+
+    function transcript(messages: readonly Message[]) {
+        return {
+            messageIdsOldestFirst: messages.map((message) => message.id),
+            messagesById: Object.fromEntries(messages.map((message) => [message.id, message])),
+        };
+    }
+
+    describe('resolveCommittedTranscriptSeqHighWaterMark', () => {
+        it('has no basis until the session is loaded and a loaded message carries a seq', () => {
+            const empty = { messageIdsOldestFirst: [], messagesById: {} };
+
+            // Not loaded at all: the ordinary session-open state.
+            expect(resolveCommittedTranscriptSeqHighWaterMark({ isLoaded: false, sessionSeq: 12, ...empty })).toBeNull();
+            // Not loaded, yet a seq-bearing page is ALREADY in the store: the ordinary
+            // initial-page window. `sync/store/domains/messages.ts` creates a session's message
+            // entry with `isLoaded: false` and every apply PRESERVES that flag, while
+            // `sync/engine/sessions/syncSessions.ts` calls `markMessagesLoaded` only after the
+            // initial page has been applied — so a partially paged transcript carrying real seqs
+            // coexists with `isLoaded: false`. A page whose completeness the client cannot vouch
+            // for is not a basis: without the loaded term this reads 9 off it and withholds every
+            // twin sequenced at or below 9 — old news it simply has not paged in yet — which hides
+            // a live queued/blocked row.
+            expect(resolveCommittedTranscriptSeqHighWaterMark({
+                isLoaded: false,
+                sessionSeq: 2,
+                ...transcript([sequenced({ localId: 'l1', seq: 9 })]),
+            })).toBeNull();
+            // Marked loaded over an EMPTY transcript: a completed attempt is not knowledge, and
+            // `session.seq` is rehydrated from the warm cache without any message cache behind it,
+            // so it may sit arbitrarily below the server's real tail.
+            expect(resolveCommittedTranscriptSeqHighWaterMark({ isLoaded: true, sessionSeq: 0, ...empty })).toBeNull();
+            expect(resolveCommittedTranscriptSeqHighWaterMark({ isLoaded: true, sessionSeq: 12, ...empty })).toBeNull();
+            // Loaded messages that carry no seq cannot bound anything either.
+            expect(resolveCommittedTranscriptSeqHighWaterMark({
+                isLoaded: true,
+                sessionSeq: 12,
+                ...transcript([sequenced({ localId: 'l1' })]),
+            })).toBeNull();
+        });
+
+        it('takes the highest of the loaded seqs and the session seq once a basis exists', () => {
+            const loaded = transcript([
+                sequenced({ localId: 'l1', seq: 4 }),
+                sequenced({ localId: 'l2' }),
+                sequenced({ localId: 'l3', seq: 9 }),
+                sequenced({ localId: 'l4', seq: 7 }),
+            ]);
+
+            // A stale-low (or absent) session seq must not lower the mark below what is loaded…
+            expect(resolveCommittedTranscriptSeqHighWaterMark({ isLoaded: true, sessionSeq: 2, ...loaded })).toBe(9);
+            expect(resolveCommittedTranscriptSeqHighWaterMark({ isLoaded: true, sessionSeq: null, ...loaded })).toBe(9);
+            expect(resolveCommittedTranscriptSeqHighWaterMark({ isLoaded: true, sessionSeq: undefined, ...loaded })).toBe(9);
+            // …and a session seq the socket advanced past the loaded page must raise it, because a
+            // higher mark can only ever withhold less.
+            expect(resolveCommittedTranscriptSeqHighWaterMark({ isLoaded: true, sessionSeq: 21, ...loaded })).toBe(21);
+        });
+    });
+
+    describe('collectCommittedTranscriptLocalIds', () => {
+        const messages = [
+            sequenced({ localId: 'below', seq: 5 }),
+            sequenced({ localId: 'at', seq: 6 }),
+            sequenced({ localId: 'above', seq: 7 }),
+            sequenced({ localId: 'unsequenced' }),
+        ];
+
+        it('bounds by aboveSeq strictly and drops what it cannot prove is newer', () => {
+            const localIds = collectCommittedTranscriptLocalIds(
+                messages.map((message) => message.id),
+                Object.fromEntries(messages.map((message) => [message.id, message])),
+                { aboveSeq: 6 },
+            );
+
+            // Strictly above: a message AT the mark is old news the client could already have seen,
+            // and a message with no seq cannot be proven newer — withholding on either hides a row.
+            expect([...localIds]).toEqual(['above']);
+        });
+
+        it('keeps every localId, seq or not, when no bound is asked for', () => {
+            const localIds = collectCommittedTranscriptLocalIds(
+                messages.map((message) => message.id),
+                Object.fromEntries(messages.map((message) => [message.id, message])),
+            );
+
+            expect([...localIds].sort()).toEqual(['above', 'at', 'below', 'unsequenced']);
+        });
     });
 });

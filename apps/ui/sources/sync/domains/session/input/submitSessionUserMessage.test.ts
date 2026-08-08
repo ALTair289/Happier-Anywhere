@@ -144,7 +144,10 @@ describe('submitSessionUserMessage', () => {
 
     it('reports a requested-action update failure while retaining durable custody', async () => {
         const harness = createPort();
-        harness.updatePendingRequestedAction.mockRejectedValueOnce(new Error('row already claimed'));
+        harness.updatePendingRequestedAction.mockRejectedValueOnce(Object.assign(
+            new Error('row already claimed'),
+            { code: 'action-conflict' },
+        ));
 
         const result = await submitSessionUserMessage(harness.port, {
             ...baseOptions,
@@ -158,6 +161,7 @@ describe('submitSessionUserMessage', () => {
             type: 'wake_failed',
             persistence: 'pending',
             localId: 'existing-local',
+            errorCode: 'action-conflict',
             errorMessage: 'row already claimed',
         });
         expect(harness.enqueuePendingMessage).not.toHaveBeenCalled();

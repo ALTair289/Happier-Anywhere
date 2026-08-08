@@ -33,6 +33,11 @@ import {
 } from '@/sync/engine/sessions/sessionApplyCoalescer';
 import { createSessionListRenderableProjectionPatchCoalescer } from '@/sync/engine/sessions/sessionListRenderableProjectionPatchCoalescer';
 import { createSessionMessageApplyCoalescer } from '@/sync/engine/sessions/sessionMessageApplyCoalescer';
+import {
+    setReceivedSessionMessageApplier,
+    settleReceivedSessionMessages,
+    trackSessionMessageMaterialization,
+} from '@/sync/engine/sessions/sessionMessageMaterializationBarrier';
 import { createSessionShellRefreshCoalescer } from '@/sync/engine/sessions/sessionShellRefreshCoalescer';
 import { recordSessionInvalidationRequested } from '@/sync/engine/sessions/sessionInvalidationTelemetry';
 import { settingsDefaults } from '@/sync/domains/settings/settings';
@@ -886,6 +891,25 @@ const socketMessageApplyCoalescer = createSessionMessageApplyCoalescer({
     },
 });
 
+/**
+ * The socket delivers a materialization as TWO bodies, in order: the committed `new-message`, then
+ * the `pending-changed` that reports the queue empty
+ * (`apps/server/sources/app/session/pending/acceptedPendingSettlementCoordinator.ts` emits them in
+ * exactly that sequence from one settlement transaction).
+ *
+ * This client discards that order. Socket events are dispatched to `handleSocketUpdate` WITHOUT
+ * awaiting the previous one (`sync/api/session/apiSocket.ts#installSocketEventHandlers`), the
+ * `new-message` path always yields at least once (it awaits `readStoredSessionMessage`, plus the
+ * decrypt for an e2ee session) and may then hand its message to the apply coalescer, while
+ * `pending-changed` runs to completion synchronously. So the prune can retire the pending row
+ * BEFORE the committed twin it is the receipt for has been applied.
+ *
+ * `sync/engine/sessions/sessionMessageMaterializationBarrier.ts` owns that question for every writer
+ * that retires pending rows; this module owns the two halves it can see — which messages are in
+ * flight, and how to apply the ones still queued in its coalescer.
+ */
+setReceivedSessionMessageApplier((sessionId) => socketMessageApplyCoalescer.flush(sessionId));
+
 type DeferredTranscriptStreamSegmentEntry = Readonly<{
     update: AnyTranscriptStreamSegmentEphemeralUpdate;
     sourceServerId?: string | null;
@@ -1239,7 +1263,7 @@ export async function handleUpdateContainer(params: {
             onNormalizedMessagesApplied: ingestWorkspaceMutationMessages,
             markSessionMaterializedMaxSeq,
         };
-        await handleNewMessageSocketUpdate({
+        await trackSessionMessageMaterialization(updateData.body.sid, handleNewMessageSocketUpdate({
             updateData,
             getSessionEncryption: (sessionId) => encryption.getSessionEncryption(sessionId),
             getSession: getSocketSessionApplyBase,
@@ -1304,7 +1328,7 @@ export async function handleUpdateContainer(params: {
                     onTaskLifecycleEvent(sessionId, event);
                 }
                 : undefined,
-        });
+        }));
     } else if (updateData.body.t === 'message-updated') {
         const getSessionMaterializedMaxSeqForGapDetection = (sessionId: string) =>
             Math.max(
@@ -1314,7 +1338,7 @@ export async function handleUpdateContainer(params: {
 
         socketMessageApplyCoalescer.dropQueuedMessageIds(updateData.body.sid, [updateData.body.message.id]);
 
-        await handleMessageUpdatedSocketUpdate({
+        await trackSessionMessageMaterialization(updateData.body.sid, handleMessageUpdatedSocketUpdate({
             updateData,
             getSessionEncryption: (sessionId) => encryption.getSessionEncryption(sessionId),
             getSession: getSocketSessionApplyBase,
@@ -1387,7 +1411,7 @@ export async function handleUpdateContainer(params: {
                     onTaskLifecycleEvent(sessionId, event);
                 }
                 : undefined,
-        });
+        }));
     } else if (updateData.body.t === 'new-session') {
         log.log('🆕 New session update received');
         if (!shouldContinue()) return;
@@ -1413,12 +1437,14 @@ export async function handleUpdateContainer(params: {
         });
     } else if (updateData.body.t === 'pending-changed') {
         const sessionId = updateData.body.sid;
+        const pendingPatch = buildPendingChangedSessionPatch(updateData.body);
+        // The SESSION-LEVEL count is applied in ARRIVAL ORDER, before the barrier below can yield.
+        // It is a whole-session write through `socketSessionApplyCoalescer` and the next body builds
+        // on the queued session (`getSocketSessionApplyBase`), so deferring it would let a newer
+        // `pending-changed` apply first and then be overwritten by this older, smaller count.
+        // Only the ROW RETIREMENT has to wait for the messages it is the receipt for.
         const state = storage.getState();
         const session = getSocketSessionApplyBase(sessionId);
-        const pendingPatch = buildPendingChangedSessionPatch(updateData.body);
-        if (pendingPatch.pendingCount === 0) {
-            state.pruneServerPendingMessages(sessionId);
-        }
         if (!session) {
             const cachedRenderable = state.sessionListRenderables[sessionId];
             if (cachedRenderable) {
@@ -1437,26 +1463,33 @@ export async function handleUpdateContainer(params: {
                         visibleCacheOnly: 1,
                     },
                 });
-                return;
+            } else {
+                requestTargetedSessionHydration({
+                    sessionId,
+                    reason: 'socket-update-missing-session',
+                    hydrateSessionById,
+                    invalidateSessions,
+                    invalidationReason: 'socketPendingChangedMissingSession',
+                    invalidationFields: {
+                        hasCachedRenderable: 0,
+                    },
+                });
             }
-
-            requestTargetedSessionHydration({
-                sessionId,
-                reason: 'socket-update-missing-session',
-                hydrateSessionById,
-                invalidateSessions,
-                invalidationReason: 'socketPendingChangedMissingSession',
-                invalidationFields: {
-                    hasCachedRenderable: cachedRenderable ? 1 : 0,
-                },
-            });
-            return;
+        } else {
+            enqueueSocketSessionApplyGuarded(applySessions, [{
+                ...session,
+                ...pendingPatch,
+            }], shouldContinue);
         }
 
-        enqueueSocketSessionApplyGuarded(applySessions, [{
-            ...session,
-            ...pendingPatch,
-        }], shouldContinue);
+        if (pendingPatch.pendingCount === 0) {
+            // An empty queue is the RECEIPT for messages this client may still be materializing.
+            // Retiring the pending rows first publishes a transcript frame carrying neither the
+            // pending row nor its committed twin. See the barrier's contract above.
+            await settleReceivedSessionMessages(sessionId);
+            if (!shouldContinue()) return;
+            storage.getState().pruneServerPendingMessages(sessionId);
+        }
     } else if (updateData.body.t === 'update-session') {
         const session = getSocketSessionApplyBase(updateData.body.id);
         if (!session) {

@@ -541,11 +541,13 @@ export async function submitSessionUserMessage(
                 requestedAction,
             );
         } catch (error) {
+            const errorCode = getErrorCode(error);
             const errorMessage = getErrorMessage(error, 'Failed to update Pending requested action');
             return {
                 type: 'wake_failed',
                 persistence: 'pending',
                 wake: { attempted: false, state: 'failed', errorMessage },
+                ...(errorCode ? { errorCode } : {}),
                 errorMessage,
                 localId: effectiveOpts.localId,
             };

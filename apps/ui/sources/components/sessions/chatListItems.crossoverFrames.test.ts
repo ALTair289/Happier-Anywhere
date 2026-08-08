@@ -53,6 +53,35 @@ function acceptedLocalOutboundProjection() {
     };
 }
 
+/**
+ * The shape the DURABLE PENDING QUEUE V2 route actually produces, measured on this build in
+ * `.project/reviews/2026-08-06-simplify-and-native/C3-void-writer.md` (22/22 sends):
+ * the row is born with a `pendingOutboxScope`, so lane U2's unscoped-`local_outbound` retention
+ * rule never speaks for it, and the server snapshot later replaces it with a `server_pending` row
+ * carrying the same localId.
+ */
+const OUTBOX_SCOPE = { serverId: 'server-1', accountId: 'account-1' } as const;
+
+function durableOutboundProjection() {
+    return {
+        ...acceptedLocalOutboundProjection(),
+        pendingOutboxScope: OUTBOX_SCOPE,
+    };
+}
+
+function durableServerPendingProjection() {
+    return {
+        id: LOCAL_ID,
+        localId: LOCAL_ID,
+        createdAt: 1_000,
+        updatedAt: 1_000,
+        source: 'server_pending' as const,
+        pendingDeliveryStatus: 'server_delivering' as const,
+        text: 'hello',
+        rawRecord: { role: 'user', content: { type: 'text', text: 'hello' } } as any,
+    };
+}
+
 function committedTwin() {
     return {
         id: 'committed-1',
@@ -168,6 +197,28 @@ function framesWithBothRows(projections: readonly FrameProjection[]): FrameProje
 }
 
 /**
+ * Frames that hand the slot BACK to the pending row after the committed row already owned it.
+ *
+ * The crossover is a handover, not a negotiation: a frame carrying exactly one row still breaks the
+ * contract if it retracts a committed row this list already published. Measured consequence — the
+ * transcript's content height moves three times for one utterance instead of once.
+ */
+function framesRetractingTheCommittedRow(projections: readonly FrameProjection[]): FrameProjection[] {
+    const retractions: FrameProjection[] = [];
+    for (const builder of new Set(projections.map((p) => p.builder))) {
+        let committedOwnedSlot = false;
+        for (const projection of projections.filter((p) => p.builder === builder)) {
+            if (projection.owners.committedRow) {
+                committedOwnedSlot = true;
+                continue;
+            }
+            if (committedOwnedSlot && projection.owners.pendingRow) retractions.push(projection);
+        }
+    }
+    return retractions;
+}
+
+/**
  * Every action the pending domain exposes, classified by who owns retiring a locally owned
  * projection that the server has ACCEPTED but that has not committed yet.
  *
@@ -240,6 +291,7 @@ describe('transcript item list: the pending -> committed crossover never loses t
             const projections = projectFrames(harness.frames);
             expect(framesWithoutTheUtterance(projections)).toEqual([]);
             expect(framesWithBothRows(projections)).toEqual([]);
+            expect(framesRetractingTheCommittedRow(projections)).toEqual([]);
         });
     }
 
@@ -257,6 +309,61 @@ describe('transcript item list: the pending -> committed crossover never loses t
         const projections = projectFrames(harness.frames);
         expect(framesWithoutTheUtterance(projections)).toEqual([]);
         expect(framesWithBothRows(projections)).toEqual([]);
+    });
+
+    /**
+     * The route a real send actually takes on this build (durable pending queue V2), in the
+     * ordering a slow client produces: the local projection is retired by `applyMessages` in the
+     * same store update that appends the committed twin, and the server's pending snapshot for that
+     * same send — an HTTP round trip racing a socket push — lands afterwards.
+     *
+     * This asserts the FRAMES for the sequence the snapshot owner is required to publish. The
+     * decision that the stale row must not be republished is NOT the store's and is not testable
+     * here: `applyPendingSnapshot` cannot tell a stale re-assertion from a first read, so the fence
+     * lives at the read's capture point in
+     * `sync/engine/pending/pendingQueueV2.ts#withholdPendingRowsCommittedAfterSnapshotCapture`
+     * (RED/GREEN in `pendingQueueV2.committedCrossover.test.ts`). What this file owns is the
+     * consequence: with the row withheld, the committed row keeps the slot it already took.
+     */
+    it('keeps the committed row when the fenced snapshot lands after the committed twin', () => {
+        const harness = createCrossoverHarness();
+        harness.pending.upsertPendingMessage(SESSION_ID, durableOutboundProjection());
+
+        harness.messages.applyMessages(SESSION_ID, [committedTwin()]);
+        harness.pending.applyPendingSnapshot(SESSION_ID, { messages: [], discarded: [] });
+
+        const projections = projectFrames(harness.frames);
+        expect(framesWithoutTheUtterance(projections)).toEqual([]);
+        expect(framesWithBothRows(projections)).toEqual([]);
+        expect(framesRetractingTheCommittedRow(projections)).toEqual([]);
+        expect(projections.slice(-2).every((p) => p.owners.committedRow && !p.owners.pendingRow)).toBe(true);
+    });
+
+    /**
+     * The other ordering, unchanged: while the client still HOLDS the durable row, the server owns
+     * its removal and it keeps the slot across the commit
+     * (`sync/domains/pending/pendingTranscriptProjection.ts`). Only the release is one-way.
+     */
+    it('lets a durable pending row it still holds keep the slot across the commit', () => {
+        const harness = createCrossoverHarness();
+        harness.pending.upsertPendingMessage(SESSION_ID, durableOutboundProjection());
+        harness.pending.applyPendingSnapshot(SESSION_ID, {
+            messages: [durableServerPendingProjection()] as any,
+            discarded: [],
+        });
+
+        harness.messages.applyMessages(SESSION_ID, [committedTwin()]);
+        const afterCommit = projectFrames(harness.frames).filter((p) => p.index === harness.frames.length - 1);
+        expect(afterCommit).not.toHaveLength(0);
+        expect(afterCommit.every((p) => p.owners.pendingRow && !p.owners.committedRow)).toBe(true);
+
+        harness.pending.pruneServerPendingMessages(SESSION_ID);
+
+        const projections = projectFrames(harness.frames);
+        expect(framesWithoutTheUtterance(projections)).toEqual([]);
+        expect(framesWithBothRows(projections)).toEqual([]);
+        expect(framesRetractingTheCommittedRow(projections)).toEqual([]);
+        expect(projections.slice(-2).every((p) => p.owners.committedRow && !p.owners.pendingRow)).toBe(true);
     });
 
     it('renders the committed row in the same frame that drops the pending row', () => {
