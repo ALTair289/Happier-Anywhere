@@ -21,7 +21,12 @@ describe('ComposerKeyboardScrollInset', () => {
                 bottomInset: 68,
                 composerHeight: 100,
                 keyboardHeightForInset: 68,
-                listBottomInset: 168,
+                // Deliberately NOT 168. The settled total and the native derivation are the same
+                // quantity in production and agreed numerically in this fixture, so every
+                // assertion below passed whichever one the component read — swapping the
+                // rendered spacer for the settled total left this test green (MEASURED
+                // 2026-08-09). A distinct value is what makes the source observable.
+                listBottomInset: 999,
             }),
             subscribeListBottomInset: () => () => {},
         } satisfies ComposerKeyboardLayout;
@@ -86,7 +91,12 @@ describe('ComposerKeyboardScrollInset', () => {
         expect(readHeight()).toBe(0);
 
         await act(async () => {
-            layout.composerHeight.value = 120;
+            // The composer has already grown to 130 on the UI thread; the settled total the JS
+            // thread notifies still describes the 120 it computed. The two readings are the same
+            // quantity sampled at different times, and they must NOT be given the same number
+            // here: while they agreed, this test passed with the rendered spacer wired to the
+            // settled total instead of the animated inset (MEASURED 2026-08-09).
+            layout.composerHeight.value = 130;
             layout.keyboardHeightForInset.value = 72;
             layout.bottomInset.value = 72;
             layout.listBottomInset.value = 192;
@@ -98,7 +108,9 @@ describe('ComposerKeyboardScrollInset', () => {
         // re-render rather than on a UI-thread frame.
         await screen.update(renderTree());
 
-        expect(readHeight()).toBe(192);
+        // Rendered = the continuously tracked geometry...
+        expect(readHeight()).toBe(202);
+        // ...reported = the settled total JS-side consumers must agree on.
         expect(onHeightChange).toHaveBeenLastCalledWith(192);
     });
 
@@ -371,9 +383,13 @@ describe('ComposerKeyboardScrollInset', () => {
                 subscribeListBottomInset: () => () => {},
             } satisfies ComposerKeyboardLayout;
 
+            const onHeightChange = vi.fn();
             const screen = await renderScreen(
                 <ComposerKeyboardProvider layout={layout}>
-                    <ComposerKeyboardScrollInset testID="transcript-composer-keyboard-inset" />
+                    <ComposerKeyboardScrollInset
+                        testID="transcript-composer-keyboard-inset"
+                        onHeightChange={onHeightChange}
+                    />
                 </ComposerKeyboardProvider>,
             );
 
@@ -387,6 +403,11 @@ describe('ComposerKeyboardScrollInset', () => {
             ), undefined);
 
             expect(height).toBe(0);
+            // The reported total is the discriminating half: the rendered height is 0 on web
+            // whether or not the pre-replay fallback honours the platform, so asserting it alone
+            // left this test green with the web branch deleted (MEASURED 2026-08-09).
+            expect(onHeightChange).toHaveBeenCalledWith(0);
+            expect(onHeightChange.mock.calls.map(([reported]) => reported)).not.toContain(125);
         } finally {
             Object.defineProperty(Platform, 'OS', { value: originalPlatformOS, configurable: true });
         }

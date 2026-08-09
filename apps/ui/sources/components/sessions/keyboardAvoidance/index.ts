@@ -17,14 +17,12 @@ export {
     resolveAvailablePanelHeight,
     resolveComposerBottomOffset,
     resolveComposerTranslateY,
-    resolveInteractiveDismissInset,
     resolveListBottomInset,
 } from './composerKeyboardGeometry';
 export type {
     AvailablePanelHeightInput,
     ComposerBottomOffsetInput,
     ComposerTranslateInput,
-    InteractiveDismissInsetInput,
     KeyboardAvoidanceClampInput,
     ListBottomInsetInput,
 } from './composerKeyboardGeometry';

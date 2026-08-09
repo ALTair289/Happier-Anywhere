@@ -19,12 +19,6 @@ export type ListBottomInsetInput = Readonly<{
     safeAreaBottom: number;
 }>;
 
-export type InteractiveDismissInsetInput = Readonly<{
-    isInteractiveDismissActive: boolean;
-    liveKeyboardHeight: number;
-    settledKeyboardHeight: number;
-}>;
-
 export type AvailablePanelHeightInput = Readonly<{
     viewportHeight: number;
     headerHeight?: number;
@@ -80,16 +74,6 @@ export function resolveListBottomInset({
     'worklet';
     return normalizeNonNegativeNumber(composerHeight)
         + resolveComposerBottomOffset({ keyboardHeight: keyboardHeightForInset, safeAreaBottom });
-}
-
-export function resolveInteractiveDismissInset({
-    isInteractiveDismissActive,
-    liveKeyboardHeight,
-    settledKeyboardHeight,
-}: InteractiveDismissInsetInput): number {
-    return isInteractiveDismissActive
-        ? normalizeNonNegativeNumber(settledKeyboardHeight)
-        : normalizeNonNegativeNumber(liveKeyboardHeight);
 }
 
 export function resolveAvailablePanelHeight({

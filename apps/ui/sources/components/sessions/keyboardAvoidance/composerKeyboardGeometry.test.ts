@@ -7,7 +7,6 @@ import {
     resolveAvailablePanelHeight,
     resolveComposerBottomOffset,
     resolveComposerTranslateY,
-    resolveInteractiveDismissInset,
     resolveListBottomInset,
 } from './composerKeyboardGeometry';
 
@@ -48,21 +47,12 @@ describe('composer keyboard geometry', () => {
         })).toBe(404);
     });
 
-    it('keeps the frozen inset during interactive dismiss', () => {
-        expect(resolveInteractiveDismissInset({
-            isInteractiveDismissActive: true,
-            liveKeyboardHeight: 80,
-            settledKeyboardHeight: 280,
-        })).toBe(280);
-    });
-
-    it('returns the live inset outside interactive dismiss', () => {
-        expect(resolveInteractiveDismissInset({
-            isInteractiveDismissActive: false,
-            liveKeyboardHeight: 80,
-            settledKeyboardHeight: 280,
-        })).toBe(80);
-    });
+    // REMOVED 2026-08-09 with `resolveInteractiveDismissInset` itself: the helper had ZERO
+    // production consumers (only this file and the barrel export referenced it) while being a
+    // THIRD written copy of the interactive-dismiss freeze rule, whose two live expressions are
+    // `useComposerKeyboardLayout.native.ts` (the JS recompute and the UI-thread derived inset).
+    // Its two tests were green against every mutation of the real rule, because they graded a
+    // function no keyboard frame ever called.
 
     it('clamps to the available maximum when the requested minimum is larger', () => {
         expect(clampKeyboardAvoidanceValue({

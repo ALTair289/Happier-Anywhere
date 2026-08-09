@@ -12,6 +12,21 @@ import { renderHook, standardCleanup } from '@/dev/testkit';
 // (Live evidence 2026-07-09: composer growth 137→153→172 notified 404→404→420 instead of
 // 404→420→439, leaving the transcript composer inset one step behind and the last rows
 // rendered under the composer on native iOS.)
+//
+// SCOPE — read before adding a test here. This suite pins ONE contract: what the JS thread
+// NOTIFIES and REPLAYS. It cannot pin rendered geometry, because `keyboardAnimation.height` is
+// frozen at 0 in this file's mock and `listBottomInsetAnimated` re-derives on the UI thread,
+// which observes committed writes and therefore has no lag to model. Every test below must die
+// under a read-back mutant (recompute reading `.value` instead of the JS-owned record; a notify
+// or a subscribe replay carrying `.value` instead of the freshly computed local). A test that
+// survives all of those is asserting nothing this suite owns.
+//
+// The UI-thread/rendered side — the interactive-dismiss freeze, the post-hide latch, retained
+// lift, and `listBottomInsetAnimated` under a moving keyboard — is pinned in
+// `useComposerKeyboardLayout.native.test.ts`, which drives `reanimatedKeyboardHeight`. A
+// dismissal-shaped test written HERE looks like it grades the device shape and does not: the
+// mirror test deleted on 2026-08-09 passed against the fix reverted, against the freeze deleted,
+// and against the rendered spacer swapped for the settled total (all three MEASURED).
 
 const lagState = vi.hoisted(() => ({
     keyboardHandlers: null as null | {
@@ -325,59 +340,40 @@ describe('useComposerKeyboardLayout native (guest-runtime shared-value write lag
         expect(notifiedInsets[notifiedInsets.length - 1]).toBe(120 + 34);
         expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(120 + 34);
 
-        // And it must stay seated: the post-hide latch stops every keyboard worklet until the
-        // composer is refocused, so a wrong seat written here is never re-derived away.
-        act(() => {
-            lagState.keyboardHandlers?.onEnd?.({ height: 0, progress: 0 });
-        });
-        flushSharedValues();
-
-        expect(hook.getCurrent().bottomInset.value).toBe(34);
-    });
-
-    // The mirror shape of the same root: when the stale input set carries the interactive-dismiss
-    // freeze instead of the raised height, the composer docks correctly but the SETTLED inset
-    // reported to the transcript viewport owner keeps the keyboard-sized gap.
-    it('notifies the docked transcript inset when an interactive dismiss settles before its writes synchronize', async () => {
-        lagState.platformOS = 'ios';
-        const { useComposerKeyboardLayout } = await import('./useComposerKeyboardLayout.native');
-        const hook = await renderHook(() => useComposerKeyboardLayout({ safeAreaBottom: 34 }));
-        const notifiedInsets: number[] = [];
-
-        act(() => {
-            hook.getCurrent().setComposerMeasuredHeight(137);
-        });
-        flushSharedValues();
-        act(() => {
-            lagState.keyboardHandlers?.onStart?.({ height: 267, progress: 1 });
-        });
-        flushSharedValues();
+        // And it must stay seated. The frame replayed here is a STALE NON-ZERO one — the shape
+        // the post-hide latch exists to swallow. Replaying a zero frame instead proved nothing:
+        // it seats the composer at the safe area whether the latch is armed or not, so the
+        // assertion passed with the latch deleted (MEASURED 2026-08-09).
         act(() => {
             lagState.keyboardHandlers?.onEnd?.({ height: 267, progress: 1 });
         });
         flushSharedValues();
 
-        // Swipe-to-dismiss: the gesture freezes the settled inset at the raised height while the
-        // live height follows the finger to zero.
-        act(() => {
-            lagState.keyboardHandlers?.onInteractive?.({ height: 0, progress: 0 });
-        });
-        flushSharedValues();
-
-        hook.getCurrent().subscribeListBottomInset?.((height) => {
-            notifiedInsets.push(height);
-        });
-        notifiedInsets.length = 0;
-
-        act(() => {
-            lagState.keyboardListeners.get('keyboardDidHide')?.();
-        });
-        act(() => {
-            hook.getCurrent().setComposerMeasuredHeight(120);
-        });
-        flushSharedValues();
-
         expect(hook.getCurrent().bottomInset.value).toBe(34);
-        expect(notifiedInsets[notifiedInsets.length - 1]).toBe(120 + 34);
+        expect(hook.getCurrent().listBottomInsetAnimated.value).toBe(120 + 34);
     });
+
+    // DELETED 2026-08-09: 'notifies the docked transcript inset when an interactive dismiss
+    // settles before its writes synchronize'. It claimed to pin the mirror shape (transcript
+    // keeps the keyboard-sized gap while the composer docks) and pinned nothing of the kind,
+    // for three independent reasons:
+    //   1. It asserted the NOTIFIED settled inset. The gap the device grades is the rendered
+    //      spacer, `ComposerKeyboardScrollInset.tsx:85-87` → `listBottomInsetAnimated`, which
+    //      re-derives on the UI thread and never reads the notified total.
+    //   2. It drove `onInteractive({ height: 0 })`, which react-native-keyboard-controller
+    //      1.18.5 provably never emits: `KeyboardMovementObserver+Interactive.swift:41-45`
+    //      returns early when `position == 0`.
+    //   3. It could not fail. `keyboardDidHide` → `applyFinalKeyboardHeightFromJS(0)` forces
+    //      `isInteractiveDismissActive: false` into the recompute, so the freeze is released on
+    //      that path whatever the implementation does.
+    // MEASURED: it passed with the 580e3e389 fix reverted, with the interactive-dismiss freeze
+    // deleted, with the post-hide latch deleted, with the retention release neutered, and with
+    // the rendered spacer swapped for the settled total. Nothing here could be strengthened
+    // without leaving this suite's premise (write lag) for a latch, so it was removed rather
+    // than weakened. The reachable instance of that shape is pinned, on the rendered value and
+    // with the small non-zero interactive frame the library actually emits, by
+    // `useComposerKeyboardLayout.native.test.ts`: 'releases the interactive-dismiss inset freeze
+    // when the keyboard hides behind a retained lift' (dies when the fix is reverted) plus its
+    // guard 'holds the transcript inset while an interactive dismissal is still in flight'
+    // (dies when the freeze is deleted).
 });
