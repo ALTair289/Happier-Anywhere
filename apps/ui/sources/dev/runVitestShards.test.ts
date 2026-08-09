@@ -1,12 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
     buildVitestShardRunArgs,
+    classifyVitestShardTermination,
     partitionVitestFilesIntoShards,
     resolveVitestConfigPath,
     resolveVitestPositionalFilters,
     resolveVitestShardCount,
     resolveVitestPassthroughArgs,
+    runVitestShardRuns,
+    shouldVitestShardRunProceedWithoutFiles,
+    summarizeVitestShardOutcomes,
 } from '../../scripts/runVitestShards.mjs';
 
 describe('apps/ui runVitestShards', () => {
@@ -113,6 +117,121 @@ describe('apps/ui runVitestShards', () => {
             'sources/x',
             '/abs/a.test.ts',
         ]);
+    });
+
+    it('treats a failed shard as a failure to keep running, and only an operator interrupt as an abort', () => {
+        // The lane-green claim that shipped the mirror shape came from a sharded run that
+        // stopped at the first failing shard: the shards after it never executed and their
+        // silence was read as green. A failing shard must therefore never end the run.
+        expect(classifyVitestShardTermination({ code: 1, signal: null })).toEqual({
+            outcome: 'failed',
+            exitCode: 1,
+            signal: null,
+        });
+        // A crashed shard (SIGSEGV / SIGABRT / OOM-killer SIGKILL) is the failure mode sharding
+        // exists to contain; it is this shard's failure, not a reason to skip the rest.
+        expect(classifyVitestShardTermination({ code: null, signal: 'SIGSEGV' }).outcome).toBe('failed');
+        expect(classifyVitestShardTermination({ code: null, signal: 'SIGKILL' }).outcome).toBe('failed');
+        // Ctrl-C is the one case where continuing is wrong: the rest would be spawned into it.
+        expect(classifyVitestShardTermination({ code: null, signal: 'SIGINT' })).toEqual({
+            outcome: 'aborted',
+            exitCode: 130,
+            signal: 'SIGINT',
+        });
+        expect(classifyVitestShardTermination({ code: 0, signal: null }).outcome).toBe('passed');
+    });
+
+    it('runs later shards after an early shard fails', async () => {
+        const runShard = vi.fn()
+            .mockResolvedValueOnce({ ok: true, code: 1, signal: null })
+            .mockResolvedValueOnce({ ok: true, code: 0, signal: null })
+            .mockResolvedValueOnce({ ok: true, code: 0, signal: null });
+
+        const outcomes = await runVitestShardRuns({
+            shardFiles: [['/abs/a.test.ts'], ['/abs/b.test.ts'], ['/abs/c.test.ts']],
+            runShard,
+        });
+
+        expect(runShard.mock.calls.map(([entry]) => entry.shard)).toEqual([1, 2, 3]);
+        expect(outcomes.map((entry) => entry.outcome)).toEqual(['failed', 'passed', 'passed']);
+    });
+
+    it('exits non-zero and names every failing shard when a later shard fails', () => {
+        const summary = summarizeVitestShardOutcomes({
+            shardCount: 4,
+            outcomes: [
+                { shard: 1, outcome: 'passed', exitCode: 0, signal: null, fileCount: 3 },
+                { shard: 2, outcome: 'failed', exitCode: 1, signal: null, fileCount: 3 },
+                { shard: 3, outcome: 'passed', exitCode: 0, signal: null, fileCount: 3 },
+                { shard: 4, outcome: 'failed', exitCode: 1, signal: null, fileCount: 2 },
+            ],
+        });
+
+        expect(summary.exitCode).toBe(1);
+        expect(summary.executedCount).toBe(4);
+        expect(summary.passedCount).toBe(2);
+        expect(summary.failedShards.map((entry) => entry.shard)).toEqual([2, 4]);
+        // The aggregate must name the failing shards; a bare non-zero exit hides which ran.
+        expect(summary.lines.join('\n')).toContain('2 passed, 2 failed');
+        expect(summary.lines.some((line) => line.includes('shard 2/4 FAILED'))).toBe(true);
+        expect(summary.lines.some((line) => line.includes('shard 4/4 FAILED'))).toBe(true);
+    });
+
+    it('distinguishes the aborted shard, unexecuted shards, and known empty shards', async () => {
+        const runShard = vi.fn()
+            .mockResolvedValueOnce({ ok: true, code: 0, signal: null })
+            .mockResolvedValueOnce({ ok: true, code: null, signal: 'SIGINT' });
+        const outcomes = await runVitestShardRuns({
+            shardFiles: [
+                ['/abs/a.test.ts'],
+                ['/abs/b.test.ts'],
+                ['/abs/c.test.ts'],
+                [],
+                ['/abs/d.test.ts'],
+            ],
+            runShard,
+        });
+        const summary = summarizeVitestShardOutcomes({
+            shardCount: 5,
+            outcomes,
+        });
+
+        expect(runShard.mock.calls.map(([entry]) => entry.shard)).toEqual([1, 2]);
+        expect(outcomes.map((entry) => entry.outcome)).toEqual([
+            'passed',
+            'aborted',
+            'unexecuted',
+            'empty',
+            'unexecuted',
+        ]);
+        expect(summary.exitCode).toBe(130);
+        expect(summary.executedCount).toBe(2);
+        expect(summary.emptyCount).toBe(1);
+        expect(summary.unexecutedCount).toBe(2);
+        expect(summary.lines.join('\n')).toContain('ABORTED by SIGINT at shard 2/5');
+        expect(summary.lines.join('\n')).toContain('1 empty, 2 unexecuted');
+    });
+
+    it('refuses to report a zero-file sharded run as green unless --passWithNoTests was asked for', () => {
+        // A mistyped path filter resolves to zero files. `vitest run` exits non-zero there; a
+        // wrapper that exits 0 turns a typo into a green lane claim.
+        expect(shouldVitestShardRunProceedWithoutFiles({ fileCount: 0, passthroughArgs: ['sources/typo'] })).toBe(false);
+        expect(shouldVitestShardRunProceedWithoutFiles({ fileCount: 0, passthroughArgs: ['--passWithNoTests'] })).toBe(true);
+        expect(shouldVitestShardRunProceedWithoutFiles({ fileCount: 3, passthroughArgs: [] })).toBe(true);
+    });
+
+    it('reports a clean sweep as green', () => {
+        const summary = summarizeVitestShardOutcomes({
+            shardCount: 2,
+            outcomes: [
+                { shard: 1, outcome: 'passed', exitCode: 0, signal: null, fileCount: 1 },
+                { shard: 2, outcome: 'passed', exitCode: 0, signal: null, fileCount: 1 },
+            ],
+        });
+
+        expect(summary.exitCode).toBe(0);
+        expect(summary.failedShards).toEqual([]);
+        expect(summary.lines.join('\n')).toContain('2 passed, 0 failed');
     });
 
     it('classifies positional filters with vitest own CLI parser, not a dash heuristic', async () => {
