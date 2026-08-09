@@ -13,13 +13,24 @@ function writeExecutable(filePath, content) {
   fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o700 });
 }
 
+function writePackageTarball(root, tarballPath) {
+  const packageDir = path.join(root, 'package');
+  fs.mkdirSync(packageDir);
+  fs.writeFileSync(
+    path.join(packageDir, 'package.json'),
+    `${JSON.stringify({ name: '@happier-dev/provenance-fixture', version: '1.0.0-preview.1' })}\n`,
+    'utf8',
+  );
+  execFileSync('tar', ['-czf', tarballPath, '-C', root, 'package']);
+}
+
 function runPublishTarball({ githubActions }) {
   const dir = makeTempDir();
   const binDir = path.join(dir, 'bin');
   fs.mkdirSync(binDir, { recursive: true });
 
   const tarballPath = path.join(dir, 'dummy.tgz');
-  fs.writeFileSync(tarballPath, 'not-a-real-tarball', { encoding: 'utf8' });
+  writePackageTarball(dir, tarballPath);
 
   const npxPath = path.join(binDir, 'npx');
   writeExecutable(
@@ -27,9 +38,13 @@ function runPublishTarball({ githubActions }) {
     [
       '#!/usr/bin/env bash',
       'set -euo pipefail',
-      'echo "NPM_CONFIG_PROVENANCE=${NPM_CONFIG_PROVENANCE-}"',
-      'echo "GITHUB_ACTIONS=${GITHUB_ACTIONS-}"',
-      'exit 0',
+      'case " $* " in',
+      '  *" view "*" dist.integrity "*) echo "npm error code E404" >&2; exit 1 ;;',
+      '  *" publish "*) echo "NPM_CONFIG_PROVENANCE=${NPM_CONFIG_PROVENANCE-}"; echo "GITHUB_ACTIONS=${GITHUB_ACTIONS-}"; exit 0 ;;',
+      '  *" view "*" dist-tags "*) echo \'{"next":"1.0.0-preview.1"}\'; exit 0 ;;',
+      'esac',
+      'echo "unexpected npx invocation: $*" >&2',
+      'exit 2',
       '',
     ].join('\n'),
   );
@@ -66,4 +81,3 @@ test('publish-tarball sets NPM_CONFIG_PROVENANCE=true by default in GitHub Actio
   const stdout = runPublishTarball({ githubActions: true });
   assert.match(stdout, /NPM_CONFIG_PROVENANCE=true/);
 });
-

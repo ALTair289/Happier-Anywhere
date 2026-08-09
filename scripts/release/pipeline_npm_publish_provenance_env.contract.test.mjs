@@ -15,6 +15,17 @@ function writeExecutable(filePath, contents) {
   fs.chmodSync(filePath, 0o755);
 }
 
+function writePackageTarball(root, tarballPath) {
+  const packageDir = path.join(root, 'package');
+  fs.mkdirSync(packageDir);
+  fs.writeFileSync(
+    path.join(packageDir, 'package.json'),
+    `${JSON.stringify({ name: '@happier-dev/provenance-fixture', version: '1.0.0-preview.1' })}\n`,
+    'utf8',
+  );
+  execFileSync('tar', ['-czf', tarballPath, '-C', root, 'package']);
+}
+
 test('pipeline npm publish forces NPM_CONFIG_PROVENANCE off locally (overrides publishConfig.provenance)', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happier-npm-provenance-'));
   const binDir = path.join(tmpDir, 'bin');
@@ -25,13 +36,18 @@ test('pipeline npm publish forces NPM_CONFIG_PROVENANCE off locally (overrides p
     fakeNpx,
     `#!/usr/bin/env bash
 set -euo pipefail
-echo "PROVENANCE=$NPM_CONFIG_PROVENANCE"
-exit 0
+case " $* " in
+  *" view "*" dist.integrity "*) echo "npm error code E404" >&2; exit 1 ;;
+  *" publish "*) echo "PROVENANCE=$NPM_CONFIG_PROVENANCE"; exit 0 ;;
+  *" view "*" dist-tags "*) echo '{"next":"1.0.0-preview.1"}'; exit 0 ;;
+esac
+echo "unexpected npx invocation: $*" >&2
+exit 2
 `,
   );
 
   const tarballPath = path.join(tmpDir, 'pkg.tgz');
-  fs.writeFileSync(tarballPath, 'dummy', 'utf8');
+  writePackageTarball(tmpDir, tarballPath);
 
   const script = resolve(repoRoot, 'scripts', 'pipeline', 'npm', 'publish-tarball.mjs');
 
