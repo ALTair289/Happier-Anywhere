@@ -32,10 +32,7 @@ export function writeJsonAtomicSync(path: string, value: unknown): void {
     writeFileSync(tmpPath, JSON.stringify(value, null, 2), { encoding: 'utf-8', mode: 0o600 });
     bestEffortChmod0600Sync(tmpPath);
     renameForPublicationSync(tmpPath, path, {
-      retryableCodes: new Set(['EPERM', 'EEXIST']),
-      maxRetries: 2,
-      initialDelayMs: 2,
-      maxDelayMs: 2,
+      retryableCodes: new Set(['EACCES', 'EBUSY', 'EPERM', 'EEXIST']),
     });
     bestEffortChmod0600Sync(path);
   } catch (error) {

@@ -64,17 +64,17 @@ describe('writeJsonAtomicSync (replacement failure)', () => {
       expect(() => writeJsonAtomicSync(path, { state: 'replacement' })).toThrow(conflict);
 
       expect(readFileSync(path, 'utf8')).toBe(oldBytes);
-      expect(renameSyncMock).toHaveBeenCalledTimes(3);
+      expect(renameSyncMock).toHaveBeenCalledTimes(9);
       expect(unlinkSyncMock).not.toHaveBeenCalledWith(path);
       expect(readdirSync(dir)).toEqual(['daemon.json']);
     },
   );
 
-  it('does not retry a non-conflict rename error', () => {
+  it('does not retry a non-transient rename error', () => {
     const dir = mkdtempSync(join(tmpdir(), 'happier-writeJsonAtomicSync-other-error-'));
     const path = join(dir, 'daemon.json');
-    const error = new Error('EACCES') as NodeJS.ErrnoException;
-    error.code = 'EACCES';
+    const error = new Error('ENOSPC') as NodeJS.ErrnoException;
+    error.code = 'ENOSPC';
     vi.mocked(renameSyncMock).mockImplementation(() => {
       throw error;
     });
