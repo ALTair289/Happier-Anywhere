@@ -217,9 +217,10 @@ export const V2_SESSION_LIST_ORDER_BY = [
  */
 export const ACTIVE_SESSION_WINDOW_MS = 1000 * 60 * 15;
 
-export const V2_ACTIVE_SESSION_LIST_ORDER_BY = {
-    lastActiveAt: "desc" as const,
-} satisfies Prisma.SessionOrderByWithRelationInput;
+export const V2_ACTIVE_SESSION_LIST_ORDER_BY = [
+    { lastActiveAt: "desc" as const },
+    { id: "desc" as const },
+] satisfies Prisma.SessionOrderByWithRelationInput[];
 
 /**
  * How many active-session rows either reader of the family may return.
@@ -255,8 +256,46 @@ export function createV2ActiveSessionListRowsWhere(
     return {
         archivedAt: null,
         active: true,
-        lastActiveAt: { gt: new Date(now.getTime() - ACTIVE_SESSION_WINDOW_MS) },
+        lastActiveAt: { gt: resolveActiveSessionHeartbeatFloor(now) },
     };
+}
+
+function resolveActiveSessionHeartbeatFloor(now: Date): Date {
+    return new Date(now.getTime() - ACTIVE_SESSION_WINDOW_MS);
+}
+
+/**
+ * The same membership test, asked of a row this request already holds instead of of the database.
+ *
+ * It exists so the merged initial page can recognise the family rows its page read already returned
+ * and stop the active read from fetching them a second time. Sharing
+ * `resolveActiveSessionHeartbeatFloor` with the predicate above is what keeps the two spellings from
+ * being two answers: the window is defined once, and the caller passes one `now` to both, so an
+ * in-flight heartbeat cannot land between them and put a row in one half and not the other.
+ * `v2SessionListInitialPage.activeRows.sqlite.integration.spec.ts` pins the agreement against a real
+ * database — an archived, aged-out or inactive row would break it.
+ */
+export function isV2ActiveSessionListRow(
+    row: Pick<V2SessionListRowCompat, "archivedAt" | "active" | "lastActiveAt">,
+    now: Date,
+): boolean {
+    return row.archivedAt === null
+        && row.active
+        && row.lastActiveAt.getTime() > resolveActiveSessionHeartbeatFloor(now).getTime();
+}
+
+/**
+ * `V2_ACTIVE_SESSION_LIST_ORDER_BY` as an in-memory comparator, for the same reason: the merged page
+ * concatenates the family rows it already held with the ones it read, and the result must be the
+ * sequence the single read produced. Kept beside the ordering it mirrors so they cannot drift.
+ */
+export function compareV2ActiveSessionListRows(
+    a: Pick<V2SessionListRowCompat, "id" | "lastActiveAt">,
+    b: Pick<V2SessionListRowCompat, "id" | "lastActiveAt">,
+): number {
+    const heartbeatOrder = b.lastActiveAt.getTime() - a.lastActiveAt.getTime();
+    if (heartbeatOrder !== 0) return heartbeatOrder;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
 }
 
 /**

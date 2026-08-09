@@ -282,7 +282,10 @@ describe("sessionRoutes v2 sessions snapshot", () => {
                     active: true,
                     lastActiveAt: { gt: expect.any(Date) },
                 }),
-                orderBy: { lastActiveAt: "desc" },
+                orderBy: [
+                    { lastActiveAt: "desc" },
+                    { id: "desc" },
+                ],
                 // Same symbol the standalone `/v2/sessions/active` endpoint is bounded by: one family,
                 // one bound. The two readers previously took 500 and 150 for the same rows.
                 take: V2_ACTIVE_SESSION_LIST_ROW_LIMIT,

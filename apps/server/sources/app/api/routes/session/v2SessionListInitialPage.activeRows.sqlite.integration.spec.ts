@@ -160,6 +160,50 @@ describe("v2 session list initial page: merged active rows (SQLite integration)"
         ]);
     });
 
+    it("orders tied active heartbeats by id across reused and queried rows", async () => {
+        const userId = await createAccount();
+        const now = Date.now();
+        const heartbeat = now - 1_000;
+        await createSession({
+            accountId: userId,
+            id: "m-page",
+            activityAt: now,
+            active: true,
+            lastActiveAt: heartbeat,
+        });
+        await createSession({
+            accountId: userId,
+            id: "a-probe",
+            activityAt: now - 1,
+            active: true,
+            lastActiveAt: heartbeat,
+        });
+        await createSession({
+            accountId: userId,
+            id: "z-read",
+            activityAt: now - 2,
+            active: true,
+            lastActiveAt: heartbeat,
+        });
+
+        const pageRows = await findV2SessionListRows({
+            userId,
+            where: { archivedAt: null },
+            orderBy: V2_SESSION_LIST_ORDER_BY,
+            take: 2,
+        });
+        const page = await createV2SessionListInitialPage({
+            userId,
+            pageRows,
+            limit: 1,
+            pinnedSessionIds: [],
+            includeAttentionRows: false,
+            includeActiveRows: true,
+        });
+
+        expect(page.sessions.map((session) => session.id)).toEqual(["z-read", "m-page", "a-probe"]);
+    });
+
     it("reads no active rows at all when includeActive is not requested", async () => {
         const { userId } = await seed();
 

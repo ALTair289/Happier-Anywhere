@@ -91,7 +91,10 @@ describe("sessionRoutes v2 active sessions listing", () => {
                     active: true,
                     lastActiveAt: { gt: expect.any(Date) },
                 }),
-                orderBy: { lastActiveAt: "desc" },
+                orderBy: [
+                    { lastActiveAt: "desc" },
+                    { id: "desc" },
+                ],
                 take: 2,
                 select: expect.objectContaining({
                     accountId: true,
