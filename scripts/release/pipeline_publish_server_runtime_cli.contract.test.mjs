@@ -141,6 +141,11 @@ test('authorized server finalizer control scripts load without installed workspa
 
   const scripts = [
     {
+      path: resolve(repoRoot, 'scripts', 'pipeline', 'release', 'lib', 'binary-release.mjs'),
+      args: [],
+      expectedFailure: null,
+    },
+    {
       path: resolve(repoRoot, 'scripts', 'pipeline', 'release', 'publishing', 'prepare-binary-assets.mjs'),
       args: [],
       expectedFailure: /Unknown binary publish product/,
@@ -170,8 +175,12 @@ test('authorized server finalizer control scripts load without installed workspa
         /workspace dependency imported in credentialed finalizer/,
         `${script.path} imported a workspace package before the finalizer could validate trusted artifacts`,
       );
-      assert.notEqual(result.status, 0, `${script.path} unexpectedly completed without its required inputs`);
-      assert.match(output, script.expectedFailure);
+      if (script.expectedFailure) {
+        assert.notEqual(result.status, 0, `${script.path} unexpectedly completed without its required inputs`);
+        assert.match(output, script.expectedFailure);
+      } else {
+        assert.equal(result.status, 0, output);
+      }
     }
   } finally {
     rmSync(fixtureDir, { recursive: true, force: true });

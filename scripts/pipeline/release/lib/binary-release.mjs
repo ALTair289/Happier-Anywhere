@@ -9,9 +9,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
 import { loadCliCommonDistModule } from '../../../../scripts/ensureCliCommonDistModule.mjs';
-import { listPublicReleaseRingCatalogEntries } from '@happier-dev/release-runtime/releaseRings';
 import { fileSha256 } from './release-files.mjs';
 import { maybeSignFile } from './minisign-signing.mjs';
+import { listPublicReleaseChannels } from './public-release-rings.mjs';
 import { normalizeChannel, parseArgs } from './release-arguments.mjs';
 
 const {
@@ -43,7 +43,7 @@ export { fileSha256 } from './release-files.mjs';
 export { maybeSignFile } from './minisign-signing.mjs';
 export { normalizeChannel, parseArgs } from './release-arguments.mjs';
 
-export const RELEASE_CHANNELS = new Set(listPublicReleaseRingCatalogEntries().map((entry) => entry.id));
+export const RELEASE_CHANNELS = new Set(listPublicReleaseChannels().map((entry) => entry.id));
 
 export const CLI_STACK_TARGETS = CLI_BINARY_TARGETS;
 export const SERVER_TARGETS = SERVER_BINARY_TARGETS;
