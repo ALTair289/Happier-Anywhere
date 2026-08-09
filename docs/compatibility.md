@@ -51,11 +51,12 @@ The last direction is conditional, not an excuse to add dual writers or a
 permanent fallback. The public release contract exposes these directions for
 the `integrated`, `stable`, and manual `deep` profiles. `integrated` keeps its
 automatic evidence bounded to artifact verification, binary smoke, and session
-continuity, while its named `supported-old-relay-compatibility` check uses the
-existing relay-upgrade path when the relay surface is affected. `stable` adds
-CLI-update and daemon-continuity evidence. Installer and Docker validation are
-risk-selected for the affected surface rather than fleet-wide automatic gates;
-deep certification owns cross-OS, provider, mobile, and comprehensive review.
+continuity, while `supported-old-relay-compatibility` remains named manual
+evidence. `stable` adds CLI-update and daemon-continuity evidence and runs the
+same pinned old-relay gate against the exact bound candidate before immutable
+candidate verification. Installer and Docker validation are risk-selected for
+the affected surface rather than fleet-wide automatic gates; deep certification
+owns cross-OS, provider, mobile, and comprehensive review.
 Product seams still own the actual compatibility implementation.
 
 - New readers accept supported old shapes; new writes use the canonical current shape.

@@ -34,20 +34,23 @@ and three profiles:
 - `integrated` is the complete but bounded normal-release profile. Its
   automatic suite membership is `artifact-verify`, `binary-smoke`, and
   `session-continuity`; its required named compatibility evidence is
-  `supported-old-relay-compatibility`.
+  `supported-old-relay-compatibility`, selected manually.
 - `stable` includes `integrated` evidence plus automatic `cli-update` and
-  `daemon-continuity`, and the stable-only `agent-diff-sanity` check.
+  `daemon-continuity`, plus the candidate-bound automatic
+  `supported-old-relay-compatibility` proof; `agent-diff-sanity` remains
+  stable-only manual evidence.
 - `deep` is manual comprehensive certification. It has no automatic suite
   membership, owns risk-selected installer and Docker checks when those
   surfaces change, and covers cross-OS, provider, mobile, and full
   certification before it is considered complete. It is never a normal-release
   dispatch.
 
-`supported-old-relay-compatibility` names the existing
-`docker-release-assets` published-channel → local-build relay-upgrade path
-when the relay surface is affected. `installers-smoke` and
-`docker-release-assets` are not routine automatic release gates: select them
-only when their installer or Docker surface changed.
+`supported-old-relay-compatibility` names the existing pinned server-v0.2.1
+compatibility gate. Stable releases run it after the exact candidate SHA is
+bound and before immutable candidate verification; integrated releases retain
+it as named manual evidence. It does not add Docker or fleet orchestration.
+`installers-smoke` and `docker-release-assets` are not routine automatic
+release gates: select them only when their installer or Docker surface changed.
 
 The contract is public so callers can select and verify the right evidence;
 the operating procedure is private. Resolve it for an absolute checkout with:

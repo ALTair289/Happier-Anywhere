@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import YAML from 'yaml';
@@ -38,11 +39,76 @@ test('the registered Ubuntu slow gate prepares and runs both exact server-v0.2.1
   );
 });
 
-test('stable/full releases require the registered exact server-v0.2.1 gate while integrated stays lightweight', () => {
+test('the exact server-v0.2.1 gate accepts an optional immutable candidate checkout SHA without changing empty callers', () => {
+  const testsWorkflow = workflow('tests.yml');
+  const job = testsWorkflow.jobs['e2e-core-slow'];
+  const input = testsWorkflow.on.workflow_call.inputs.checkout_sha;
+  const guard = testsWorkflow.jobs.trusted_ref_guard;
+  const validation = guard.steps.find((step) => step.name === 'Validate exact checkout SHA');
+  const checkout = job.steps.find((step) => step.name === 'Checkout');
+  const verification = job.steps.find((step) => step.name === 'Verify exact requested checkout SHA');
+
+  assert.deepEqual(input, {
+    required: false,
+    default: '',
+    type: 'string',
+  });
+  assert.deepEqual(job.needs, ['trusted_ref_guard']);
+  assert.equal(validation?.if, "${{ inputs.checkout_sha != '' }}");
+  assert.equal(validation?.env?.CHECKOUT_SHA, '${{ inputs.checkout_sha }}');
+  assert.equal(checkout?.with?.ref, "${{ inputs.checkout_sha != '' && inputs.checkout_sha || github.sha }}");
+  assert.equal(verification?.if, "${{ inputs.checkout_sha != '' }}");
+  assert.equal(verification?.env?.CHECKOUT_SHA, '${{ inputs.checkout_sha }}');
+
+  const valid = spawnSync('bash', ['-c', validation?.run ?? 'exit 1'], {
+    encoding: 'utf8',
+    env: { ...process.env, CHECKOUT_SHA: 'a'.repeat(40) },
+  });
+  assert.equal(valid.status, 0, valid.stderr);
+  for (const value of ['A'.repeat(40), 'a'.repeat(39), 'a'.repeat(41)]) {
+    const invalid = spawnSync('bash', ['-c', validation?.run ?? 'exit 0'], {
+      encoding: 'utf8',
+      env: { ...process.env, CHECKOUT_SHA: value },
+    });
+    assert.notEqual(invalid.status, 0, `expected exact SHA validation to reject ${value}`);
+  }
+});
+
+test('stable releases run the registered exact server-v0.2.1 gate against the bound candidate before immutable candidate verification', () => {
   const releaseWorkflow = workflow('release.yml');
+  const compatibility = releaseWorkflow.jobs.supported_old_relay_compatibility;
+  const candidateVerification = releaseWorkflow.jobs.verify_release_candidates;
+
   assert.ok(releaseWorkflow.jobs.ci.needs.includes('resolve_validation_profile'));
-  assert.equal(
-    releaseWorkflow.jobs.ci.with.run_e2e_core_slow,
-    "${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}",
+  assert.equal(releaseWorkflow.jobs.ci.with.run_e2e_core_slow, undefined);
+  assert.deepEqual(compatibility.needs, ['plan', 'bind_server_source']);
+  assert.match(
+    compatibility.if,
+    /needs\.plan\.outputs\.validation_profile == 'stable'/,
+    'the canonical public profile must select the candidate-bound compatibility proof',
+  );
+  assert.equal(compatibility.uses, './.github/workflows/tests.yml');
+  assert.equal(compatibility.with.run_e2e_core_slow, true);
+  assert.equal(compatibility.with.checkout_sha, '${{ needs.bind_server_source.outputs.authorized_sha }}');
+  for (const inputName of [
+    'run_ui',
+    'run_server',
+    'run_cli',
+    'run_stack',
+    'run_typecheck',
+    'run_cli_daemon_e2e',
+    'run_e2e_core',
+    'run_server_db_contract',
+    'run_installers_smoke',
+    'run_binary_smoke',
+  ]) {
+    assert.equal(compatibility.with[inputName], false, `${inputName} must stay outside the pinned compatibility gate`);
+  }
+
+  assert.ok(candidateVerification.needs.includes('supported_old_relay_compatibility'));
+  assert.match(
+    candidateVerification.if,
+    /needs\.plan\.outputs\.validation_profile != 'stable' \|\| needs\.supported_old_relay_compatibility\.result == 'success'/,
+    'stable candidate verification must not run until the candidate-bound old-relay proof succeeds',
   );
 });

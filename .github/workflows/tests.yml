@@ -61,6 +61,10 @@ on:
         required: false
         default: false
         type: boolean
+      checkout_sha:
+        required: false
+        default: ''
+        type: string
       run_providers:
         required: false
         default: false
@@ -1652,12 +1656,27 @@ jobs:
 
   e2e-core-slow:
     if: ${{ github.event_name == 'workflow_call' && inputs.run_e2e_core_slow }}
+    needs: [trusted_ref_guard]
     name: Core E2E (slow, packages/tests, server-light, sqlite)
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.checkout_sha != '' && inputs.checkout_sha || github.sha }}
+
+      - name: Verify exact requested checkout SHA
+        if: ${{ inputs.checkout_sha != '' }}
+        env:
+          CHECKOUT_SHA: ${{ inputs.checkout_sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [ "$actual_sha" != "$CHECKOUT_SHA" ]; then
+            echo "Checked out '$actual_sha', expected '$CHECKOUT_SHA'." >&2
+            exit 1
+          fi
 
       - name: Setup Node (GitHub Actions)
         if: env.ACT != 'true'
@@ -1742,6 +1761,16 @@ jobs:
             "$WORKFLOW_REPOSITORY/.github/workflows/$WORKFLOW_FILE@refs/heads/main") ;;
             *) echo "Untrusted workflow control ref: $WORKFLOW_REF" >&2; exit 1 ;;
           esac
+      - name: Validate exact checkout SHA
+        if: ${{ inputs.checkout_sha != '' }}
+        env:
+          CHECKOUT_SHA: ${{ inputs.checkout_sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$CHECKOUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "checkout_sha must be exactly 40 lowercase hexadecimal characters when supplied." >&2
+            exit 1
+          fi
 
   release_actor_guard:
     needs: [trusted_ref_guard]

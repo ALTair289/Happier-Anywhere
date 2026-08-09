@@ -27,7 +27,7 @@ test('release workflow verifies immutable candidates before promoting preview or
   );
   assert.match(
     raw,
-    /verify_release_candidates:[\s\S]*?needs:\s*\[plan, bind_server_source, publish_cli_binaries, publish_hstack_binaries, publish_server_runtime, publish_ui_web\][\s\S]*?candidate_source_sha:\s*\$\{\{\s*needs\.bind_server_source\.outputs\.authorized_sha\s*\}\}[\s\S]*?candidate_cli_version:\s*\$\{\{\s*needs\.publish_cli_binaries\.outputs\.version\s*\}\}[\s\S]*?candidate_stack_version:\s*\$\{\{\s*needs\.publish_hstack_binaries\.outputs\.version\s*\}\}[\s\S]*?candidate_server_version:\s*\$\{\{\s*needs\.publish_server_runtime\.outputs\.version\s*\}\}[\s\S]*?candidate_ui_web_version:\s*\$\{\{\s*needs\.publish_ui_web\.outputs\.version\s*\}\}/,
+    /verify_release_candidates:[\s\S]*?needs:\s*\[plan, bind_server_source, supported_old_relay_compatibility, publish_cli_binaries, publish_hstack_binaries, publish_server_runtime, publish_ui_web\][\s\S]*?candidate_source_sha:\s*\$\{\{\s*needs\.bind_server_source\.outputs\.authorized_sha\s*\}\}[\s\S]*?candidate_cli_version:\s*\$\{\{\s*needs\.publish_cli_binaries\.outputs\.version\s*\}\}[\s\S]*?candidate_stack_version:\s*\$\{\{\s*needs\.publish_hstack_binaries\.outputs\.version\s*\}\}[\s\S]*?candidate_server_version:\s*\$\{\{\s*needs\.publish_server_runtime\.outputs\.version\s*\}\}[\s\S]*?candidate_ui_web_version:\s*\$\{\{\s*needs\.publish_ui_web\.outputs\.version\s*\}\}/,
     'the verifier must consume the exact source and immutable versions emitted by the candidate jobs',
   );
   assert.match(
@@ -62,6 +62,7 @@ test('release workflow verifies immutable candidates before promoting preview or
 test('release workflow derives validation, notes, and terminal status from the exact bound candidate', async () => {
   const raw = await readFile(join(repoRoot, '.github', 'workflows', 'release.yml'), 'utf8');
   const candidateVerification = raw.slice(raw.indexOf('\n  verify_release_candidates:'), raw.indexOf('\n  promote_server_runtime:'));
+  const releaseStatus = raw.slice(raw.indexOf('\n  release_status:'), raw.indexOf('\n  sync_dev:'));
 
   assert.match(
     raw,
@@ -105,9 +106,13 @@ test('release workflow derives validation, notes, and terminal status from the e
     /deploy_ui:[\s\S]*?expo_update_message:\s*\$\{\{\s*needs\.bind_server_source\.outputs\.release_notes_expo_message\s*\}\}/,
     'Expo metadata must use the bounded plain-text projection',
   );
-  assert.match(
-    raw,
-    /release_status:[\s\S]*?if:\s*\$\{\{\s*always\(\)\s*\}\}[\s\S]*?needs:\s*\[[^\]]*publish_hstack_binaries[^\]]*promote_hstack_binaries[^\]]*\][\s\S]*?summarize-release-status\.mjs[\s\S]*?GITHUB_STEP_SUMMARY/,
-    'the terminal status projector must include HStack and all required release outcomes',
-  );
+  assert.match(releaseStatus, /if:\s*\$\{\{\s*always\(\)\s*\}\}/);
+  assert.match(releaseStatus, /needs:\s*\[[^\]]*supported_old_relay_compatibility[^\]]*publish_hstack_binaries[^\]]*promote_hstack_binaries[^\]]*\]/);
+  assert.match(releaseStatus, /VALIDATION_PROFILE:\s*\$\{\{\s*needs\.plan\.outputs\.validation_profile\s*\}\}/);
+  assert.match(releaseStatus, /PUBLISH_CLI:\s*\$\{\{\s*needs\.plan\.outputs\.publish_cli\s*\}\}/);
+  assert.match(releaseStatus, /'supported-old-relay-compatibility': candidateReleaseRequested && process\.env\.VALIDATION_PROFILE === 'stable'/);
+  assert.match(releaseStatus, /requestedSurfaces: ids\.map\(\(\[id\]\) => \(\{ id, requested: requested\[id\], required: true \}\)\)/);
+  assert.match(releaseStatus, /summarize-release-status\.mjs/);
+  assert.match(releaseStatus, /GITHUB_STEP_SUMMARY/);
+  assert.match(releaseStatus, /actions\/upload-artifact@[\s\S]*?name:\s*happier-release-status/);
 });

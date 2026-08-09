@@ -83,7 +83,7 @@ test('release-contract exposes canonical release targets and suite capabilities 
 test('release-contract profiles distinguish bounded normal release validation from manual deep certification', () => {
   const contract = readPublicReleaseContract();
   const integratedAutomaticSuiteIds = ['artifact-verify', 'binary-smoke', 'session-continuity'];
-  const stableAutomaticSuiteIds = [...integratedAutomaticSuiteIds, 'cli-update', 'daemon-continuity'];
+  const stableAutomaticSuiteIds = [...integratedAutomaticSuiteIds, 'cli-update', 'daemon-continuity', 'supported-old-relay-compatibility'];
   const supportedOlderRelayCompatibilityCheck = 'supported-old-relay-compatibility';
 
   assert.deepEqual(contract.validationProfiles, [
@@ -101,7 +101,7 @@ test('release-contract profiles distinguish bounded normal release validation fr
       checksProfile: 'full',
       automaticSuiteIds: stableAutomaticSuiteIds,
       compatibilityDirections: expectedCompatibilityDirections,
-      manualChecks: [supportedOlderRelayCompatibilityCheck, 'agent-diff-sanity'],
+      manualChecks: ['agent-diff-sanity'],
     },
     {
       id: 'deep',

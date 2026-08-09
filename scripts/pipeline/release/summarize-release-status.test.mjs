@@ -151,6 +151,28 @@ test('missing or skipped optional surfaces are partial, while an explicitly unre
   assert.equal(result.terminal, 'partial');
 });
 
+test('intentionally unrequested skipped and failed observations do not make an otherwise complete release terminally fail', () => {
+  const result = summarizeReleaseStatus(input({
+    requestedSurfaces: [
+      { id: 'candidate-verification', required: true },
+      { id: 'npm', requested: false, required: true },
+      { id: 'release-verification', requested: false, required: true },
+    ],
+    surfaces: [
+      { id: 'candidate-verification', result: 'success', identity: { verified: true } },
+      { id: 'npm', result: 'skipped' },
+      { id: 'release-verification', result: 'failed' },
+    ],
+  }));
+
+  assert.deepEqual(result.surfaces.map((surface) => ({ id: surface.id, state: surface.state })), [
+    { id: 'candidate-verification', state: 'complete' },
+    { id: 'npm', state: 'not_requested' },
+    { id: 'release-verification', state: 'not_requested' },
+  ]);
+  assert.equal(result.terminal, 'complete');
+});
+
 test('unknown or duplicate observed surfaces fail closed', () => {
   assert.throws(() => summarizeReleaseStatus(input({
     surfaces: [{ id: 'unknown', result: 'success', identity: { verified: true } }],

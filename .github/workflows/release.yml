@@ -206,7 +206,6 @@ jobs:
       run_typecheck: true
       run_cli_daemon_e2e: true
       run_e2e_core: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
-      run_e2e_core_slow: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
       run_server_db_contract: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
       run_providers: false
       providers_preset: all
@@ -789,10 +788,29 @@ jobs:
       release_message: ${{ needs.bind_server_source.outputs.release_notes_github_markdown }}
       publish_rolling: false
 
+  supported_old_relay_compatibility:
+    name: Verify bound candidate against supported old relay
+    if: ${{ always() && needs.plan.result == 'success' && needs.bind_server_source.result == 'success' && needs.plan.outputs.validation_profile == 'stable' }}
+    needs: [plan, bind_server_source]
+    uses: ./.github/workflows/tests.yml
+    with:
+      checkout_sha: ${{ needs.bind_server_source.outputs.authorized_sha }}
+      run_ui: false
+      run_server: false
+      run_server_db_contract: false
+      run_cli: false
+      run_stack: false
+      run_typecheck: false
+      run_cli_daemon_e2e: false
+      run_e2e_core: false
+      run_e2e_core_slow: true
+      run_installers_smoke: false
+      run_binary_smoke: false
+
   verify_release_candidates:
     name: Verify exact immutable release candidates
-    if: ${{ always() && needs.plan.result == 'success' && needs.bind_server_source.result == 'success' && (needs.publish_cli_binaries.result == 'success' || needs.publish_cli_binaries.result == 'skipped') && (needs.publish_hstack_binaries.result == 'success' || needs.publish_hstack_binaries.result == 'skipped') && (needs.publish_server_runtime.result == 'success' || needs.publish_server_runtime.result == 'skipped') && (needs.publish_ui_web.result == 'success' || needs.publish_ui_web.result == 'skipped') }}
-    needs: [plan, bind_server_source, publish_cli_binaries, publish_hstack_binaries, publish_server_runtime, publish_ui_web]
+    if: ${{ always() && needs.plan.result == 'success' && needs.bind_server_source.result == 'success' && (needs.plan.outputs.validation_profile != 'stable' || needs.supported_old_relay_compatibility.result == 'success') && (needs.publish_cli_binaries.result == 'success' || needs.publish_cli_binaries.result == 'skipped') && (needs.publish_hstack_binaries.result == 'success' || needs.publish_hstack_binaries.result == 'skipped') && (needs.publish_server_runtime.result == 'success' || needs.publish_server_runtime.result == 'skipped') && (needs.publish_ui_web.result == 'success' || needs.publish_ui_web.result == 'skipped') }}
+    needs: [plan, bind_server_source, supported_old_relay_compatibility, publish_cli_binaries, publish_hstack_binaries, publish_server_runtime, publish_ui_web]
     uses: ./.github/workflows/release-verify.yml
     with:
       channel: ${{ inputs.environment == 'production' && 'production' || 'preview' }}
@@ -941,7 +959,7 @@ jobs:
   release_status:
     name: Summarize release status
     if: ${{ always() }}
-    needs: [plan, bind_server_source, publish_cli_binaries, publish_hstack_binaries, publish_server_runtime, publish_ui_web, verify_release_candidates, promote_server_runtime, promote_ui_web, promote_cli_binaries, promote_hstack_binaries, publish_docker, publish_npm, release_verify]
+    needs: [plan, bind_server_source, supported_old_relay_compatibility, publish_cli_binaries, publish_hstack_binaries, publish_server_runtime, publish_ui_web, verify_release_candidates, promote_server_runtime, promote_ui_web, promote_cli_binaries, promote_hstack_binaries, publish_docker, publish_npm, release_verify]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -959,7 +977,21 @@ jobs:
       - name: Project terminal release status
         env:
           CHANNEL: ${{ inputs.environment == 'production' && 'production' || 'preview' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FORCE_DEPLOY: ${{ inputs.force_deploy }}
+          DEPLOY_TARGETS: ${{ inputs.deploy_targets }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          BIND_SOURCE_RESULT: ${{ needs.bind_server_source.result }}
+          VALIDATION_PROFILE: ${{ needs.plan.outputs.validation_profile }}
+          PUBLISH_CLI: ${{ needs.plan.outputs.publish_cli }}
+          PUBLISH_HSTACK: ${{ needs.plan.outputs.publish_stack }}
+          PUBLISH_SERVER: ${{ needs.plan.outputs.publish_server }}
+          CHANGED_UI: ${{ needs.plan.outputs.changed_ui }}
+          CHANGED_CLI: ${{ needs.plan.outputs.changed_cli }}
+          CHANGED_SERVER: ${{ needs.plan.outputs.changed_server }}
+          CHANGED_SHARED: ${{ needs.plan.outputs.changed_shared }}
           SOURCE_SHA: ${{ needs.bind_server_source.outputs.authorized_sha }}
+          OLD_RELAY_COMPATIBILITY_RESULT: ${{ needs.supported_old_relay_compatibility.result }}
           CLI_RESULT: ${{ needs.publish_cli_binaries.result }}
           HSTACK_RESULT: ${{ needs.publish_hstack_binaries.result }}
           SERVER_RESULT: ${{ needs.publish_server_runtime.result }}
@@ -975,19 +1007,49 @@ jobs:
         run: |
           set -euo pipefail
           node --input-type=module <<'NODE' > "$RUNNER_TEMP/release-status-input.json"
+          const normalizeResult = (value) => value === 'success' ? 'success' : value === 'skipped' ? 'skipped' : 'failed';
+          const isTrue = (value) => value === 'true';
+          const candidateReleaseRequested = process.env.DRY_RUN !== 'true'
+            && process.env.PLAN_RESULT === 'success'
+            && process.env.BIND_SOURCE_RESULT === 'success';
+          const forceDeploy = isTrue(process.env.FORCE_DEPLOY);
+          const deployTargets = new Set((process.env.DEPLOY_TARGETS ?? '').split(','));
+          const requested = {
+            cli: candidateReleaseRequested && (forceDeploy || isTrue(process.env.PUBLISH_CLI) || isTrue(process.env.CHANGED_CLI) || isTrue(process.env.CHANGED_SHARED)),
+            hstack: candidateReleaseRequested && isTrue(process.env.PUBLISH_HSTACK),
+            server: candidateReleaseRequested && (isTrue(process.env.PUBLISH_SERVER) || forceDeploy || isTrue(process.env.CHANGED_UI) || isTrue(process.env.CHANGED_SERVER) || isTrue(process.env.CHANGED_SHARED)),
+            'ui-web': candidateReleaseRequested && (deployTargets.has('ui') || forceDeploy || isTrue(process.env.CHANGED_UI) || isTrue(process.env.CHANGED_SHARED)),
+            'supported-old-relay-compatibility': candidateReleaseRequested && process.env.VALIDATION_PROFILE === 'stable',
+            'candidate-verification': process.env.DRY_RUN !== 'true',
+          };
+          requested['promote-server'] = requested.server && normalizeResult(process.env.CANDIDATE_VERIFY_RESULT) === 'success' && normalizeResult(process.env.SERVER_RESULT) === 'success';
+          requested['promote-ui-web'] = requested['ui-web'] && normalizeResult(process.env.CANDIDATE_VERIFY_RESULT) === 'success' && normalizeResult(process.env.UI_WEB_RESULT) === 'success' && (normalizeResult(process.env.PROMOTE_SERVER_RESULT) === 'success' || normalizeResult(process.env.PROMOTE_SERVER_RESULT) === 'skipped');
+          requested['promote-cli'] = requested.cli && normalizeResult(process.env.CANDIDATE_VERIFY_RESULT) === 'success' && normalizeResult(process.env.CLI_RESULT) === 'success' && (normalizeResult(process.env.PROMOTE_UI_WEB_RESULT) === 'success' || normalizeResult(process.env.PROMOTE_UI_WEB_RESULT) === 'skipped');
+          requested['promote-hstack'] = requested.hstack && normalizeResult(process.env.CANDIDATE_VERIFY_RESULT) === 'success' && normalizeResult(process.env.HSTACK_RESULT) === 'success';
+          requested.docker = candidateReleaseRequested
+            && normalizeResult(process.env.CANDIDATE_VERIFY_RESULT) === 'success'
+            && (forceDeploy || isTrue(process.env.CHANGED_UI) || isTrue(process.env.CHANGED_SERVER) || isTrue(process.env.CHANGED_CLI) || isTrue(process.env.CHANGED_SHARED));
+          requested.npm = candidateReleaseRequested
+            && normalizeResult(process.env.CANDIDATE_VERIFY_RESULT) === 'success'
+            && (isTrue(process.env.PUBLISH_CLI) || isTrue(process.env.PUBLISH_HSTACK) || isTrue(process.env.PUBLISH_SERVER));
+          requested['release-verification'] = candidateReleaseRequested
+            && process.env.VALIDATION_PROFILE === 'stable'
+            && normalizeResult(process.env.CANDIDATE_VERIFY_RESULT) === 'success'
+            && [process.env.PROMOTE_HSTACK_RESULT, process.env.PROMOTE_CLI_RESULT, process.env.PROMOTE_SERVER_RESULT, process.env.PROMOTE_UI_WEB_RESULT, process.env.DOCKER_RESULT, process.env.NPM_RESULT]
+              .map(normalizeResult)
+              .every((result) => result === 'success' || result === 'skipped');
           const ids = [
             ['cli', 'CLI_RESULT'], ['hstack', 'HSTACK_RESULT'], ['server', 'SERVER_RESULT'], ['ui-web', 'UI_WEB_RESULT'],
-            ['candidate-verification', 'CANDIDATE_VERIFY_RESULT'], ['promote-server', 'PROMOTE_SERVER_RESULT'],
-            ['promote-ui-web', 'PROMOTE_UI_WEB_RESULT'], ['promote-cli', 'PROMOTE_CLI_RESULT'],
-            ['promote-hstack', 'PROMOTE_HSTACK_RESULT'], ['docker', 'DOCKER_RESULT'],
-            ['npm', 'NPM_RESULT'], ['release-verification', 'RELEASE_VERIFY_RESULT'],
+            ['supported-old-relay-compatibility', 'OLD_RELAY_COMPATIBILITY_RESULT'], ['candidate-verification', 'CANDIDATE_VERIFY_RESULT'],
+            ['promote-server', 'PROMOTE_SERVER_RESULT'], ['promote-ui-web', 'PROMOTE_UI_WEB_RESULT'],
+            ['promote-cli', 'PROMOTE_CLI_RESULT'], ['promote-hstack', 'PROMOTE_HSTACK_RESULT'],
+            ['docker', 'DOCKER_RESULT'], ['npm', 'NPM_RESULT'], ['release-verification', 'RELEASE_VERIFY_RESULT'],
           ];
-          const normalizeResult = (value) => value === 'success' ? 'success' : value === 'skipped' ? 'skipped' : 'failed';
           const input = {
             run: process.env.GITHUB_RUN_ID,
             channel: process.env.CHANNEL,
             sourceSha: process.env.SOURCE_SHA || 'unavailable',
-            requestedSurfaces: ids.map(([id]) => ({ id, requested: true, required: true })),
+            requestedSurfaces: ids.map(([id]) => ({ id, requested: requested[id], required: true })),
             surfaces: ids.map(([id, envName]) => {
               const result = normalizeResult(process.env[envName]);
               return { id, result, ...(result === 'success' ? { identity: { verified: true } } : {}) };
@@ -1004,6 +1066,14 @@ jobs:
             cat "$RUNNER_TEMP/release-status.json"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload terminal release status
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: happier-release-status
+          path: ${{ runner.temp }}/release-status.json
+          if-no-files-found: error
 
   sync_dev:
     if: ${{ inputs.dry_run != true && inputs.environment == 'production' && (vars.RELEASE_SYNC_DEV_FROM_MAIN == '' || vars.RELEASE_SYNC_DEV_FROM_MAIN == 'true') && needs.release_verify.result == 'success' }}

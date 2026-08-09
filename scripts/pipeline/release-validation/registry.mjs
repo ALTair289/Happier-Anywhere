@@ -56,6 +56,7 @@ const STABLE_AUTOMATIC_SUITE_IDS = Object.freeze([
   ...INTEGRATED_AUTOMATIC_SUITE_IDS,
   'cli-update',
   'daemon-continuity',
+  'supported-old-relay-compatibility',
 ]);
 
 const INTEGRATED_MANUAL_CHECKS = Object.freeze([
@@ -63,7 +64,6 @@ const INTEGRATED_MANUAL_CHECKS = Object.freeze([
 ]);
 
 const STABLE_MANUAL_CHECKS = Object.freeze([
-  ...INTEGRATED_MANUAL_CHECKS,
   'agent-diff-sanity',
 ]);
 
