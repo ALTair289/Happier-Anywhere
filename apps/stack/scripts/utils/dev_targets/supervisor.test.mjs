@@ -595,6 +595,7 @@ test('dev target processes are tagged as Stack-owned infrastructure for owner-de
   const root = await mkdtemp(join(tmpdir(), 'hstack-dev-target-infra-ownership-'));
   const credentialPath = join(root, 'access.key');
   const spawned = [];
+  const mutagenControlEnvs = [];
   await writeFile(credentialPath, '{"token":"secret"}\n', { mode: 0o600 });
 
   try {
@@ -616,7 +617,10 @@ test('dev target processes are tagged as Stack-owned infrastructure for owner-de
         env: { HAPPIER_STACK_STACK: 'repo-test' },
       },
       {
-        runProcess: async () => ({ code: 0 }),
+        runProcess: async ({ command, env }) => {
+          if (command === 'mutagen') mutagenControlEnvs.push(env);
+          return { code: 0 };
+        },
         spawnProcess: ({ label, command, args, env }) => {
           const child = { label, command, args, env, exitCode: null };
           spawned.push(child);
@@ -631,6 +635,14 @@ test('dev target processes are tagged as Stack-owned infrastructure for owner-de
     assert.ok(spawned.length >= 3, 'expected Mutagen monitor, reverse tunnel, and remote worker');
     for (const child of spawned) {
       assert.equal(child.env.HAPPIER_STACK_PROCESS_KIND, 'infra', `${child.label} must be owner-death sweepable`);
+    }
+    assert.ok(mutagenControlEnvs.length > 0, 'expected Mutagen control commands');
+    for (const controlEnv of mutagenControlEnvs) {
+      assert.notEqual(
+        controlEnv.HAPPIER_STACK_PROCESS_KIND,
+        'infra',
+        'Mutagen control commands may auto-start the persistent per-stack daemon',
+      );
     }
     await controller.close();
   } finally {

@@ -154,11 +154,19 @@ export async function startStackDevTargets(
   const mutagenDir = join(stackBaseDir, 'mutagen');
   const mutagenDataDir = join(mutagenDir, 'data');
   const projectFile = join(mutagenDir, 'mutagen.yml');
-  const openSsh = await prepareOpenSsh({ targets, mutagenDir, env: infraEnv });
+  const openSsh = await prepareOpenSsh({ targets, mutagenDir, env });
+  const {
+    HAPPIER_STACK_PROCESS_KIND: _inheritedStackProcessKind,
+    ...mutagenServiceBaseEnv
+  } = openSsh.mutagenEnv;
   const mutagenEnv = {
-    ...openSsh.mutagenEnv,
+    ...mutagenServiceBaseEnv,
     MUTAGEN_DATA_DIRECTORY: mutagenDataDir,
     MUTAGEN_SSH_CONNECT_TIMEOUT: String(env.MUTAGEN_SSH_CONNECT_TIMEOUT ?? '10'),
+  };
+  const mutagenMonitorEnv = {
+    ...mutagenEnv,
+    HAPPIER_STACK_PROCESS_KIND: 'infra',
   };
   await mkdir(mutagenDataDir, { recursive: true });
 
@@ -243,7 +251,7 @@ export async function startStackDevTargets(
         '--long',
         ...targets.map((target) => resolveMutagenSessionName(target.name)),
       ],
-      env: mutagenEnv,
+      env: mutagenMonitorEnv,
     });
 
     const startTarget = async (target, index, existingTunnel = null) => {
