@@ -107,9 +107,21 @@ const GENERATING_SPINNER_LINE = /(?:^|\n)[^\S\n]*[✶✻✽✳·∗*][^\S\n]+\S+
 const QUEUED_MESSAGE_BANNER = /press up to edit queued messages/i;
 const SWITCH_MODEL_DIALOG = /switch model\?/i;
 export const CLAUDE_RESUME_PREFILL_COMPOSER_TEXT = 'Continue where you left off';
+// Claude renders the focused-row cursor according to terminal capabilities. Real captures include
+// Unicode `❯`, narrow Unicode `›`, and ASCII `>`; treat them as one terminal presentation detail
+// everywhere that parses a selection row. This is deliberately narrower than normalizing arbitrary
+// glyphs: a numbered choice must still satisfy the owning dialog's full semantic shape.
+const SELECTION_FOCUS_GLYPH_SOURCE = '[>›❯]';
+const OPTIONAL_SELECTION_FOCUS_PREFIX_SOURCE = `(?:${SELECTION_FOCUS_GLYPH_SOURCE}[^\\S\\n]*)?`;
 const RESUME_CHOICE_DIALOG_HEAD = /\bthis session is\b[\s\S]{0,500}\b(?:tokens?|old)\b/i;
-const RESUME_CHOICE_FROM_SUMMARY_OPTION = /(?:^|\n)[^\S\n]*(?:❯[^\S\n]*)?1\.[^\n]*\bresume from summary\b/i;
-const RESUME_CHOICE_FULL_SESSION_OPTION = /(?:^|\n)[^\S\n]*(?:❯[^\S\n]*)?2\.[^\n]*\bresume full session\b/i;
+const RESUME_CHOICE_FROM_SUMMARY_OPTION = new RegExp(
+  `(?:^|\\n)[^\\S\\n]*${OPTIONAL_SELECTION_FOCUS_PREFIX_SOURCE}1\\.[^\\n]*\\bresume from summary\\b`,
+  'iu',
+);
+const RESUME_CHOICE_FULL_SESSION_OPTION = new RegExp(
+  `(?:^|\\n)[^\\S\\n]*${OPTIONAL_SELECTION_FOCUS_PREFIX_SOURCE}2\\.[^\\n]*\\bresume full session\\b`,
+  'iu',
+);
 const SAFEGUARD_PAUSE_DIALOG_HEAD = /\bsession paused\b/i;
 const SAFEGUARD_PAUSE_DIALOG_BODY = /\bsafeguards flagged this message\b/i;
 const SAFEGUARD_PAUSE_SWITCH_OPTION = /\bswitch to\s+(.+?)\s*$/i;
@@ -120,11 +132,18 @@ const USAGE_LIMIT_DIALOG = /(?:\byou['’]ve hit your session limit\b|\/rate-lim
 // Escape / "No, go back" prints `Kept effort level as <current>` (incident cmq8y3nlx, L6).
 const EFFORT_CHANGE_DIALOG = /change effort level\?/i;
 // Selection-dialog option shape shared by every observed confirmation dialog (2.1.170 Switch
-// model?, 2.1.173 Change effort level?): a `❯` focus glyph directly on a numbered option line.
+// model?, 2.1.173 Change effort level?): a terminal focus glyph directly on a numbered option line.
 // Used to fail closed on dialogs we do NOT recognize. Composer prompt echoes (`❯ <prompt>`) only
 // match when the prompt itself starts with `<digit>.` — accepted false-positive toward safety.
-const NUMBERED_SELECTION_OPTION = /(?:^|\n)[^\S\n]*❯[^\S\n]*\d+\./u;
-const NUMBERED_DIALOG_OPTION_LINE = /^[^\S\n]*(?:❯[^\S\n]*)?(\d+)\.[^\S\n]+(.+?)[^\S\n]*$/u;
+const NUMBERED_SELECTION_OPTION = new RegExp(
+  `(?:^|\\n)[^\\S\\n]*${SELECTION_FOCUS_GLYPH_SOURCE}[^\\S\\n]*\\d+\\.`,
+  'u',
+);
+const NUMBERED_DIALOG_OPTION_LINE = new RegExp(
+  `^[^\\S\\n]*${OPTIONAL_SELECTION_FOCUS_PREFIX_SOURCE}(\\d+)\\.[^\\S\\n]+(.+?)[^\\S\\n]*$`,
+  'u',
+);
+const FOCUSED_SELECTION_LINE = new RegExp(`^[^\\S\\n]*${SELECTION_FOCUS_GLYPH_SOURCE}`, 'u');
 const EFFORT_CHANGE_DIALOG_TARGET = /switching to\s+([a-z]+)\s+means the full history/i;
 const PERMISSION_PROMPT = /do you want to proceed\?/i;
 // Legacy wording plus the real 2.1.170 `/permissions` editor tab row
@@ -133,7 +152,10 @@ const PERMISSION_PROMPT = /do you want to proceed\?/i;
 const PERMISSION_EDITOR = /\bpermission rules\b/i;
 const PERMISSION_EDITOR_HEADER = /\brecently denied\b[^\n]*\bdeny\b/i;
 const TRUST_FOLDER_PROMPT = /(?:do you trust the files in this folder\?|quick safety check:\s*is this a project you created or one you trust\?)/i;
-const TRUST_FOLDER_NUMBERED_CHOICES = /(?:^|\n)[^\S\n]*(?:❯[^\S\n]*)?1\.[^\S\n]+Yes, I trust this folder[^\S\n]*(?:\n)[^\S\n]*2\.[^\S\n]+No, exit[^\S\n]*(?:$|\n)/iu;
+const TRUST_FOLDER_NUMBERED_CHOICES = new RegExp(
+  `(?:^|\\n)[^\\S\\n]*${OPTIONAL_SELECTION_FOCUS_PREFIX_SOURCE}1\\.[^\\S\\n]+Yes, I trust this folder[^\\S\\n]*(?:\\n)[^\\S\\n]*${OPTIONAL_SELECTION_FOCUS_PREFIX_SOURCE}2\\.[^\\S\\n]+No, exit[^\\S\\n]*(?:$|\\n)`,
+  'iu',
+);
 const WORK_PROMPT = /what would you like to work on\?/i;
 
 const ACCEPT_EDITS_MARKER = /\baccept edits on\b/i;
@@ -160,7 +182,10 @@ const SLASH_SUGGESTION_LINE = /(?:^|\n)[^\S\n]*\/[a-z][a-z0-9-]*\b/i;
 // "clear the draft" notice), and typing/Enter on this screen drives the SELECTOR, so it is a
 // blocking overlay for controls and steering.
 const SELECTION_LIST_HINT = /\u2191\/\u2193 to select/;
-const SELECTION_CURSOR_ROW = /(?:^|\n)[^\S\n]*\u276f[^\S\n]*[\u25ef\u25c9\u25cb\u25cf\u25d0\u25d1]/;
+const SELECTION_CURSOR_ROW = new RegExp(
+  `(?:^|\\n)[^\\S\\n]*${SELECTION_FOCUS_GLYPH_SOURCE}[^\\S\\n]*[◯◉○●◐◑]`,
+  'u',
+);
 
 
 function tailLines(text: string, count: number): string {
@@ -418,12 +443,18 @@ function resolveResumeChoiceDialogOptions(text: string): readonly ('resume_from_
 }
 
 function readNumberedSelectionLabel(text: string, number: 1 | 2): string | null {
-  const linePattern = new RegExp(`(?:^|\\n)[^\\S\\n]*(?:❯[^\\S\\n]*)?${number}\\.[^\\n]*`, 'u');
+  const linePattern = new RegExp(
+    `(?:^|\\n)[^\\S\\n]*${OPTIONAL_SELECTION_FOCUS_PREFIX_SOURCE}${number}\\.[^\\n]*`,
+    'u',
+  );
   const line = linePattern.exec(text)?.[0] ?? null;
   if (!line) return null;
   const label = line
     .replace(/^\n/, '')
-    .replace(/^[^\S\n]*(?:❯[^\S\n]*)?\d+\.[^\S\n]*/u, '')
+    .replace(new RegExp(
+      `^[^\\S\\n]*${OPTIONAL_SELECTION_FOCUS_PREFIX_SOURCE}\\d+\\.[^\\S\\n]*`,
+      'u',
+    ), '')
     .trim();
   return label.length > 0 ? label : null;
 }
@@ -494,7 +525,7 @@ function resolveGenericNumberedDialog(text: string): ClaudeUnifiedGenericNumbere
       index,
       number: Number(match[1]),
       label: match[2].trim(),
-      focused: /^[^\S\n]*❯/u.test(line),
+      focused: FOCUSED_SELECTION_LINE.test(line),
     });
   }
   if (current.length > 0) blocks.push(current);

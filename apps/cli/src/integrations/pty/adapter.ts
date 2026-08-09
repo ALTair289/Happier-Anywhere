@@ -147,7 +147,15 @@ export function createPtyTerminalHostAdapter(params?: Readonly<{
     const firstInput = session.screen.capture();
     await delay(inputStabilityDelayMs);
     const currentInput = session.screen.capture();
-    return { stable: firstInput === currentInput, currentInput, observedAt: now() };
+    return {
+      stable:
+        firstInput.text === currentInput.text
+        && firstInput.cursor.x === currentInput.cursor.x
+        && firstInput.cursor.y === currentInput.cursor.y,
+      currentInput: currentInput.text,
+      cursor: currentInput.cursor,
+      observedAt: now(),
+    };
   }
 
   function createControlPort(handle: TerminalHostHandle): TerminalControlPort | null {
@@ -179,10 +187,12 @@ export function createPtyTerminalHostAdapter(params?: Readonly<{
         const session = readSession(handle);
         if (!session) return { status: 'host_dead', recoverable: true };
         if (session.ended) return { status: 'host_dead', recoverable: false };
+        const screen = session.screen.capture();
         return {
           status: 'captured',
           capture: buildTerminalControlCapture({
-            rawText: session.screen.capture(),
+            rawText: screen.text,
+            cursor: screen.cursor,
             hostKind: 'windows_console',
             capturedAtMs: now(),
           }),
@@ -327,7 +337,7 @@ export function createPtyTerminalHostAdapter(params?: Readonly<{
           ? {
               verifyAfterSubmit: async ({ promptText }) => promptSubmitVerification.isPromptStillPendingAfterSubmit({
                 promptText,
-                screenText: session.screen.capture(),
+                screenText: session.screen.capture().text,
               }),
             }
           : {}),

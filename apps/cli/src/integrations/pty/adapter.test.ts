@@ -79,7 +79,10 @@ describe('createVirtualTerminalScreen', () => {
     screen.write('\u001b[2J\u001b[H> ready');
     screen.write('\u001b[2;3Hbox');
 
-    expect(screen.capture()).toBe('> ready\n  box');
+    expect(screen.capture()).toEqual({
+      text: '> ready\n  box',
+      cursor: { x: 5, y: 1 },
+    });
   });
 });
 
@@ -125,12 +128,14 @@ describe('createPtyTerminalHostAdapter', () => {
     await expect(adapter.captureInputState?.(handle)).resolves.toMatchObject({
       stable: true,
       currentInput: 'What would you like to work on?\n>',
+      cursor: { x: 2, y: 1 },
       observedAt: 123,
     });
     await expect(adapter.createControlPort?.(handle)?.captureScreen()).resolves.toMatchObject({
       status: 'captured',
       capture: {
         text: 'What would you like to work on?\n>',
+        cursor: { x: 2, y: 1 },
         hostKind: 'windows_console',
       },
     });

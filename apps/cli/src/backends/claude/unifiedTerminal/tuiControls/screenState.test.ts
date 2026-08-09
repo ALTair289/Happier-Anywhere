@@ -567,6 +567,13 @@ describe('parseClaudeScreenState — heavy-session resume choice dialog', () => 
     expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('resume_choice_dialog');
   });
 
+  it('recognizes the same resume dialog when the terminal renders an ASCII focus marker', () => {
+    const state = parseClaudeScreenState(CLAUDE_HEAVY_SESSION_RESUME_DIALOG.replace('❯ 1.', '> 1.'));
+    expect(state.resumeChoiceDialogVisible).toBe(true);
+    expect(state.resumeChoiceDialogOptions).toEqual(['resume_from_summary', 'resume_full_session']);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+  });
+
   it('keeps similar numbered dialogs fail-closed when the resume wording is not proven', () => {
     const state = parseClaudeScreenState([
       'This session is large.',
@@ -784,6 +791,25 @@ describe('parseClaudeScreenState — unrecognized confirmation dialogs (P-B fail
     expect(isClaudeScreenReadyForInput(state)).toBe(false);
   });
 
+  it('detects an ASCII-focused numbered dialog without treating it as a composer', () => {
+    const state = parseClaudeScreenState([
+      'WARNING: Claude Code running in Bypass Permissions mode',
+      'By proceeding, you accept all responsibility for actions taken while this mode is enabled.',
+      '',
+      '> 1. No, exit',
+      '  2. Yes, I accept',
+      'Enter to confirm � Esc to cancel',
+    ].join('\n'), { cursor: { x: 0, y: 3 } });
+
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(true);
+    expect(state.unrecognizedConfirmationDialog?.options).toEqual([
+      { choice: '1', label: 'No, exit' },
+      { choice: '2', label: 'Yes, I accept' },
+    ]);
+    expect(state.composerContent).toBeNull();
+    expect(isClaudeScreenReadyForInput(state)).toBe(false);
+  });
+
   it('blocks the safe window even when a footer mode marker is visible (marker must not imply a composer)', () => {
     const state = parseClaudeScreenState([unrecognizedDialog, '', '  ⏵⏵ accept edits on'].join('\n'));
     expect(state.unrecognizedConfirmationDialogVisible).toBe(true);
@@ -946,6 +972,17 @@ describe('parseClaudeScreenState — agents selection panel (live 11:36 incident
   it('reports the selection list and blocks steering with a non-draft reason', () => {
     const state = parseClaudeScreenState(AGENTS_PANEL);
     expect(state.selectionListVisible).toBe(true);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('selection_list');
+  });
+
+  it('recognizes an ASCII-focused selector row as the same terminal-owned selection list', () => {
+    const state = parseClaudeScreenState(AGENTS_PANEL
+      .replace('❯ ◯', '> ◯')
+      .split('\n')
+      .filter((line) => !line.includes('↑/↓ to select'))
+      .join('\n'));
+    expect(state.selectionListVisible).toBe(true);
+    expect(state.composerContent).toBeNull();
     expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('selection_list');
   });
 
