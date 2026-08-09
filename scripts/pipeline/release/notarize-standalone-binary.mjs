@@ -311,6 +311,31 @@ function run([command, args], options = {}) {
   });
 }
 
+function commandFailureOutput(error) {
+  return [error?.message, error?.stdout, error?.stderr]
+    .map((value) => Buffer.isBuffer(value) ? value.toString('utf8') : String(value ?? ''))
+    .join('\n');
+}
+
+export function runGatekeeperAssessment(
+  command,
+  { runCommand = run, logger = console } = {},
+) {
+  try {
+    runCommand(command, { capture: true });
+    return true;
+  } catch (error) {
+    if (!/does not seem to be an app/iu.test(commandFailureOutput(error))) {
+      throw error;
+    }
+    logger.warn?.(
+      '[release] spctl cannot assess this raw command-line Mach-O as an app; '
+      + 'accepted notarization and strict code-signature verification remain authoritative.',
+    );
+    return false;
+  }
+}
+
 export function repairAdHocDarwinPayloadSignatures(
   rawPayloadPath,
   { finalizePayloadBeforeSnapshot = () => {} } = {},
@@ -351,7 +376,7 @@ export function verifyDarwinPayloadNotarizationEvidence({
     'codesign',
     ['--verify', '--strict=all', '--verbose=2', entryPath],
   ]),
-  assessCode = (entryPath) => run([
+  assessCode = (entryPath) => runGatekeeperAssessment([
     'spctl',
     ['--assess', '--type', 'execute', '--verbose=4', entryPath],
   ]),
@@ -689,7 +714,7 @@ export function notarizeDarwinPayload({
     if (status !== 'Accepted') {
       throw new Error(`[release] Apple notarization was not accepted (${status}); log: ${logFileName}`);
     }
-    commands.assess.forEach((command) => runCommand(command));
+    commands.assess.forEach((command) => runGatekeeperAssessment(command, { runCommand, logger }));
     assertMatchingPayloadSnapshot(signedSnapshot, snapshotDarwinPayload(payloadPath));
 
     const evidence = {

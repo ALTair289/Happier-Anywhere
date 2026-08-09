@@ -20,6 +20,7 @@ import {
   notarizeDarwinPayload,
   repairAdHocDarwinPayloadSignatures,
   resolveDarwinPayloadNotarizationCommands,
+  runGatekeeperAssessment,
   snapshotDarwinPayload,
   verifyDarwinPayloadNotarizationEvidence,
 } from './notarize-standalone-binary.mjs';
@@ -191,6 +192,19 @@ test('Darwin payload notarization signs and strictly verifies every Mach-O leaf 
   assert.equal(Object.values(commands).flat(Infinity).includes('stapler'), false);
 });
 
+test('Gatekeeper assessment only tolerates the raw-tool non-app classification', () => {
+  const policyError = new Error('spctl rejected the payload');
+  policyError.stderr = 'source=Unnotarized Developer ID\n';
+
+  assert.throws(
+    () => runGatekeeperAssessment(
+      ['spctl', ['--assess', '--type', 'execute', '/tmp/happier']],
+      { runCommand: () => { throw policyError; }, logger: { warn: () => {} } },
+    ),
+    /spctl rejected the payload/iu,
+  );
+});
+
 test('Darwin payload evidence binds every staged byte, mode, symlink, and discovered Mach-O path', () => {
   const workDir = mkdtempSync(path.join(os.tmpdir(), 'happier-darwin-payload-evidence-'));
   const payloadDir = path.join(workDir, 'happier-v1.2.3-darwin-arm64');
@@ -306,6 +320,11 @@ test('Darwin payload execution completes every sign and strict verification befo
       },
       runCommand: ([command, args], options = {}) => {
         invocations.push({ command, args: [...args] });
+        if (command === 'spctl') {
+          const error = new Error('spctl could not assess a raw command-line tool');
+          error.stderr = `${args.at(-1)}: rejected (the code is valid but does not seem to be an app)\n`;
+          throw error;
+        }
         if (command === 'ditto') {
           writeFileSync(args.at(-1), 'exact-submitted-archive', 'utf8');
         }
