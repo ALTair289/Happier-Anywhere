@@ -7,6 +7,10 @@ import { ensureNohoistPeerLinks } from './ensureNohoistPeerLinks.mjs';
 import { createFilteredPatchDir } from './postinstall/filteredPatchDirectory.mjs';
 import { runCommandBestEffort, runCommandOrExit } from './postinstall/runCommand.mjs';
 import { verifyNativePatchCompilation } from './postinstall/verifyNativePatchCompilation.mjs';
+import {
+    formatVendoredReanimatedPatchFailure,
+    verifyVendoredReanimatedPatchMarkers,
+} from './postinstall/verifyVendoredReanimatedPatchMarkers.mjs';
 
 // Yarn workspaces can execute this script via a symlinked path (e.g. repoRoot/node_modules/happy/...).
 // Resolve symlinks so repoRootDir/expoAppDir are computed from the real filesystem location.
@@ -123,6 +127,34 @@ if (wants('verify-native-patch-compilation')) {
     }
     if (!ok) {
         console.error(`\n${errors.join('\n\n')}\n`);
+        process.exit(1);
+    }
+}
+
+// The reanimated settled-updates fix is the one patch in this repository that NOTHING else can
+// observe: it lives in a dependency's C++, is reached through a native timer race, and when the hunk
+// is lost every first-party test still passes while animated values silently stick at stale
+// positions. It is verified right after `patch-package` runs, because that is the step that can drop
+// it — a regeneration against a partially-reverted tree rewrites the .patch file and exits 0.
+if (wants('verify-vendored-reanimated-patch')) {
+    const reanimatedPackageDirs = [
+        path.resolve(repoRootNodeModulesDir, 'react-native-reanimated'),
+        path.resolve(expoAppNodeModulesDir, 'react-native-reanimated'),
+    ];
+    const appPackageJsonPath = path.resolve(expoAppDir, 'package.json');
+
+    const failureReports = [];
+    for (const packageDir of reanimatedPackageDirs) {
+        const result = verifyVendoredReanimatedPatchMarkers({ packageDir, appPackageJsonPath });
+        // Every installed copy must carry the fix: Metro and the native build resolve independently,
+        // so a patched root copy does not vindicate an unpatched app-local one.
+        if (result.status === 'failed') {
+            failureReports.push(`${packageDir}\n${formatVendoredReanimatedPatchFailure(result)}`);
+        }
+    }
+
+    if (failureReports.length > 0) {
+        console.error(`\n${failureReports.join('\n\n')}\n`);
         process.exit(1);
     }
 }

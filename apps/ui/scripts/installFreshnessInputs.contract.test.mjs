@@ -17,6 +17,7 @@ test('UI manifest declares every local postinstall input through the canonical i
   const localInputsByTask = new Map([
     ['patch-package', ['patches']],
     ['verify-native-patch-compilation', ['patches', 'app.config.js']],
+    ['verify-vendored-reanimated-patch', ['patches', 'tools/postinstall']],
     ['verify-expo-router-web-modal-patch', ['patches']],
     ['verify-sentry-react-native-replay-post-init-patch', ['patches']],
     ['install-react-native-enriched-markdown-web-wasm', ['tools/react-native-enriched-markdown']],
