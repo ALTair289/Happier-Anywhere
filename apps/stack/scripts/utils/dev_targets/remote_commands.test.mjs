@@ -5,6 +5,7 @@ import {
   buildRemoteBootstrapCommand,
   buildRemoteDoctorCommand,
   buildRemoteDaemonCommand,
+  buildRemoteEnsureDirectoriesCommand,
   buildSshTunnelArgs,
   buildSshWorkerArgs,
 } from './remote_commands.mjs';
@@ -26,6 +27,23 @@ const windows = {
   cliHomeDir: 'C:/Users/test qa/.happier/windows',
   remoteServerPort: 43105,
 };
+
+test('Windows directory bootstrap retires only Mutagen agents whose SSH owner is gone', () => {
+  const command = buildRemoteEnsureDirectoriesCommand(windows);
+  const decodedPowerShell = Buffer.from(command.split(' ').at(-1), 'base64').toString('utf16le');
+
+  assert.match(decodedPowerShell, /\$ProgressPreference = 'SilentlyContinue'/);
+  assert.match(decodedPowerShell, /Name = 'mutagen-agent\.exe'/);
+  assert.match(decodedPowerShell, /SilentlyContinue\);\s+foreach \(\$agent/);
+  assert.match(decodedPowerShell, /Get-Process -Id \$sshParentPid/);
+  assert.match(decodedPowerShell, /taskkill\.exe \/PID .* \/T \/F/);
+  assert.match(
+    decodedPowerShell,
+    /if \(-not \(Get-Process -Id \$sshParentPid.*\)\).*taskkill\.exe/s,
+    'an active SSH parent must prevent cleanup of its Mutagen agent tree',
+  );
+  assert.match(decodedPowerShell, /New-Item -ItemType Directory -Force/);
+});
 
 test('remote bootstrap reuses canonical dependency freshness instead of reinstalling on every Stack restart', () => {
   const posixCommand = buildRemoteBootstrapCommand(posix);

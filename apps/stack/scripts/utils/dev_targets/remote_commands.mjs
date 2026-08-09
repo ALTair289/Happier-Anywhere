@@ -17,12 +17,30 @@ function wrapRemoteScript(target, script) {
   return `bash -lc ${posixQuote(script)}`;
 }
 
+function buildWindowsOrphanedMutagenCleanupScript() {
+  return [
+    'try {',
+    `  $mutagenAgents = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'mutagen-agent.exe'" -ErrorAction SilentlyContinue);`,
+    '  foreach ($agent in $mutagenAgents) {',
+    '    $launcher = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $agent.ParentProcessId) -ErrorAction SilentlyContinue;',
+    "    if ($null -eq $launcher -or $launcher.Name -ne 'cmd.exe') { continue };",
+    '    $sshParentPid = [int]$launcher.ParentProcessId;',
+    '    if (-not (Get-Process -Id $sshParentPid -ErrorAction SilentlyContinue)) {',
+    '      & taskkill.exe /PID ([string]$launcher.ProcessId) /T /F | Out-Null',
+    '    }',
+    '  }',
+    '} catch { }',
+  ].join(' ');
+}
+
 export function buildRemoteEnsureDirectoriesCommand(target) {
   if (target.platform === 'windows') {
     return wrapRemoteScript(
       target,
       [
         '$ErrorActionPreference = "Stop"',
+        "$ProgressPreference = 'SilentlyContinue'",
+        buildWindowsOrphanedMutagenCleanupScript(),
         `New-Item -ItemType Directory -Force -Path ${powershellQuote(target.repoDir)} | Out-Null`,
         `New-Item -ItemType Directory -Force -Path ${powershellQuote(target.cliHomeDir)} | Out-Null`,
       ].join('; '),
