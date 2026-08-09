@@ -510,9 +510,9 @@ test('remote worker exit restarts its configured target lifecycle without restar
   const credentialPath = join(root, 'access.key');
   const calls = [];
   let resolveFirstWorker;
-  let notifySecondLimaStart;
-  const secondLimaStart = new Promise((resolve) => {
-    notifySecondLimaStart = resolve;
+  let notifySecondWorkerStart;
+  const secondWorkerStart = new Promise((resolve) => {
+    notifySecondWorkerStart = resolve;
   });
   await writeFile(credentialPath, '{"token":"secret"}\n', { mode: 0o600 });
 
@@ -539,10 +539,6 @@ test('remote worker exit restarts its configured target lifecycle without restar
       {
         runProcess: async ({ label, command, args, env }) => {
           calls.push({ kind: 'run', label, command, args, env });
-          if (command === 'limactl') {
-            const starts = calls.filter((call) => call.command === 'limactl').length;
-            if (starts === 2) notifySecondLimaStart();
-          }
           return { code: 0 };
         },
         spawnProcess: ({ label, command, args, env }) => {
@@ -555,7 +551,13 @@ test('remote worker exit restarts its configured target lifecycle without restar
           });
           const worker = { label, command, args, env, exitCode: null, completion, resolveCompletion };
           calls.push({ kind: 'spawn', label, command, args, env, worker });
-          if (!args.includes('-N') && !resolveFirstWorker) resolveFirstWorker = resolveCompletion;
+          if (!args.includes('-N')) {
+            if (!resolveFirstWorker) {
+              resolveFirstWorker = resolveCompletion;
+            } else {
+              notifySecondWorkerStart();
+            }
+          }
           return worker;
         },
         stopProcess: async (worker) => {
@@ -569,10 +571,67 @@ test('remote worker exit restarts its configured target lifecycle without restar
 
     resolveFirstWorker({ code: 255, signal: null });
     const restarted = await Promise.race([
-      secondLimaStart.then(() => true),
+      secondWorkerStart.then(() => true),
       new Promise((resolve) => setTimeout(() => resolve(false), 100)),
     ]);
     assert.equal(restarted, true, 'expected the target lifecycle to restart after its SSH worker exited');
+    assert.equal(
+      calls.filter((call) => call.kind === 'run' && call.command === 'ssh' && call.args.some((arg) => String(arg).includes('remote_dependency_bootstrap'))).length,
+      1,
+      'a worker-only restart must reuse the already-provisioned checkout',
+    );
+    assert.equal(
+      calls.filter((call) => call.kind === 'run' && call.command === 'limactl').length,
+      1,
+      'a worker-only restart must not restart an already-provisioned Lima target',
+    );
+    await controller.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('dev target processes are tagged as Stack-owned infrastructure for owner-death cleanup', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hstack-dev-target-infra-ownership-'));
+  const credentialPath = join(root, 'access.key');
+  const spawned = [];
+  await writeFile(credentialPath, '{"token":"secret"}\n', { mode: 0o600 });
+
+  try {
+    const controller = await startStackDevTargets(
+      {
+        stackName: 'repo-test',
+        stackBaseDir: join(root, 'stack'),
+        sourceDir: '/source/happier',
+        localServerPort: 3005,
+        activeServerId: 'stack_repo-test__id_default',
+        credentialPath,
+        targets: [{
+          name: 'windows',
+          platform: 'windows',
+          ssh: 'windows-ssh',
+          repoDir: 'C:/happier',
+          cliHomeDir: 'C:/Users/test/.happier/windows',
+        }],
+        env: { HAPPIER_STACK_STACK: 'repo-test' },
+      },
+      {
+        runProcess: async () => ({ code: 0 }),
+        spawnProcess: ({ label, command, args, env }) => {
+          const child = { label, command, args, env, exitCode: null };
+          spawned.push(child);
+          return child;
+        },
+        stopProcess: async (child) => {
+          child.exitCode = 0;
+        },
+      },
+    );
+
+    assert.ok(spawned.length >= 3, 'expected Mutagen monitor, reverse tunnel, and remote worker');
+    for (const child of spawned) {
+      assert.equal(child.env.HAPPIER_STACK_PROCESS_KIND, 'infra', `${child.label} must be owner-death sweepable`);
+    }
     await controller.close();
   } finally {
     await rm(root, { recursive: true, force: true });

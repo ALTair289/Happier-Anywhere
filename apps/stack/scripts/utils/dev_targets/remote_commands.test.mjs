@@ -86,6 +86,11 @@ test('remote daemon command reuses the Stack dev owner and adopts a last-green d
   assert.match(command, /HAPPIER_ACTIVE_SERVER_ID/);
   assert.match(command, /HAPPIER_CLI_PKGROLL_TIMEOUT_MS=1800000/);
   assert.match(command, /http:\/\/127\.0\.0\.1:43005/);
+  assert.match(
+    command,
+    /stack stop .*repo-local-dev.* --yes --no-docker.*stack dev .*repo-local-dev/s,
+    'the replacement worker must retire a prior remote lifecycle owner before starting',
+  );
   assert.doesNotMatch(command, /corepack yarn dev /);
 
   const windowsCommand = buildRemoteDaemonCommand(windows, {
@@ -104,6 +109,11 @@ test('remote daemon command reuses the Stack dev owner and adopts a last-green d
   assert.match(
     decodedPowerShell,
     /corepack yarn workspace @happier-dev\/stack stack dev 'repo-local-dev' --no-server --no-ui --no-browser --no-dev-targets --watch/,
+  );
+  assert.match(
+    decodedPowerShell,
+    /stack stop 'repo-local-dev' --yes --no-docker.*stack dev 'repo-local-dev'/s,
+    'the Windows replacement worker must retire a prior remote lifecycle owner before starting',
   );
   assert.doesNotMatch(decodedPowerShell, /--restart/);
   assert.match(decodedPowerShell, /stack-state\/repo-local-dev/);

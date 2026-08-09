@@ -147,10 +147,14 @@ export async function startStackDevTargets(
     );
   }
 
+  const infraEnv = {
+    ...env,
+    HAPPIER_STACK_PROCESS_KIND: 'infra',
+  };
   const mutagenDir = join(stackBaseDir, 'mutagen');
   const mutagenDataDir = join(mutagenDir, 'data');
   const projectFile = join(mutagenDir, 'mutagen.yml');
-  const openSsh = await prepareOpenSsh({ targets, mutagenDir, env });
+  const openSsh = await prepareOpenSsh({ targets, mutagenDir, env: infraEnv });
   const mutagenEnv = {
     ...openSsh.mutagenEnv,
     MUTAGEN_DATA_DIRECTORY: mutagenDataDir,
@@ -160,6 +164,7 @@ export async function startStackDevTargets(
 
   const workersByTarget = new Map();
   const tunnelsByTarget = new Map();
+  const provisionedTargets = new Set();
   const targetFailuresByTarget = new Map();
   const lifecycleTasks = [];
   let monitorWorker = null;
@@ -246,100 +251,103 @@ export async function startStackDevTargets(
       let tunnel = existingTunnel;
       let createdTunnel = false;
       try {
-        if (target.limaInstance) {
+        if (!provisionedTargets.has(target.name)) {
+          if (target.limaInstance) {
+            requireSuccessful(
+              await runProcess({
+                label: `remote:${target.name}`,
+                command: 'limactl',
+                args: ['start', target.limaInstance],
+                env: { ...infraEnv, LIMA_HOME: target.limaHome },
+              }),
+              `${target.name} Lima startup`,
+            );
+          }
           requireSuccessful(
             await runProcess({
               label: `remote:${target.name}`,
-              command: 'limactl',
-              args: ['start', target.limaInstance],
-              env: { ...env, LIMA_HOME: target.limaHome },
+              command: 'ssh',
+              args: [
+                ...openSsh.sshArgs,
+                '-o',
+                'BatchMode=yes',
+                target.ssh,
+                buildRemoteEnsureDirectoriesCommand(target),
+              ],
+              env: infraEnv,
             }),
-            `${target.name} Lima startup`,
+            `${target.name} directory bootstrap`,
           );
-        }
-        requireSuccessful(
-          await runProcess({
-            label: `remote:${target.name}`,
-            command: 'ssh',
-            args: [
-              ...openSsh.sshArgs,
-              '-o',
-              'BatchMode=yes',
-              target.ssh,
-              buildRemoteEnsureDirectoriesCommand(target),
-            ],
-            env,
-          }),
-          `${target.name} directory bootstrap`,
-        );
-        phase = 'sync';
-        requireSuccessful(
-          await runProcess({
-            label: `remote:${target.name}`,
-            command: 'mutagen',
-            args: ['sync', 'resume', resolveMutagenSessionName(target.name)],
-            env: mutagenEnv,
-          }),
-          `${target.name} Mutagen resume`,
-        );
-        requireSuccessful(
-          await runProcess({
-            label: `remote:${target.name}`,
-            command: 'mutagen',
-            args: ['sync', 'flush', resolveMutagenSessionName(target.name)],
-            env: mutagenEnv,
-          }),
-          `${target.name} Mutagen initial flush`,
-        );
-        phase = 'bootstrap';
-        requireSuccessful(
-          await runProcess({
-            label: `remote:${target.name}`,
-            command: 'ssh',
-            args: [
-              ...openSsh.sshArgs,
-              '-o',
-              'BatchMode=yes',
-              target.ssh,
-              buildRemoteBootstrapCommand(target),
-            ],
-            env,
-          }),
-          `${target.name} dependency bootstrap`,
-        );
+          phase = 'sync';
+          requireSuccessful(
+            await runProcess({
+              label: `remote:${target.name}`,
+              command: 'mutagen',
+              args: ['sync', 'resume', resolveMutagenSessionName(target.name)],
+              env: mutagenEnv,
+            }),
+            `${target.name} Mutagen resume`,
+          );
+          requireSuccessful(
+            await runProcess({
+              label: `remote:${target.name}`,
+              command: 'mutagen',
+              args: ['sync', 'flush', resolveMutagenSessionName(target.name)],
+              env: mutagenEnv,
+            }),
+            `${target.name} Mutagen initial flush`,
+          );
+          phase = 'bootstrap';
+          requireSuccessful(
+            await runProcess({
+              label: `remote:${target.name}`,
+              command: 'ssh',
+              args: [
+                ...openSsh.sshArgs,
+                '-o',
+                'BatchMode=yes',
+                target.ssh,
+                buildRemoteBootstrapCommand(target),
+              ],
+              env: infraEnv,
+            }),
+            `${target.name} dependency bootstrap`,
+          );
 
-        const { stagedPath, finalPath } = remoteCredentialPaths(target, activeServerId, stackName);
-        requireSuccessful(
-          await runProcess({
-            label: `remote:${target.name}`,
-            command: 'scp',
-            args: [
-              '-q',
-              ...openSsh.sshArgs,
-              '-o',
-              'BatchMode=yes',
-              credentialPath,
-              `${target.ssh}:${stagedPath}`,
-            ],
-            env,
-          }),
-          `${target.name} credential transfer`,
-        );
-        requireSuccessful(
-          await runProcess({
-            label: `remote:${target.name}`,
-            command: 'ssh',
-            args: [
-              '-o',
-              'BatchMode=yes',
-              ...openSsh.sshArgs,
-              target.ssh,
-              buildRemoteInstallCredentialCommand(target, { stagedPath, finalPath }),
-            ],
-            env,
-          }),
-          `${target.name} credential installation`,
-        );
+          const { stagedPath, finalPath } = remoteCredentialPaths(target, activeServerId, stackName);
+          requireSuccessful(
+            await runProcess({
+              label: `remote:${target.name}`,
+              command: 'scp',
+              args: [
+                '-q',
+                ...openSsh.sshArgs,
+                '-o',
+                'BatchMode=yes',
+                credentialPath,
+                `${target.ssh}:${stagedPath}`,
+              ],
+              env: infraEnv,
+            }),
+            `${target.name} credential transfer`,
+          );
+          requireSuccessful(
+            await runProcess({
+              label: `remote:${target.name}`,
+              command: 'ssh',
+              args: [
+                '-o',
+                'BatchMode=yes',
+                ...openSsh.sshArgs,
+                target.ssh,
+                buildRemoteInstallCredentialCommand(target, { stagedPath, finalPath }),
+              ],
+              env: infraEnv,
+            }),
+            `${target.name} credential installation`,
+          );
+          provisionedTargets.add(target.name);
+        }
 
         if (closed) return null;
         const remoteServerPort =
@@ -363,7 +371,7 @@ export async function startStackDevTargets(
               remoteServerPort,
               sshArgs: openSsh.sshArgs,
             }),
-            env,
+            env: infraEnv,
           });
           createdTunnel = true;
           tunnelsByTarget.set(target.name, tunnel);
@@ -379,7 +387,7 @@ export async function startStackDevTargets(
               target.ssh,
               buildRemoteForwardProbeCommand(target, { remoteServerPort }),
             ],
-            env,
+            env: infraEnv,
           }),
           `${target.name} reverse tunnel readiness`,
         );
@@ -391,7 +399,7 @@ export async function startStackDevTargets(
             remoteCommand,
             sshArgs: openSsh.sshArgs,
           }),
-          env,
+          env: infraEnv,
         });
         workersByTarget.set(target.name, worker);
         targetFailuresByTarget.delete(target.name);

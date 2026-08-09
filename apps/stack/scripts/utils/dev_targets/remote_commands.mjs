@@ -138,6 +138,8 @@ export function buildRemoteDaemonCommand(target, { serverUrl, activeServerId, st
         `$stackEnvPath = ${powershellQuote(stackEnvPath)}`,
         `@(${stackEnvLines.map(powershellQuote).join(', ')}) | Set-Content -LiteralPath $stackEnvPath -Encoding Ascii`,
         `Set-Location -LiteralPath ${powershellQuote(target.repoDir)}`,
+        `corepack yarn workspace @happier-dev/stack stack stop ${powershellQuote(stackName)} --yes --no-docker`,
+        'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
         `corepack yarn workspace @happier-dev/stack stack dev ${powershellQuote(stackName)} --no-server --no-ui --no-browser --no-dev-targets --watch --server-url=${powershellQuote(serverUrl)}`,
         'exit $LASTEXITCODE',
       ].join('; '),
@@ -157,6 +159,7 @@ export function buildRemoteDaemonCommand(target, { serverUrl, activeServerId, st
       `install -d -m 700 -- ${posixQuote(stackBaseDir)}`,
       `printf '%s\\n' ${stackEnvLines.map(posixQuote).join(' ')} > ${posixQuote(stackEnvPath)}`,
       `cd -- ${posixQuote(target.repoDir)}`,
+      `corepack yarn workspace @happier-dev/stack stack stop ${posixQuote(stackName)} --yes --no-docker`,
       `exec corepack yarn workspace @happier-dev/stack stack dev ${posixQuote(stackName)} --no-server --no-ui --no-browser --no-dev-targets --watch --server-url=${posixQuote(serverUrl)}`,
     ].join('; '),
   );
