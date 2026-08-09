@@ -65,7 +65,9 @@ vi.mock('@/components/sessions/model/useSessionMachineTarget', () => ({
 }));
 
 vi.mock('@/sync/domains/state/storage', () => ({
-    useSession: () => sessionState.session,
+    getStorage: () => (selector: (state: any) => unknown) => selector({
+        sessions: sessionState.session ? { 'session-1': sessionState.session } : {},
+    }),
     useMachine: () => ({
         metadata: {
             daemonTerminalSessionAttachSupported: machineState.sessionAttachSupported,

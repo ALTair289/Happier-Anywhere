@@ -115,7 +115,12 @@ export function useAppPaneScope(scopeId: string): AppPaneScopeApi {
         dispatch({ type: 'setActiveDetailsTab', scopeId, tabKey });
     }, [dispatch, scopeId]);
 
-    return {
+    // The api object lands in `useCallback`/`useMemo` dependency lists at ~29 callsites
+    // (`useOpenAttachedSessionTerminal`, `SessionHeaderTranscriptNavigationButton`, ...),
+    // whose results are then compared by identity further up — notably by
+    // `SessionHeaderActionMenu`'s `onSelectExtraItem` guard. Returning a fresh literal per
+    // render invalidated all of them on every host render, so the comparator never held.
+    return React.useMemo(() => ({
         scopeId,
         scopeState,
         openRight,
@@ -133,5 +138,23 @@ export function useAppPaneScope(scopeId: string): AppPaneScopeApi {
         closeDetails,
         closeDetailsTab,
         setActiveDetailsTab,
-    };
+    }), [
+        scopeId,
+        scopeState,
+        openRight,
+        closeRight,
+        setRightTab,
+        setRightTabState,
+        openBottom,
+        closeBottom,
+        setBottomTab,
+        setBottomTabState,
+        openDetailsTab,
+        setDetailsTabState,
+        pinDetailsTab,
+        unpinDetailsTab,
+        closeDetails,
+        closeDetailsTab,
+        setActiveDetailsTab,
+    ]);
 }

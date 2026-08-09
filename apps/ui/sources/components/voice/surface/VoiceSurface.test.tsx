@@ -120,6 +120,7 @@ const useSessionSpy = vi.fn((sessionId: string) => {
 vi.mock('@/sync/store/hooks', () => ({
     useAllSessions: () => useAllSessionsSpy(),
     useSession: (sessionId: string) => useSessionSpy(sessionId),
+    useSessionMetadata: (sessionId: string) => useSessionSpy(sessionId)?.metadata ?? null,
     useLocalSetting: () => 1,
 }));
 

@@ -180,6 +180,7 @@ export function createStorageModuleStub<TOverrides extends object>(overrides: TO
         useWorkspaceReviewCommentsDrafts: () => [],
         useProjectForSession: () => null,
         useSessionForkSupportSource: () => null,
+        useSessionInteractionSource: () => null,
         useSessionChatFooterState: () => null,
         useSessionWorkspacePath: () => null,
         useSessionLastMobileSurface: () => null,

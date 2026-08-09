@@ -91,7 +91,7 @@ import {
   deriveTranscriptInteractionFromSession,
   type TranscriptInteraction,
 } from '@/utils/sessions/deriveTranscriptInteraction';
-import { useSession } from '@/sync/domains/state/storage';
+import { useSessionInteractionSource } from '@/sync/domains/state/storage';
 import { isRecoveredHistoryTranscriptObservation } from '@/sync/domains/messages/transcriptObservationProvenance';
 import { Icon } from '@/components/ui/icons/Icon';
 
@@ -288,15 +288,13 @@ type MessageViewProps = {
 // re-render every visible message subtree.
 export const MessageView = React.memo(function MessageView(props: MessageViewProps) {
   const transcriptSessionCommon = useTranscriptSessionCommon(props.sessionId);
-  const session = useSession(props.sessionId);
-  const sessionInteraction = React.useMemo(() => session
-    ? deriveTranscriptInteractionFromSession({
-        accessLevel: session.accessLevel,
-        canApprovePermissions: session.canApprovePermissions,
-        active: session.active,
-        presence: session.presence,
-      })
-    : undefined, [session]);
+  // Subscription width: this is a per-row hook, so a whole-record subscription made every
+  // mounted row re-render on turn-lifecycle churn. `presence` was passed but
+  // `deriveTranscriptInteractionFromSession` never reads it, so the narrow source drops it.
+  const interactionSource = useSessionInteractionSource(props.sessionId);
+  const sessionInteraction = React.useMemo(() => interactionSource
+    ? deriveTranscriptInteractionFromSession(interactionSource)
+    : undefined, [interactionSource]);
   return (
     <MessageViewWithSessionCommon
       {...props}

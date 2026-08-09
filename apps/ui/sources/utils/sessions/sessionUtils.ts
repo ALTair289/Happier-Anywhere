@@ -53,6 +53,11 @@ export const OPTIMISTIC_SESSION_THINKING_TIMEOUT_MS = 15_000;
 export type PendingPermissionRequest = SessionPendingRequest;
 
 type SessionStatusSource = Session | SessionListRenderableSession;
+/**
+ * `getSessionName` reads only the id and metadata, so it accepts that projection directly.
+ * Callers that only need the name can then subscribe to metadata instead of the whole record.
+ */
+export type SessionNameSource = Pick<SessionStatusSource, 'id' | 'metadata'>;
 type SessionWorkingTextMode = 'animated' | 'static';
 type SessionStatusColors = Readonly<{
     connected: string;
@@ -439,7 +444,7 @@ export function useSessionStatus(session: SessionStatusSource, options: UseSessi
  * Extracts a display name from a session's metadata path.
  * Returns the last segment of the path, or 'unknown' if no path is available.
  */
-export function getSessionName(session: SessionStatusSource): string {
+export function getSessionName(session: SessionNameSource): string {
     const summaryText = (session.metadata as any)?.summary?.text ?? (session.metadata as any)?.summaryText;
     if (typeof summaryText === 'string' && summaryText.trim()) {
         return summaryText;

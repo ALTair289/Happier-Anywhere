@@ -11,7 +11,7 @@ import { VoiceBars } from '@/components/ui/status/VoiceBars';
 import { PrimaryCircleIconButton } from '@/components/ui/buttons/PrimaryCircleIconButton';
 import { useSetting } from '@/sync/domains/state/storage';
 import { readVoicePrivacySettings } from '@/sync/domains/settings/readVoicePrivacySettings';
-import { useAllSessions, useSession } from '@/sync/store/hooks';
+import { useAllSessions, useSessionMetadata } from '@/sync/store/hooks';
 import { t } from '@/text';
 import { useVoiceActivityStore } from '@/voice/activity/voiceActivityStore';
 import { voiceActivityController } from '@/voice/activity/voiceActivityController';
@@ -63,14 +63,16 @@ export function VoiceSurface(props: Readonly<{ variant: VoiceSurfaceVariant; ses
   const activityFeedAutoExpandOnStart = voice?.ui?.activityFeedAutoExpandOnStart === true;
 
   const sessionSurfaceSessionId = typeof props.sessionId === 'string' ? props.sessionId.trim() : '';
-  const currentSession = useSession(sessionSurfaceSessionId);
+  // Subscription width: the surface only reads metadata (hidden-system check below and the
+  // target label). Subscribing to the whole session re-rendered it on every turn-lifecycle
+  // field a send touches.
+  const currentSessionMetadata = useSessionMetadata(sessionSurfaceSessionId);
 
   const feedSessionId = props.variant === 'session' && typeof props.sessionId === 'string' ? props.sessionId : null;
   const lastFocusedSessionId = useVoiceTargetStore((s) => s.lastFocusedSessionId);
   const primaryActionSessionId = useVoiceTargetStore((s) => s.primaryActionSessionId);
-  const primaryActionSession = useSession(
-    typeof primaryActionSessionId === 'string' ? primaryActionSessionId.trim() : '',
-  );
+  const primaryActionSessionKey = typeof primaryActionSessionId === 'string' ? primaryActionSessionId.trim() : '';
+  const primaryActionSessionMetadata = useSessionMetadata(primaryActionSessionKey);
   const voiceScope = useVoiceTargetStore((s) => s.scope);
   const routeSessionId = props.variant === 'sidebar' ? resolveSessionIdFromPathname(pathname) : null;
   const startSessionId =
@@ -201,7 +203,7 @@ export function VoiceSurface(props: Readonly<{ variant: VoiceSurfaceVariant; ses
   const showSurface =
     providerId !== 'off' &&
     locationAllowsVariant &&
-    !(props.variant === 'session' && isHiddenSystemSession({ metadata: currentSession?.metadata ?? null }));
+    !(props.variant === 'session' && isHiddenSystemSession({ metadata: currentSessionMetadata }));
   if (!showSurface) return null;
 
   const statusInfo = (() => {
@@ -244,7 +246,9 @@ export function VoiceSurface(props: Readonly<{ variant: VoiceSurfaceVariant; ses
   const targetLabel =
     props.variant === 'sidebar' && voiceScope === 'global' && primaryActionSessionId
       ? (
-        (primaryActionSession ? getSessionName(primaryActionSession) : null)
+        (primaryActionSessionMetadata
+          ? getSessionName({ id: primaryActionSessionKey, metadata: primaryActionSessionMetadata })
+          : null)
         ?? resolveVoiceSessionLabel(primaryActionSessionId, {
           voiceShareSessionSummary: voicePrivacy.shareSessionSummary,
           voiceShareFilePaths: voicePrivacy.shareFilePaths,

@@ -768,6 +768,32 @@ export function useSessionMetadata(sessionId: string): Session['metadata'] | nul
   return getStorage()((state) => state.sessions[sessionId]?.metadata ?? null);
 }
 
+export type SessionInteractionSource = Readonly<{
+  accessLevel: Session['accessLevel'];
+  canApprovePermissions: Session['canApprovePermissions'];
+  active: Session['active'];
+}>;
+
+/**
+ * The exact projection `deriveTranscriptInteractionFromSession` consumes. Transcript rows
+ * subscribe to this instead of the whole `Session` record: turn-lifecycle churn (thinking,
+ * agentState, agentStateVersion, updatedAt, seq, presence) cannot change interaction rights,
+ * so a row must not re-render for it.
+ */
+export function useSessionInteractionSource(sessionId: string): SessionInteractionSource | null {
+  return getStorage()(
+    useShallow((state) => {
+      const session = state.sessions[sessionId];
+      if (!session) return null;
+      return {
+        accessLevel: session.accessLevel,
+        canApprovePermissions: session.canApprovePermissions,
+        active: session.active,
+      };
+    })
+  );
+}
+
 export function useSessionMessagesReducerState(sessionId: string) {
   const snapshot = getStorage()(
     useShallow((state) => {

@@ -153,6 +153,11 @@ installMessageViewCommonModuleMocks({
         thinkingAt: 0,
         presence: 'online',
       }),
+      useSessionInteractionSource: () => ({
+        accessLevel: undefined,
+        canApprovePermissions: undefined,
+        active: true,
+      }),
       useSessionForkSupportSource: () => ({ metadata: sessionMetadata }),
       useSessionWorkspacePath: () => projectForSession?.key?.path ?? sessionMetadata?.path ?? null,
       useSessionMessagesById: () => ({}),
