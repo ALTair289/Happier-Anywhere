@@ -20,6 +20,7 @@ import {
   notarizeDarwinPayload,
   repairAdHocDarwinPayloadSignatures,
   resolveDarwinPayloadNotarizationCommands,
+  runCodesignWithRetry,
   runGatekeeperAssessment,
   snapshotDarwinPayload,
   verifyDarwinPayloadNotarizationEvidence,
@@ -203,6 +204,48 @@ test('Gatekeeper assessment only tolerates the raw-tool non-app classification',
     ),
     /spctl rejected the payload/iu,
   );
+});
+
+test('codesign retries only Apple timestamp service availability failures', () => {
+  const command = ['codesign', ['--timestamp', '/tmp/happier']];
+  const retryDelays = [];
+  let attempts = 0;
+  const timestampError = new Error('codesign failed');
+  timestampError.stderr = '/tmp/happier: The timestamp service is not available.\n';
+
+  assert.equal(
+    runCodesignWithRetry(command, {
+      attempts: 4,
+      retryDelayMs: 10,
+      runCommand: () => {
+        attempts += 1;
+        if (attempts < 3) throw timestampError;
+        return 'signed';
+      },
+      sleep: (delayMs) => retryDelays.push(delayMs),
+      logger: { warn: () => {} },
+    }),
+    'signed',
+  );
+  assert.equal(attempts, 3);
+  assert.deepEqual(retryDelays, [10, 20]);
+
+  const identityError = new Error('codesign failed: no identity found');
+  let fatalAttempts = 0;
+  assert.throws(
+    () => runCodesignWithRetry(command, {
+      attempts: 4,
+      retryDelayMs: 10,
+      runCommand: () => {
+        fatalAttempts += 1;
+        throw identityError;
+      },
+      sleep: () => assert.fail('non-transient codesign errors must not sleep'),
+      logger: { warn: () => {} },
+    }),
+    identityError,
+  );
+  assert.equal(fatalAttempts, 1);
 });
 
 test('Darwin payload evidence binds every staged byte, mode, symlink, and discovered Mach-O path', () => {

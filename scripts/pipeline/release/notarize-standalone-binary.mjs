@@ -30,6 +30,8 @@ const PRESERVED_CODESIGN_METADATA = [
   'launch-constraints',
   'library-constraints',
 ].join(',');
+const DEFAULT_CODESIGN_ATTEMPTS = 4;
+const DEFAULT_CODESIGN_RETRY_DELAY_MS = 15_000;
 
 function isDeveloperIdApplicationSigningSelector(value) {
   const selector = String(value ?? '').trim();
@@ -315,6 +317,42 @@ function commandFailureOutput(error) {
   return [error?.message, error?.stdout, error?.stderr]
     .map((value) => Buffer.isBuffer(value) ? value.toString('utf8') : String(value ?? ''))
     .join('\n');
+}
+
+function sleepSync(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.trunc(ms));
+}
+
+export function runCodesignWithRetry(
+  command,
+  {
+    attempts = DEFAULT_CODESIGN_ATTEMPTS,
+    retryDelayMs = DEFAULT_CODESIGN_RETRY_DELAY_MS,
+    runCommand = run,
+    sleep = sleepSync,
+    logger = console,
+  } = {},
+) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return runCommand(command);
+    } catch (error) {
+      const timestampServiceUnavailable = /timestamp service is not available/iu.test(
+        commandFailureOutput(error),
+      );
+      if (!timestampServiceUnavailable || attempt >= attempts) {
+        throw error;
+      }
+      const nextAttempt = attempt + 1;
+      const delayMs = retryDelayMs * (2 ** (attempt - 1));
+      logger.warn?.(
+        `[release] Apple timestamp service is unavailable; retrying codesign (${nextAttempt}/${attempts})`,
+      );
+      sleep(delayMs);
+    }
+  }
+  throw new Error('[release] codesign retry loop exhausted unexpectedly');
 }
 
 export function runGatekeeperAssessment(
@@ -689,7 +727,7 @@ export function notarizeDarwinPayload({
       submissionId: 'PENDING',
       logPath,
     });
-    provisional.codesign.forEach((command) => runCommand(command));
+    provisional.codesign.forEach((command) => runCodesignWithRetry(command, { runCommand, logger }));
     provisional.verify.forEach((command) => runCommand(command));
     finalizePayloadBeforeSnapshot();
     const signedSnapshot = snapshotDarwinPayload(payloadPath);
