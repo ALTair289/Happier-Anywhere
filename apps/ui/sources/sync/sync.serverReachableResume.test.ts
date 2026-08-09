@@ -1,26 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 const appStateAddListener = vi.hoisted(() => vi.fn(() => ({ remove: vi.fn() })));
 const apiSocketMock = vi.hoisted(() => {
     let connectionStateListener: ((state: import('@happier-dev/connection-supervisor').ManagedConnectionState) => void) | null = null;
@@ -84,7 +63,6 @@ vi.mock('@/log', () => ({
 describe('sync server-reachable resume', () => {
     beforeEach(() => {
         vi.resetModules();
-        kvStore.clear();
         appStateAddListener.mockClear();
         apiSocketMock.onConnectionStateChange.mockClear();
         apiSocketMock.connect.mockClear();

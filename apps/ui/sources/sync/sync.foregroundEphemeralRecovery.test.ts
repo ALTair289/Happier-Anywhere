@@ -1,26 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 const appStateHandlers = vi.hoisted(() => new Set<(state: string) => void>());
 const appStateAddListener = vi.hoisted(() => vi.fn((_event: string, handler: (state: string) => void) => {
     appStateHandlers.add(handler);
@@ -124,7 +103,6 @@ describe('sync foreground ephemeral recovery', () => {
         vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
         vi.resetModules();
         vi.restoreAllMocks();
-        kvStore.clear();
         appStateHandlers.clear();
         socketStatusHandlers.clear();
         appStateAddListener.mockClear();

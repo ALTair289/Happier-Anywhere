@@ -5,29 +5,6 @@ import { buildSessionListRenderableFromSession } from '@/sync/domains/session/li
 import type { SessionListViewItem } from '@/sync/domains/session/listing/sessionListViewData';
 import type { NormalizedMessage } from '@/sync/typesRaw';
 
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        getAllKeys() {
-            return [...kvStore.keys()];
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
     return createReactNativeWebMock({
@@ -104,7 +81,6 @@ describe('sync session viewport', () => {
 
     beforeEach(() => {
         vi.resetModules();
-        kvStore.clear();
     });
 
     it('leaves eager session-list hydration rows out of prioritized hydration ids', async () => {

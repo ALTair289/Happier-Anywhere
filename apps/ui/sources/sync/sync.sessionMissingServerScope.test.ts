@@ -1,25 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
     return createReactNativeWebMock(
@@ -193,7 +173,6 @@ describe('sync.fetchMessages server-scoped known-session checks', () => {
     beforeEach(() => {
         resetServerFeaturesClientForTests();
         storage.setState(initialStorageState, true);
-        kvStore.clear();
         requestMock.mockReset();
         runtimeFetchMock.mockReset();
         getCredentialsForServerUrlMock.mockReset();

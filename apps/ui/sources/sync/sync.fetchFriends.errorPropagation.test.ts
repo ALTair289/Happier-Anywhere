@@ -1,26 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-// Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 vi.mock('@/log', () => ({
     log: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
@@ -36,7 +15,6 @@ vi.mock('./engine/social/syncFriends', () => ({
 describe('sync fetchFriends error propagation', () => {
     afterEach(() => {
         fetchAndApplyFriendsSpy.mockClear();
-        kvStore.clear();
         vi.resetModules();
     });
 

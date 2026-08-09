@@ -1,26 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 const appStateAddListener = vi.hoisted(() => vi.fn(() => ({ remove: vi.fn() })));
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
@@ -97,6 +76,8 @@ import { setActiveServerId, upsertServerProfile } from './domains/server/serverP
 import { loadSessionMaterializedMaxSeqById } from './domains/state/persistence';
 import type { AccountSettingsScope } from './domains/settings/scope/accountSettingsScope';
 import type { Session } from './domains/state/storageTypes';
+import { encodeBase64 } from '@/encryption/base64';
+import { encodeUTF8 } from '@/encryption/text';
 
 const initialStorageState = storage.getState();
 
@@ -121,10 +102,14 @@ function createSession(params: { sessionId: string }): Session {
     };
 }
 
+function buildTokenWithSub(sub: string): string {
+    const payload = encodeBase64(encodeUTF8(JSON.stringify({ sub })), 'base64');
+    return `hdr.${payload}.sig`;
+}
+
 describe('sync.ensureSessionVisibleForMessageRoute', () => {
     beforeEach(async () => {
         storage.setState(initialStorageState, true);
-        kvStore.clear();
         appStateAddListener.mockClear();
         requestMock.mockReset();
         runtimeFetchMock.mockReset();
@@ -925,6 +910,7 @@ describe('sync.ensureSessionVisibleForMessageRoute', () => {
 
     it('hydrates through the preferred owner server when local cache maps the session to a non-active server', async () => {
         const sessionId = 'deep_link_scoped_owner';
+        const ownerToken = buildTokenWithSub('owner-account');
         const activeServer = upsertServerProfile({ serverUrl: 'https://active.example', name: 'Active' });
         const ownerServer = upsertServerProfile({ serverUrl: 'https://scoped.example', name: 'Owner' });
         setActiveServerId(activeServer.id, { scope: 'device' });
@@ -981,7 +967,7 @@ describe('sync.ensureSessionVisibleForMessageRoute', () => {
         };
 
         requestMock.mockRejectedValue(new Error('active request should not be used'));
-        getCredentialsForServerUrlMock.mockResolvedValue({ token: 'scoped-token', secret: 'scoped-secret' });
+        getCredentialsForServerUrlMock.mockResolvedValue({ token: ownerToken, secret: 'scoped-secret' });
         createEncryptionFromAuthCredentialsMock.mockResolvedValue({
             decryptEncryptionKey: async () => null,
             initializeSessions: async () => {},
@@ -1016,15 +1002,12 @@ describe('sync.ensureSessionVisibleForMessageRoute', () => {
         }));
 
         expect(requestMock).not.toHaveBeenCalled();
-        expect(runtimeFetchMock).toHaveBeenCalledWith(
-            `https://scoped.example/v2/sessions/${sessionId}`,
-            expect.objectContaining({
-                method: 'GET',
-                headers: expect.objectContaining({
-                    Authorization: 'Bearer scoped-token',
-                }),
-            }),
+        const sessionRequest = runtimeFetchMock.mock.calls.find(
+            ([url]) => url === `https://scoped.example/v2/sessions/${sessionId}`,
         );
+        expect(sessionRequest?.[1]).toEqual(expect.objectContaining({ method: 'GET' }));
+        expect(new Headers((sessionRequest?.[1] as RequestInit | undefined)?.headers).get('Authorization'))
+            .toBe(`Bearer ${ownerToken}`);
         expect((sync as any).activeServerSessionIds.has(sessionId)).toBe(true);
         expect(initializeSessions).not.toHaveBeenCalled();
     });
@@ -1075,6 +1058,7 @@ describe('sync.ensureSessionVisibleForMessageRoute', () => {
 
     it('initializes encrypted explicit-server route hydration with the owner server scope', async () => {
         const sessionId = 'deep_link_explicit_server_encrypted';
+        const ownerToken = buildTokenWithSub('owner-account');
         const activeServer = upsertServerProfile({ serverUrl: 'https://active.example', name: 'Active' });
         const ownerServer = upsertServerProfile({ serverUrl: 'https://scoped.example', name: 'Owner' });
         setActiveServerId(activeServer.id, { scope: 'device' });
@@ -1097,7 +1081,7 @@ describe('sync.ensureSessionVisibleForMessageRoute', () => {
         };
 
         requestMock.mockRejectedValue(new Error('active request should not be used'));
-        getCredentialsForServerUrlMock.mockResolvedValue({ token: 'scoped-token', secret: 'scoped-secret' });
+        getCredentialsForServerUrlMock.mockResolvedValue({ token: ownerToken, secret: 'scoped-secret' });
         createEncryptionFromAuthCredentialsMock.mockResolvedValue({
             decryptEncryptionKey: async () => new Uint8Array([1, 2, 3]),
             initializeSessions: scopedInitializeSessions,

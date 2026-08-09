@@ -2,27 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PauseController } from '@/utils/timing/pauseController';
 
-// Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 const appStateAddListener = vi.hoisted(() => vi.fn(() => ({ remove: vi.fn() })));
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
@@ -117,7 +96,6 @@ function emptySessionOrganizationSnapshotResponse(): Response {
 describe('sync resumeSync background interruption', () => {
     beforeEach(() => {
         vi.resetModules();
-        kvStore.clear();
         appStateAddListener.mockClear();
         fetchChangesBarrier.reset();
         vi.unstubAllGlobals();

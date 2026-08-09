@@ -26,6 +26,7 @@ export * from './mocks/flashList';
 export * from './mocks/legendList';
 export * from './mocks/gestureHandler';
 export * from './mocks/keyboardAvoidance';
+export * from './mocks/mmkv';
 export * from './mocks/modal';
 export * from './mocks/nativeEnvironment';
 export * from './mocks/reactNative';

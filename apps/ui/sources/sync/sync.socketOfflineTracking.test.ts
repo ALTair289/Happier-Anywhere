@@ -1,30 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { readReactNativeMmkvStubValues } from '@/dev/testkit/mocks/mmkv';
+
 type FetchChanges = typeof import('./api/session/apiChanges').fetchChanges;
 type FetchCurrentChangesCursor = typeof import('./api/session/apiChanges').fetchCurrentChangesCursor;
 type MachineDirectSessionTranscriptPage = typeof import('@/sync/ops/machineDirectSessions').machineDirectSessionTranscriptPage;
 type MachineDirectSessionTranscriptReadAfter = typeof import('@/sync/ops/machineDirectSessions').machineDirectSessionTranscriptReadAfter;
-
-// Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-  class MMKV {
-    getString(key: string) {
-      return kvStore.get(key);
-    }
-    set(key: string, value: string) {
-      kvStore.set(key, value);
-    }
-    delete(key: string) {
-      kvStore.delete(key);
-    }
-    clearAll() {
-      kvStore.clear();
-    }
-  }
-
-  return { MMKV };
-});
 
 const statusListeners = vi.hoisted(() => new Set<(status: 'disconnected' | 'connecting' | 'connected' | 'error') => void>());
 const apiSocketRequestMock = vi.hoisted(() =>
@@ -243,7 +224,6 @@ describe('sync socket offline tracking', () => {
     storage.setState(initialStorageState, true);
     clearActiveViewingSessionsForServerScopeReset();
     clearMountedSessionRealtimeScmConsumerScopes();
-    kvStore.clear();
     statusListeners.clear();
     const heartbeatTimer = (sync as any).webSyncClientIdentityHeartbeatTimer as ReturnType<typeof setInterval> | null;
     if (heartbeatTimer) {
@@ -1322,8 +1302,8 @@ describe('sync socket offline tracking', () => {
     await (sync as any).resumeSync('socket-reconnect');
 
     expect(fetchCurrentChangesCursorMock).toHaveBeenCalledTimes(1);
-    expect(Array.from(kvStore.values())).toContain('12');
-    expect(Array.from(kvStore.values())).not.toContain('9');
+    expect(readReactNativeMmkvStubValues()).toContain('12');
+    expect(readReactNativeMmkvStubValues()).not.toContain('9');
   }, 60_000);
 
   it('persists snapshot-base cursor fetch failure telemetry when cursor-gone repair cannot capture /v2/cursor', async () => {

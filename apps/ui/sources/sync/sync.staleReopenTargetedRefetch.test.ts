@@ -6,26 +6,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // reset discards all paginated older history (and flips isLoaded:false) to repair a single
 // edited row.
 
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
     return createReactNativeWebMock({
@@ -170,7 +150,6 @@ async function seedLoadedHistorySession(): Promise<{ sync: typeof import('./sync
 describe('sync stale-reopen targeted refetch (C6/D2a)', () => {
     beforeEach(() => {
         storage.setState(initialStorageState, true);
-        kvStore.clear();
         requestMock.mockReset();
     });
 

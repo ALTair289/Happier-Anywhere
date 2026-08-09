@@ -7,30 +7,6 @@ type EndpointSupervisorAcquire = typeof import('@/sync/runtime/connectivity/endp
 type AssertServerReachabilityAuthenticated = typeof import('@/sync/runtime/connectivity/serverReachabilitySupervisorPool').assertServerReachabilityAuthenticated;
 type ResumeSession = typeof import('@/sync/ops').resumeSession;
 
-// Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        getAllKeys() {
-            return [...kvStore.keys()];
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 const appStateAddListener = vi.hoisted(() => vi.fn(() => ({ remove: vi.fn() })));
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
@@ -302,7 +278,6 @@ describe('sync.sendMessage optimistic thinking', () => {
         resetServerFeaturesClientForTests();
         setRuntimeFetch(async () => Response.json(buildServerFeaturesResponse()));
         storage.setState(initialStorageState, true);
-        kvStore.clear();
         const activeScope = {
             serverId: getActiveServerSnapshot().serverId,
             accountId: 'sync-test-account',

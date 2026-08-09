@@ -6,26 +6,6 @@ import { createDeferred } from '@/dev/testkit';
 // `maybeDrainDeferredNewerMessages(sessionId, { isPinned, distanceFromBottomPx })` drains when
 // pinned or near the bottom, and onSessionVisible fires it for reopen-at-bottom.
 
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
     return createReactNativeWebMock({
@@ -167,7 +147,6 @@ async function seedDeferredNewerSession(): Promise<{ sync: typeof import('./sync
 describe('sync reactive deferred-newer drain (C6/D3)', () => {
     beforeEach(() => {
         storage.setState(initialStorageState, true);
-        kvStore.clear();
         requestMock.mockReset();
         markSessionHidden(SESSION_ID);
     });

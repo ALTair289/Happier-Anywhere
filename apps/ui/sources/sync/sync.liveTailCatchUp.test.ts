@@ -6,27 +6,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // ({ isPinned: true, shouldRestoreViewport: false }) must flip the same gap to
 // `tail_reset_latest_page` (snapshot fetch) and clear any deferred-newer marker.
 
-// Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
     return createReactNativeWebMock({
@@ -173,7 +152,6 @@ async function seedLargeGapSession(): Promise<{ sync: typeof import('./sync').sy
 describe('sync live-tail catch-up decision (plan B8)', () => {
     beforeEach(() => {
         storage.setState(initialStorageState, true);
-        kvStore.clear();
         requestMock.mockReset();
         markSessionHidden(SESSION_ID);
     });

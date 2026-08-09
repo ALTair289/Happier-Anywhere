@@ -6,27 +6,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // `tail_reset_latest_page` (wiping paginated history) for off-screen sessions on every
 // reconnect sweep. The fix reads the REAL live-consumption signal at decision time.
 
-// Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
     return createReactNativeWebMock({
@@ -215,7 +194,6 @@ async function seedLargeGapLoadedSession(): Promise<{ sync: typeof import('./syn
 describe('sync catch-up visibility gate (C6/D1)', () => {
     beforeEach(() => {
         storage.setState(initialStorageState, true);
-        kvStore.clear();
         requestMock.mockReset();
         markSessionHidden(SESSION_ID);
         markSessionHidden(CLAUDE_UNIFIED_SESSION_ID);

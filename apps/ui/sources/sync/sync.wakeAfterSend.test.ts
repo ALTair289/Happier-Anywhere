@@ -1,29 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Sync imports persistence, which instantiates MMKV. Mock it for deterministic tests.
-const kvStore = vi.hoisted(() => new Map<string, string>());
-vi.mock('react-native-mmkv', () => {
-    class MMKV {
-        getString(key: string) {
-            return kvStore.get(key);
-        }
-        set(key: string, value: string) {
-            kvStore.set(key, value);
-        }
-        delete(key: string) {
-            kvStore.delete(key);
-        }
-        getAllKeys() {
-            return [...kvStore.keys()];
-        }
-        clearAll() {
-            kvStore.clear();
-        }
-    }
-
-    return { MMKV };
-});
-
 const appStateAddListener = vi.hoisted(() => vi.fn(() => ({ remove: vi.fn() })));
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
@@ -144,7 +120,6 @@ function tokenForSub(sub: string): string {
 describe('sync.sendMessage wake-after-send', () => {
     beforeEach(() => {
         storage.setState(initialStorageState, true);
-        kvStore.clear();
         storage.getState().activateProfileScope({
             serverId: getActiveServerSnapshot().serverId,
             accountId: 'sync-wake-after-send-test-account',
