@@ -37,6 +37,10 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || 'dev' }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.x
       - name: Bind exact nightly source SHA
         id: identity
         run: |
@@ -269,6 +273,10 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.x
       - name: Project terminal release status
         env:
           SOURCE_SHA: ${{ needs.prepare_release_candidate.outputs.source_sha }}

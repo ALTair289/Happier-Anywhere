@@ -306,8 +306,8 @@ test('secret-bearing workflows require release-admin actor guard before privileg
     const job = parsed?.jobs?.[jobName];
     assert.ok(job, `${file} should define job '${jobName}'`);
     assert.ok(
-      listNeeds(job?.needs).includes(guardJob),
-      `${file} job '${jobName}' should require '${guardJob}'`
+      jobNeedsTransitively(parsed?.jobs ?? {}, jobName, guardJob),
+      `${file} job '${jobName}' should require '${guardJob}' directly or transitively`
     );
     assert.equal(
       guard?.secrets,

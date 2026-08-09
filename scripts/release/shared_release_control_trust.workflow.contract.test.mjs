@@ -156,6 +156,7 @@ test('workflow boundaries reject malicious refs, release metadata, and deploy ta
   const promoteValidation = step(workflow('promote-branch.yml').jobs.promote, 'Validate inputs').run;
   const validPromoteResult = runValidation(promoteValidation, {
     INPUT_SOURCE: 'dev',
+    INPUT_SOURCE_SHA: '',
     INPUT_TARGET: 'main',
     INPUT_MODE: 'fast_forward',
     INPUT_DRY_RUN: 'true',
@@ -165,6 +166,7 @@ test('workflow boundaries reject malicious refs, release metadata, and deploy ta
   assert.equal(validPromoteResult.status, 0, validPromoteResult.stderr);
   const promoteResult = runValidation(promoteValidation, {
     INPUT_SOURCE: injection,
+    INPUT_SOURCE_SHA: '',
     INPUT_TARGET: 'main',
     INPUT_MODE: 'fast_forward',
     INPUT_DRY_RUN: 'true',
@@ -235,6 +237,7 @@ test('malicious branch and release inputs remain opaque publisher arguments', ()
     },
     env: {
       INPUT_SOURCE: injection,
+      INPUT_SOURCE_SHA: '',
       INPUT_TARGET: 'main',
       INPUT_MODE: 'fast_forward',
       INPUT_ALLOW_RESET: 'false',
