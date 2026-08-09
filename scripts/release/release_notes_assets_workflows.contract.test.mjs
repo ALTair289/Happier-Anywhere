@@ -37,17 +37,20 @@ for (const [workflow, jobName] of releaseNotesAssetCallers) {
     assert.match(raw, /--tag\s+"?release-notes"?/);
 
     const steps = Array.isArray(job.steps) ? job.steps : [];
-    const tokenStep = steps.find((step) => step?.id === 'release_notes_assets_token');
-    assert.ok(tokenStep, `${workflow} should mint a dedicated release-notes assets token`);
+    const publishStep = steps.find((step) => step?.name?.startsWith('Publish release notes assets'));
+    assert.ok(publishStep, `${workflow} should publish release notes assets`);
+
+    const tokenReference = /^\$\{\{ steps\.([^.]+)\.outputs\.token \}\}$/.exec(publishStep.env?.GH_TOKEN ?? '');
+    assert.ok(tokenReference, `${workflow} should publish release notes assets with a GitHub App token`);
+    const tokenStep = steps.find((step) => step?.id === tokenReference[1]);
+    assert.ok(tokenStep, `${workflow} should define the GitHub App token used to publish release notes assets`);
     assert.equal(tokenStep.uses, 'actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547');
     assert.equal(tokenStep.with?.['app-id'], '${{ secrets.RELEASE_BOT_APP_ID }}');
     assert.equal(tokenStep.with?.['private-key'], '${{ secrets.RELEASE_BOT_PRIVATE_KEY }}');
     assert.equal(tokenStep.with?.owner, '${{ github.repository_owner }}');
     assert.equal(tokenStep.with?.repositories, 'happier-assets');
     assert.equal(tokenStep.with?.['permission-contents'], 'write');
-
-    const publishStep = steps.find((step) => step?.name === 'Publish release notes assets');
-    assert.ok(publishStep, `${workflow} should publish release notes assets`);
+    assert.equal(tokenStep.id, 'release_notes_assets_token');
     assert.equal(
       publishStep.env?.GH_TOKEN,
       '${{ steps.release_notes_assets_token.outputs.token }}',
