@@ -35,6 +35,29 @@ An existing same-concept split-brain in the touched corridor must be consolidate
 
 ## Direction and rollout
 
+### Self-hosted independent upgrades
+
+Self-hosted operators can upgrade clients, daemons, relays, and persisted
+state independently. Release evidence therefore covers the reachable
+directions rather than imposing a fleet wait or a global cutover:
+
+- candidate clients, CLI, and daemon against a supported older stable relay;
+- bounded supported older client/daemon core flows against a candidate relay;
+- persisted state from an older writer into candidate readers; and
+- candidate writes into older readers only when supported rollback or
+  coexistence makes that direction reachable.
+
+The last direction is conditional, not an excuse to add dual writers or a
+permanent fallback. The public release contract exposes these directions for
+the `integrated`, `stable`, and manual `deep` profiles. `integrated` keeps its
+automatic evidence bounded to artifact verification, binary smoke, and session
+continuity, while its named `supported-old-relay-compatibility` check uses the
+existing relay-upgrade path when the relay surface is affected. `stable` adds
+CLI-update and daemon-continuity evidence. Installer and Docker validation are
+risk-selected for the affected surface rather than fleet-wide automatic gates;
+deep certification owns cross-OS, provider, mobile, and comprehensive review.
+Product seams still own the actual compatibility implementation.
+
 - New readers accept supported old shapes; new writes use the canonical current shape.
 - Old readers need to accept new writes only when coexistence, independent component rollout, or rollback makes that direction reachable.
 - New clients talking to old servers must capability-negotiate or degrade safely instead of assuming the new contract.

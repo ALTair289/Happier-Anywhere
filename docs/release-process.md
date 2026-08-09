@@ -20,6 +20,57 @@ Notes:
 
 ## Release flow (maintainers)
 
+### Public contract, private operation, and human go-ahead
+
+The public, versioned release contract is machine-readable:
+
+```bash
+node scripts/pipeline/run.mjs release-contract
+```
+
+It names the canonical versioned release targets, executable validation suites,
+and three profiles:
+
+- `integrated` is the complete but bounded normal-release profile. Its
+  automatic suite membership is `artifact-verify`, `binary-smoke`, and
+  `session-continuity`; its required named compatibility evidence is
+  `supported-old-relay-compatibility`.
+- `stable` includes `integrated` evidence plus automatic `cli-update` and
+  `daemon-continuity`, and the stable-only `agent-diff-sanity` check.
+- `deep` is manual comprehensive certification. It has no automatic suite
+  membership, owns risk-selected installer and Docker checks when those
+  surfaces change, and covers cross-OS, provider, mobile, and full
+  certification before it is considered complete. It is never a normal-release
+  dispatch.
+
+`supported-old-relay-compatibility` names the existing
+`docker-release-assets` published-channel → local-build relay-upgrade path
+when the relay surface is affected. `installers-smoke` and
+`docker-release-assets` are not routine automatic release gates: select them
+only when their installer or Docker surface changed.
+
+The contract is public so callers can select and verify the right evidence;
+the operating procedure is private. Resolve it for an absolute checkout with:
+
+```bash
+hmaint release bootstrap --repo <absolute checkout> --json
+```
+
+Use the returned private skill rather than copying a private release policy
+into this repository. A human go-ahead is required before any non-dry release
+dispatch. That go-ahead must name the selected profile and the exact SHA of the
+candidate whose evidence was reviewed. Do not substitute a branch name or a
+moving channel pointer for the exact SHA.
+
+`node scripts/pipeline/run.mjs release --release-profile integrated` is the
+normal preview path; preview and dev default to `integrated`, while production
+defaults to `stable`. `stable` remains a normal dispatch only after its
+additional manual evidence is complete. `deep` is deliberately rejected by the
+normal dispatcher.
+
+The profile contract describes self-hosted independent upgrade evidence; it
+does not require a fleet wait, global cutover, or synchronized deployment.
+
 ### Preview release (dev → preview)
 
 When you want to publish/deploy a new preview build:

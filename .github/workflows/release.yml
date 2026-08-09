@@ -12,6 +12,14 @@ on:
           - full
           - fast
           - none
+      validation_profile:
+        description: "Release validation contract (stable adds update and daemon continuity)"
+        required: true
+        type: choice
+        default: integrated
+        options:
+          - integrated
+          - stable
       dry_run:
         description: "Safety — Run checks and show plan, but do not push/deploy"
         required: true
@@ -719,22 +727,39 @@ jobs:
       release_message: ${{ inputs.release_message }}
       publish_rolling: false
 
+  publish_hstack_binaries:
+    if: always() && needs.plan.result == 'success' && needs.bind_server_source.result == 'success' && inputs.dry_run != true && needs.plan.outputs.publish_stack == 'true' && (needs.bump_versions_dev.result == 'success' || needs.bump_versions_dev.result == 'skipped') && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success'))
+    needs: [plan, bump_versions_dev, promote_preview, promote_main, bind_server_source]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-hstack-binaries.yml
+    secrets: inherit
+    with:
+      channel: ${{ inputs.environment == 'production' && 'stable' || 'preview' }}
+      source_ref: ${{ inputs.environment == 'production' && 'main' || 'preview' }}
+      authorized_sha: ${{ needs.bind_server_source.outputs.authorized_sha }}
+      allow_stable: ${{ inputs.environment == 'production' }}
+      release_message: ${{ inputs.release_message }}
+      publish_rolling: false
+
   verify_release_candidates:
     name: Verify exact immutable release candidates
-    if: ${{ always() && needs.plan.result == 'success' && needs.bind_server_source.result == 'success' && (needs.publish_cli_binaries.result == 'success' || needs.publish_cli_binaries.result == 'skipped') && (needs.publish_server_runtime.result == 'success' || needs.publish_server_runtime.result == 'skipped') && (needs.publish_ui_web.result == 'success' || needs.publish_ui_web.result == 'skipped') }}
-    needs: [plan, bind_server_source, publish_cli_binaries, publish_server_runtime, publish_ui_web]
+    if: ${{ always() && needs.plan.result == 'success' && needs.bind_server_source.result == 'success' && (needs.publish_cli_binaries.result == 'success' || needs.publish_cli_binaries.result == 'skipped') && (needs.publish_hstack_binaries.result == 'success' || needs.publish_hstack_binaries.result == 'skipped') && (needs.publish_server_runtime.result == 'success' || needs.publish_server_runtime.result == 'skipped') && (needs.publish_ui_web.result == 'success' || needs.publish_ui_web.result == 'skipped') }}
+    needs: [plan, bind_server_source, publish_cli_binaries, publish_hstack_binaries, publish_server_runtime, publish_ui_web]
     uses: ./.github/workflows/release-verify.yml
     with:
       channel: ${{ inputs.environment == 'production' && 'production' || 'preview' }}
       candidate_source_sha: ${{ needs.bind_server_source.outputs.authorized_sha }}
       candidate_cli_version: ${{ needs.publish_cli_binaries.outputs.version }}
+      candidate_stack_version: ${{ needs.publish_hstack_binaries.outputs.version }}
       candidate_server_version: ${{ needs.publish_server_runtime.outputs.version }}
       candidate_ui_web_version: ${{ needs.publish_ui_web.outputs.version }}
-      run_installers_smoke: ${{ inputs.checks_profile == 'full' && needs.publish_cli_binaries.outputs.version != '' }}
-      run_binary_smoke: ${{ inputs.checks_profile == 'full' }}
-      run_cli_update_continuity: ${{ inputs.checks_profile == 'full' && needs.publish_cli_binaries.outputs.version != '' }}
-      run_daemon_continuity: ${{ inputs.checks_profile == 'full' && needs.publish_cli_binaries.outputs.version != '' }}
-      run_session_continuity: ${{ inputs.checks_profile == 'full' }}
+      verify_stack_release: ${{ needs.publish_hstack_binaries.result == 'success' }}
+      run_installers_smoke: false
+      run_binary_smoke: ${{ inputs.checks_profile == 'full' && (inputs.validation_profile == 'integrated' || inputs.validation_profile == 'stable') }}
+      run_cli_update_continuity: ${{ inputs.checks_profile == 'full' && inputs.validation_profile == 'stable' && needs.publish_cli_binaries.outputs.version != '' }}
+      run_daemon_continuity: ${{ inputs.checks_profile == 'full' && inputs.validation_profile == 'stable' && needs.publish_cli_binaries.outputs.version != '' }}
+      run_session_continuity: ${{ inputs.checks_profile == 'full' && (inputs.validation_profile == 'integrated' || inputs.validation_profile == 'stable') }}
 
   promote_server_runtime:
     if: ${{ always() && needs.verify_release_candidates.result == 'success' && needs.publish_server_runtime.result == 'success' && needs.publish_server_runtime.outputs.version != '' }}
@@ -777,6 +802,20 @@ jobs:
       allow_stable: ${{ inputs.environment == 'production' }}
       release_message: ${{ inputs.release_message }}
       retry_version: ${{ needs.publish_cli_binaries.outputs.version }}
+
+  promote_hstack_binaries:
+    if: ${{ always() && needs.verify_release_candidates.result == 'success' && needs.publish_hstack_binaries.result == 'success' && needs.publish_hstack_binaries.outputs.version != '' }}
+    needs: [verify_release_candidates, publish_hstack_binaries]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-hstack-binaries.yml
+    secrets: inherit
+    with:
+      channel: ${{ inputs.environment == 'production' && 'stable' || 'preview' }}
+      source_ref: ${{ inputs.environment == 'production' && 'main' || 'preview' }}
+      allow_stable: ${{ inputs.environment == 'production' }}
+      release_message: ${{ inputs.release_message }}
+      retry_version: ${{ needs.publish_hstack_binaries.outputs.version }}
 
   publish_docker:
     if: always() && needs.plan.result == 'success' && needs.verify_release_candidates.result == 'success' && inputs.dry_run != true && (inputs.force_deploy == true || needs.plan.outputs.changed_ui == 'true' || needs.plan.outputs.changed_server == 'true' || needs.plan.outputs.changed_cli == 'true' || needs.plan.outputs.changed_shared == 'true') && (needs.bump_versions_dev.result == 'success' || needs.bump_versions_dev.result == 'skipped') && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success')) && (needs.promote_cli_binaries.result == 'success' || needs.promote_cli_binaries.result == 'skipped') && (needs.promote_server_runtime.result == 'success' || needs.promote_server_runtime.result == 'skipped') && (needs.promote_ui_web.result == 'success' || needs.promote_ui_web.result == 'skipped')
@@ -827,7 +866,7 @@ jobs:
       run_build: true
 
   publish_npm:
-    if: always() && needs.plan.result == 'success' && needs.verify_release_candidates.result == 'success' && inputs.dry_run != true && (needs.plan.outputs.publish_cli == 'true' || needs.plan.outputs.publish_server == 'true') && (needs.bump_versions_dev.result == 'success' || needs.bump_versions_dev.result == 'skipped') && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success'))
+    if: always() && needs.plan.result == 'success' && needs.verify_release_candidates.result == 'success' && inputs.dry_run != true && (needs.plan.outputs.publish_cli == 'true' || needs.plan.outputs.publish_stack == 'true' || needs.plan.outputs.publish_server == 'true') && (needs.bump_versions_dev.result == 'success' || needs.bump_versions_dev.result == 'skipped') && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success'))
     needs: [plan, bump_versions_dev, promote_preview, promote_main, verify_release_candidates]
     permissions:
       contents: write
@@ -836,6 +875,7 @@ jobs:
     secrets: inherit
     with:
       publish_cli: ${{ needs.plan.outputs.publish_cli == 'true' }}
+      publish_stack: ${{ needs.plan.outputs.publish_stack == 'true' }}
       publish_server: ${{ needs.plan.outputs.publish_server == 'true' }}
       channel: ${{ inputs.environment }}
       source_ref: ${{ inputs.environment == 'production' && 'main' || 'preview' }}
@@ -845,11 +885,19 @@ jobs:
 
   release_verify:
     name: Release Verification (release-verify.yml)
-    needs: [plan, promote_cli_binaries, promote_server_runtime, promote_ui_web, publish_docker, publish_npm]
-    if: ${{ always() && inputs.checks_profile == 'full' && inputs.dry_run != true && needs.plan.result == 'success' && (needs.promote_cli_binaries.result == 'success' || needs.promote_cli_binaries.result == 'skipped') && (needs.promote_server_runtime.result == 'success' || needs.promote_server_runtime.result == 'skipped') && (needs.promote_ui_web.result == 'success' || needs.promote_ui_web.result == 'skipped') && (needs.publish_docker.result == 'success' || needs.publish_docker.result == 'skipped') && (needs.publish_npm.result == 'success' || needs.publish_npm.result == 'skipped') }}
+    needs: [plan, bind_server_source, publish_hstack_binaries, promote_hstack_binaries, promote_cli_binaries, promote_server_runtime, promote_ui_web, publish_docker, publish_npm]
+    if: ${{ always() && inputs.checks_profile == 'full' && inputs.dry_run != true && needs.plan.result == 'success' && (needs.promote_hstack_binaries.result == 'success' || needs.promote_hstack_binaries.result == 'skipped') && (needs.promote_cli_binaries.result == 'success' || needs.promote_cli_binaries.result == 'skipped') && (needs.promote_server_runtime.result == 'success' || needs.promote_server_runtime.result == 'skipped') && (needs.promote_ui_web.result == 'success' || needs.promote_ui_web.result == 'skipped') && (needs.publish_docker.result == 'success' || needs.publish_docker.result == 'skipped') && (needs.publish_npm.result == 'success' || needs.publish_npm.result == 'skipped') }}
     uses: ./.github/workflows/release-verify.yml
     with:
       channel: ${{ inputs.environment == 'production' && 'production' || 'preview' }}
+      candidate_source_sha: ${{ needs.bind_server_source.outputs.authorized_sha }}
+      candidate_stack_version: ${{ needs.publish_hstack_binaries.outputs.version }}
+      verify_stack_release: ${{ needs.promote_hstack_binaries.result == 'success' }}
+      run_installers_smoke: false
+      run_binary_smoke: false
+      run_cli_update_continuity: false
+      run_daemon_continuity: false
+      run_session_continuity: false
 
   sync_dev:
     if: ${{ inputs.dry_run != true && inputs.environment == 'production' && (vars.RELEASE_SYNC_DEV_FROM_MAIN == '' || vars.RELEASE_SYNC_DEV_FROM_MAIN == 'true') && (needs.release_verify.result == 'success' || needs.release_verify.result == 'skipped') }}

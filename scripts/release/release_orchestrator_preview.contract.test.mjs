@@ -78,22 +78,69 @@ test('release workflow publishes server runner only when explicitly requested', 
     /publish_server_runtime:[\s\S]*?allow_stable:\s*\$\{\{\s*inputs\.environment == 'production'\s*\}\}/,
     'server runtime publishing should explicitly unlock stable publishing only for production releases',
   );
-  assert.doesNotMatch(
-    raw,
-    /publish_npm:[\s\S]*?publish_stack:/,
-    'release workflow should not treat stack publishing as a required npm signoff input',
-  );
-  assert.doesNotMatch(
-    raw,
-    /publish_npm:[\s\S]*?needs\.plan\.outputs\.publish_stack/,
-    'release workflow should not depend on stack publication when deciding npm publish eligibility',
-  );
-
   assert.match(
     raw,
     /deploy_server:[\s\S]*?publish_runtime_release:\s*false/,
     'SaaS server deploy must not implicitly publish rolling server runtime releases',
   );
+});
+
+test('release workflow accepts the public validation profile and routes its automatic suites', async () => {
+  const raw = await loadWorkflow('release.yml');
+  const workflow = parse(raw);
+  const validationProfile = workflow?.on?.workflow_dispatch?.inputs?.validation_profile;
+  const candidateVerifier = workflow?.jobs?.verify_release_candidates;
+
+  assert.equal(validationProfile?.type, 'choice');
+  assert.equal(validationProfile?.default, 'integrated');
+  assert.deepEqual(validationProfile?.options, ['integrated', 'stable']);
+
+  assert.match(String(candidateVerifier?.with?.run_binary_smoke ?? ''), /inputs\.validation_profile == 'integrated'.*inputs\.validation_profile == 'stable'/);
+  assert.match(String(candidateVerifier?.with?.run_session_continuity ?? ''), /inputs\.validation_profile == 'integrated'.*inputs\.validation_profile == 'stable'/);
+  assert.match(String(candidateVerifier?.with?.run_cli_update_continuity ?? ''), /inputs\.validation_profile == 'stable'/);
+  assert.match(String(candidateVerifier?.with?.run_daemon_continuity ?? ''), /inputs\.validation_profile == 'stable'/);
+  assert.equal(candidateVerifier?.with?.run_installers_smoke, false);
+});
+
+test('release workflow fans a versioned Stack target through immutable publication, staged promotion, npm, and exact signoff', async () => {
+  const [raw, verifierRaw] = await Promise.all([
+    loadWorkflow('release.yml'),
+    loadWorkflow('release-verify.yml'),
+  ]);
+  const jobs = parse(raw)?.jobs ?? {};
+  const publisher = jobs.publish_hstack_binaries;
+  const candidateVerifier = jobs.verify_release_candidates;
+  const promoter = jobs.promote_hstack_binaries;
+  const npm = jobs.publish_npm;
+  const finalVerifier = jobs.release_verify;
+  const verifierInputs = parse(verifierRaw)?.on?.workflow_call?.inputs ?? {};
+
+  assert.equal(publisher?.uses, './.github/workflows/publish-hstack-binaries.yml');
+  assert.match(String(publisher?.if ?? ''), /needs\.plan\.outputs\.publish_stack == 'true'/);
+  assert.match(String(publisher?.with?.authorized_sha ?? ''), /needs\.bind_server_source\.outputs\.authorized_sha/);
+  assert.equal(publisher?.with?.publish_rolling, false);
+
+  assert.ok(candidateVerifier?.needs?.includes('publish_hstack_binaries'));
+  assert.match(String(candidateVerifier?.with?.candidate_stack_version ?? ''), /needs\.publish_hstack_binaries\.outputs\.version/);
+  assert.match(String(candidateVerifier?.with?.verify_stack_release ?? ''), /needs\.publish_hstack_binaries\.result == 'success'/);
+
+  assert.equal(promoter?.uses, './.github/workflows/publish-hstack-binaries.yml');
+  assert.ok(promoter?.needs?.includes('verify_release_candidates'));
+  assert.ok(promoter?.needs?.includes('publish_hstack_binaries'));
+  assert.match(String(promoter?.if ?? ''), /needs\.verify_release_candidates\.result == 'success'/);
+  assert.match(String(promoter?.with?.retry_version ?? ''), /needs\.publish_hstack_binaries\.outputs\.version/);
+
+  assert.match(String(npm?.if ?? ''), /needs\.plan\.outputs\.publish_stack == 'true'/);
+  assert.match(String(npm?.with?.publish_stack ?? ''), /needs\.plan\.outputs\.publish_stack == 'true'/);
+
+  assert.ok(finalVerifier?.needs?.includes('publish_hstack_binaries'));
+  assert.ok(finalVerifier?.needs?.includes('promote_hstack_binaries'));
+  assert.match(String(finalVerifier?.if ?? ''), /needs\.promote_hstack_binaries\.result == 'success'/);
+  assert.match(String(finalVerifier?.with?.candidate_stack_version ?? ''), /needs\.publish_hstack_binaries\.outputs\.version/);
+  assert.match(String(finalVerifier?.with?.verify_stack_release ?? ''), /needs\.promote_hstack_binaries\.result == 'success'/);
+  assert.equal(verifierInputs?.verify_stack_release?.type, 'boolean');
+  assert.match(verifierRaw, /VERIFY_STACK_RELEASE:\s*\$\{\{ inputs\.verify_stack_release \}\}/);
+  assert.match(verifierRaw, /if \[ "\$VERIFY_STACK_RELEASE" = "true" \]/);
 });
 
 test('release workflow can publish self-host UI web bundle via a dedicated workflow', async () => {

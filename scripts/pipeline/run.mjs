@@ -39,6 +39,10 @@ import {
   normalizePublicReleaseChannel,
 } from './release/lib/public-release-rings.mjs';
 import { resolveRemoteReleasePlanningRefs } from './release/lib/release-planning-remote-refs.mjs';
+import {
+  resolveHostedChecksProfileForReleaseProfile,
+  resolvePublicReleaseValidationProfile,
+} from './release/public-release-contract.mjs';
 import { releaseTargets } from './release/component-registry.mjs';
 
 function fail(message) {
@@ -1069,6 +1073,7 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             subcommand !== 'release-bump-plan' &&
             subcommand !== 'release-bump-versions-dev' &&
             subcommand !== 'release-sync-installers' &&
+          subcommand !== 'release-contract' &&
           subcommand !== 'release-validate' &&
           subcommand !== 'release-bump-version' &&
           subcommand !== 'release-build-cli-binaries' &&
@@ -1920,6 +1925,19 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
         String(values['versioned-server-changed'] ?? ''),
       ],
     });
+    return;
+  }
+
+  if (subcommand === 'release-contract') {
+    if (rest.length > 0) fail('release-contract does not accept arguments');
+    const scriptPath = path.join(repoRoot, 'scripts', 'pipeline', 'release', 'public-release-contract.mjs');
+    const output = execFileSync(process.execPath, [scriptPath], {
+      cwd: repoRoot,
+      env: process.env,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    process.stdout.write(output);
     return;
   }
 
@@ -4221,6 +4239,7 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               'ui-expo-action': { type: 'string', default: 'none' },
               'desktop-mode': { type: 'string', default: 'none' },
               'release-message': { type: 'string', default: '' },
+              'release-profile': { type: 'string', default: '' },
               'allow-dirty': { type: 'string', default: 'false' },
               'dry-run': { type: 'boolean', default: false },
             },
@@ -4293,6 +4312,19 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           }
 
           const releaseMessage = String(values['release-message'] ?? '').trim();
+          const requestedReleaseProfileId = String(values['release-profile'] ?? '').trim();
+          const releaseProfileId = requestedReleaseProfileId || (deployEnvironment === 'production' ? 'stable' : 'integrated');
+          const releaseProfile = resolvePublicReleaseValidationProfile(releaseProfileId);
+          if (!releaseProfile) {
+            fail(`--release-profile must be one of: integrated, stable, deep (got: ${releaseProfileId})`);
+          }
+          if (!releaseProfile.normalRelease) {
+            fail(`--release-profile ${releaseProfile.id} is manual comprehensive certification and cannot dispatch a normal release.`);
+          }
+          const hostedChecksProfile = resolveHostedChecksProfileForReleaseProfile(releaseProfile.id);
+          if (!hostedChecksProfile) {
+            fail(`--release-profile ${releaseProfile.id} has no hosted checks mapping.`);
+          }
 
           if (!dryRun) {
             if (deployEnvironment === 'dev') {
@@ -4312,7 +4344,8 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               'workflow', 'run', 'release.yml',
               '--repo', repository,
               '--ref', 'dev',
-              '-f', 'checks_profile=full',
+              '-f', `checks_profile=${hostedChecksProfile}`,
+              '-f', `validation_profile=${releaseProfile.id}`,
               '-f', 'dry_run=false',
               '-f', `environment=${deployEnvironment}`,
               '-f', `deploy_targets=${deployTargets.join(',')}`,
@@ -4330,11 +4363,12 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               stdio: ['ignore', 'pipe', 'pipe'],
               timeout: 30_000,
             });
-            console.log(`[pipeline] dispatched hosted release workflow for ${deployEnvironment}; privileged release writes run only in GitHub Actions.`);
+            console.log(`[pipeline] dispatched hosted release workflow for ${deployEnvironment} (release profile=${releaseProfile.id}); privileged release writes run only in GitHub Actions.`);
             return;
           }
 
           console.log(`[pipeline] release: environment=${deployEnvironment} confirm=${action}`);
+          console.log(`[pipeline] release profile=${releaseProfile.id} hosted checks profile=${hostedChecksProfile}`);
 
           const releaseRing = resolveReleaseEnvironmentChannel(deployEnvironment);
 
@@ -4545,6 +4579,8 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             console.log(`- bump: ${bumpPreset}`);
             console.log(`- confirm: ${action}`);
             console.log(`- release_message: ${releaseMessage}`);
+            console.log(`- release_profile: ${releaseProfile.id}`);
+            console.log(`- checks_profile: ${hostedChecksProfile}`);
             return;
           }
 

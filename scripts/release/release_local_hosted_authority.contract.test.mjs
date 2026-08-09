@@ -49,6 +49,7 @@ exit 0
         '--deploy-environment', 'preview',
         '--deploy-targets', 'server,server_runner',
         '--bump', 'patch',
+        '--release-profile', 'stable',
         '--allow-dirty', 'true',
       ],
       {
@@ -66,6 +67,9 @@ exit 0
     assert.match(commands, /gh workflow run release\.yml/);
     assert.match(commands, /-f environment=preview/);
     assert.match(commands, /-f deploy_targets=server,server_runner/);
+    assert.match(commands, /-f checks_profile=full/);
+    assert.match(commands, /-f validation_profile=stable/);
+    assert.match(output, /release profile=stable/);
     assert.match(output, /hosted release workflow/i);
     assert.doesNotMatch(commands, /publish-server-runtime|promote-deploy-branch|release upload/);
   } finally {

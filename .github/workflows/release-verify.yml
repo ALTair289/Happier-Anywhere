@@ -82,6 +82,10 @@ on:
         required: false
         default: ''
         type: string
+      verify_stack_release:
+        required: false
+        default: false
+        type: boolean
       run_installers_smoke:
         required: false
         default: true
@@ -161,8 +165,13 @@ jobs:
           CANDIDATE_STACK_VERSION: ${{ inputs.candidate_stack_version }}
           CANDIDATE_SERVER_VERSION: ${{ inputs.candidate_server_version }}
           CANDIDATE_UI_WEB_VERSION: ${{ inputs.candidate_ui_web_version }}
+          VERIFY_STACK_RELEASE: ${{ inputs.verify_stack_release }}
         run: |
           set -euo pipefail
+          if [ "$VERIFY_STACK_RELEASE" = "true" ] && [ -z "$CANDIDATE_STACK_VERSION" ]; then
+            echo "Stack release verification requires candidate_stack_version." >&2
+            exit 1
+          fi
           node "$GITHUB_WORKSPACE/.release-control/scripts/pipeline/release/verify-release-candidate-identity.mjs" \
             --repository "$REPOSITORY" \
             --channel "$RELEASE_CHANNEL" \
