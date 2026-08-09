@@ -249,6 +249,71 @@ test('ensureWorkspacePackagesBuiltForComponent builds internal dist-based worksp
   assert.equal(finalOccurrences, 4, 'source/config/package changes rebuild, while test-only source does not');
 });
 
+test('ensureWorkspacePackagesBuiltForComponent builds unscoped internal workspace dependencies', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'hs-ensure-unscoped-workspace-built-'));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await writeJson(join(root, 'package.json'), {
+    private: true,
+    workspaces: {
+      packages: ['apps/*', 'packages/*'],
+    },
+  });
+  for (const appName of ['ui', 'cli']) {
+    const appDir = join(root, 'apps', appName);
+    await mkdir(appDir, { recursive: true });
+    await writeJson(join(appDir, 'package.json'), {
+      name: `@happier-dev/${appName}`,
+      private: true,
+    });
+  }
+
+  const serverDir = join(root, 'apps', 'server');
+  await mkdir(serverDir, { recursive: true });
+  await writeJson(join(serverDir, 'package.json'), {
+    name: '@happier-dev/server',
+    private: true,
+    dependencies: {
+      'privacy-kit': '^0.0.25',
+    },
+  });
+
+  const privacyKitDir = join(root, 'packages', 'privacy-kit');
+  await mkdir(privacyKitDir, { recursive: true });
+  await writeJson(join(privacyKitDir, 'package.json'), {
+    name: 'privacy-kit',
+    version: '0.0.25',
+    type: 'module',
+    main: './dist/index.js',
+    exports: './dist/index.js',
+    scripts: { build: 'fixture-build' },
+  });
+  await mkdir(join(privacyKitDir, 'src'), { recursive: true });
+  await writeFile(join(privacyKitDir, 'src', 'index.ts'), 'export const privacy = true;\n', 'utf-8');
+
+  const buildCalls = [];
+  const result = await ensureWorkspacePackagesBuiltForComponent(serverDir, {
+    quiet: true,
+    env: process.env,
+    workspaceBuildBoundary: {
+      prepareEnv: async (_pkgDir, env) => ({ ...env }),
+      runPackageBuild: async (pkgDir, { env }) => {
+        buildCalls.push(pkgDir);
+        const outputDir = env.HAPPIER_WORKSPACE_DIST_OUTPUT_DIR;
+        assert.ok(outputDir);
+        await mkdir(outputDir, { recursive: true });
+        await writeFile(join(outputDir, 'index.js'), 'export const privacy = true;\n', 'utf-8');
+      },
+    },
+  });
+
+  assert.deepEqual(buildCalls, [privacyKitDir]);
+  assert.deepEqual(result.built, ['privacy-kit']);
+  assert.equal(await readFile(join(privacyKitDir, 'dist', 'index.js'), 'utf-8'), 'export const privacy = true;\n');
+});
+
 test('ensureWorkspacePackagesBuiltForComponent walks the full internal workspace dependency closure before building', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'hs-ensure-workspaces-built-closure-'));
   t.after(async () => {

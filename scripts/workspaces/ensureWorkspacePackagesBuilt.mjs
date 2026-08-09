@@ -1,17 +1,33 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { lstat, readFile, readdir } from 'node:fs/promises';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 
 import { buildIntoTempThenReplace } from '../../apps/stack/scripts/utils/fs/atomic_dir_swap.mjs';
 import { withCliDistBuildLock } from '../../apps/stack/scripts/utils/proc/cliDistBuildLock.mjs';
 import { collectInternalWorkspaceDependencyNames } from '../../apps/stack/scripts/utils/proc/workspace_dependencies.mjs';
+import { collectWorkspacePackageJsonPaths } from '../../apps/stack/scripts/utils/proc/workspace_package_manifests.mjs';
 import { coerceHappyMonorepoRootFromPath } from '../../apps/stack/scripts/utils/paths/paths.mjs';
 import { resolveYarnCommandInvocation } from './execYarnCommand.mjs';
 import { resolveWorkspacePackageBuildLockPath } from './workspacePackageBuildLock.mjs';
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, 'utf-8'));
+}
+
+async function collectWorkspacePackageDirsByName(monorepoRoot) {
+  const packageDirsByName = new Map();
+  for (const packageJsonPath of await collectWorkspacePackageJsonPaths(monorepoRoot)) {
+    let pkgJson;
+    try {
+      pkgJson = await readJson(packageJsonPath);
+    } catch {
+      continue;
+    }
+    const packageName = typeof pkgJson?.name === 'string' ? pkgJson.name.trim() : '';
+    if (packageName) packageDirsByName.set(packageName, dirname(packageJsonPath));
+  }
+  return packageDirsByName;
 }
 
 function collectExpectedExportFileTargets(exportsField) {
@@ -365,10 +381,14 @@ async function ensureWorkspacePackageNamesBuilt(monorepoRoot, packageNames, {
   quiet,
   env,
   visitedNames = [],
+  packageDirsByName: packageDirsByNameIn = null,
   workspaceBuildBoundary,
 }) {
   const built = [];
   const visited = new Set(visitedNames);
+  const packageDirsByName = packageDirsByNameIn
+    ?? await collectWorkspacePackageDirsByName(monorepoRoot);
+  const workspacePackageNames = new Set(packageDirsByName.keys());
   const buildWorkspaceClosure = async (pkgDir) => {
     const pkgJsonPath = join(pkgDir, 'package.json');
     if (!existsSync(pkgJsonPath)) return;
@@ -378,11 +398,11 @@ async function ensureWorkspacePackageNamesBuilt(monorepoRoot, packageNames, {
     if (pkgName && visited.has(pkgName)) return;
     if (pkgName) visited.add(pkgName);
 
-    for (const depName of collectInternalWorkspaceDependencyNames(pkgJson, pkgName)) {
-      const depId = String(depName).split('/')[1] ?? '';
-      if (!depId) continue;
-      const depDir = join(monorepoRoot, 'packages', depId);
-      if (!existsSync(join(depDir, 'package.json'))) continue;
+    for (const depName of collectInternalWorkspaceDependencyNames(pkgJson, pkgName, {
+      workspacePackageNames,
+    })) {
+      const depDir = packageDirsByName.get(depName);
+      if (!depDir) continue;
       await buildWorkspaceClosure(depDir);
     }
 
@@ -395,10 +415,8 @@ async function ensureWorkspacePackageNamesBuilt(monorepoRoot, packageNames, {
   };
 
   for (const packageName of packageNames ?? []) {
-    const packageId = String(packageName).split('/')[1] ?? '';
-    if (!packageId) continue;
-    const pkgDir = join(monorepoRoot, 'packages', packageId);
-    if (!existsSync(join(pkgDir, 'package.json'))) continue;
+    const pkgDir = packageDirsByName.get(String(packageName));
+    if (!pkgDir) continue;
     await buildWorkspaceClosure(pkgDir);
   }
 
@@ -436,11 +454,15 @@ export async function ensureWorkspacePackagesBuiltForComponent(componentDir, {
 
   const componentPkg = await readJson(componentPkgPath);
   const componentName = typeof componentPkg?.name === 'string' ? componentPkg.name : '';
-  const packageNames = collectInternalWorkspaceDependencyNames(componentPkg, componentName);
+  const packageDirsByName = await collectWorkspacePackageDirsByName(monorepoRoot);
+  const packageNames = collectInternalWorkspaceDependencyNames(componentPkg, componentName, {
+    workspacePackageNames: packageDirsByName.keys(),
+  });
   const built = await ensureWorkspacePackageNamesBuilt(monorepoRoot, packageNames, {
     quiet,
     env,
     visitedNames: [componentName].filter(Boolean),
+    packageDirsByName,
     workspaceBuildBoundary,
   });
   return { ok: true, built, skipped: [] };
