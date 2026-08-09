@@ -41,7 +41,6 @@ import {
 import { resolveRemoteReleasePlanningRefs } from './release/lib/release-planning-remote-refs.mjs';
 import { MATERIALIZED_RELEASE_BUMP_ADMISSION_MESSAGE } from './release/resolve-bump-plan.mjs';
 import {
-  resolveHostedChecksProfileForReleaseProfile,
   resolvePublicReleaseValidationProfile,
 } from './release/public-release-contract.mjs';
 import { releaseTargets } from './release/component-registry.mjs';
@@ -4258,6 +4257,7 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               'desktop-mode': { type: 'string', default: 'none' },
               'release-profile': { type: 'string', default: '' },
               'source-sha': { type: 'string', default: '' },
+              'workflow-control-sha': { type: 'string', default: '' },
               'allow-dirty': { type: 'string', default: 'false' },
               'dry-run': { type: 'boolean', default: false },
               json: { type: 'boolean', default: false },
@@ -4314,6 +4314,7 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           const forceDeploy = parseBoolString(values['force-deploy'], '--force-deploy');
           const bumpPreset = String(values.bump ?? '').trim() || 'none';
           const authorizedPromotionSourceSha = String(values['source-sha'] ?? '').trim().toLowerCase();
+          const workflowControlSha = String(values['workflow-control-sha'] ?? '').trim();
           const promotionSourceBranch = resolveReleasePromotionSourceBranch(action);
 
           const uiExpoAction = String(values['ui-expo-action'] ?? '').trim() || 'none';
@@ -4330,6 +4331,9 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           }
           if (authorizedPromotionSourceSha && !FULL_GIT_SHA.test(authorizedPromotionSourceSha)) {
             fail('--source-sha must be a full 40-character commit SHA when provided.');
+          }
+          if (workflowControlSha && !FULL_GIT_SHA.test(workflowControlSha)) {
+            fail('--workflow-control-sha must be a full 40-character lowercase Git commit SHA.');
           }
           if (!dryRun && !authorizedPromotionSourceSha) {
             fail('--source-sha is required for a hosted release dispatch.');
@@ -4350,11 +4354,6 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           if (!releaseProfile.normalRelease) {
             fail(`--release-profile ${releaseProfile.id} is manual comprehensive certification and cannot dispatch a normal release.`);
           }
-          const hostedChecksProfile = resolveHostedChecksProfileForReleaseProfile(releaseProfile.id);
-          if (!hostedChecksProfile) {
-            fail(`--release-profile ${releaseProfile.id} has no hosted checks mapping.`);
-          }
-
           const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
           if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
           assertNoStagedChanges({ cwd: repoRoot, allowDirty, dryRun });
@@ -4383,7 +4382,6 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               'workflow', 'run', 'release.yml',
               '--repo', repository,
               '--ref', 'dev',
-              '-f', `checks_profile=${hostedChecksProfile}`,
               '-f', `validation_profile=${releaseProfile.id}`,
               '-f', 'dry_run=false',
               '-f', `environment=${deployEnvironment}`,
@@ -4393,6 +4391,7 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               '-f', `desktop_mode=${desktopMode}`,
               '-f', `bump=${bumpPreset}`,
               '-f', `authorized_promotion_source_sha=${authorizedPromotionSource.sha}`,
+              ...(workflowControlSha ? ['-f', `workflow_control_sha=${workflowControlSha}`] : []),
               '-f', `confirm=${action}`,
             ];
             execFileSync('gh', workflowArgs, {
@@ -4425,7 +4424,7 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           }
 
           console.log(`[pipeline] release: environment=${deployEnvironment} confirm=${action}`);
-          console.log(`[pipeline] release profile=${releaseProfile.id} hosted checks profile=${hostedChecksProfile}`);
+          console.log(`[pipeline] release profile=${releaseProfile.id}`);
 
           const releaseRing = resolveReleaseEnvironmentChannel(deployEnvironment);
 
@@ -4633,7 +4632,6 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             console.log(`- bump: ${bumpPreset}`);
             console.log(`- confirm: ${action}`);
             console.log(`- release_profile: ${releaseProfile.id}`);
-            console.log(`- checks_profile: ${hostedChecksProfile}`);
             return;
           }
 

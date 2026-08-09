@@ -15,7 +15,7 @@ export const COMMAND_HELP_ORCHESTRATORS = {
   release: {
     summary: 'Orchestrate a full dev/preview/production release (recommended entrypoint).',
     usage:
-      'node scripts/pipeline/run.mjs release --confirm <action> --repository <owner/repo> [--deploy-environment dev|preview|production] [--deploy-targets <csv>] [--source-sha <sha>] [--dry-run] [--json]',
+      'node scripts/pipeline/run.mjs release --confirm <action> --repository <owner/repo> [--deploy-environment dev|preview|production] [--deploy-targets <csv>] [--source-sha <sha>] [--workflow-control-sha <sha>] [--dry-run] [--json]',
     options: [
       '--confirm <action>                Required safety confirmation.',
       '--repository <owner/repo>         Required; e.g. happier-dev/happier.',
@@ -27,6 +27,7 @@ export const COMMAND_HELP_ORCHESTRATORS = {
       '--desktop-mode <mode>             none|build_only|build_and_publish (default: none).',
       '--release-profile <profile>       integrated|stable|deep (default: integrated for dev/preview, stable for production; deep is manual-only).',
       '--source-sha <sha>                Required for non-dry hosted dispatch; exact source commit to promote.',
+      '--workflow-control-sha <sha>      Optional dispatcher-observed dev SHA for hosted workflow-control fencing.',
       '--allow-dirty <bool>              true|false (default: false).',
       '--dry-run                          Print release facts and hosted inputs without mutating.',
       '--json                            With --dry-run, emit the exact promotion-source dispatch plan as JSON.',
@@ -35,6 +36,7 @@ export const COMMAND_HELP_ORCHESTRATORS = {
       'Dry-run computes non-mutating release facts and prints hosted dispatch inputs without predicting hosted jobs.',
       'Non-dry preview/production releases dispatch release.yml; privileged release writes remain hosted.',
       'Final release dispatches require an exact source SHA and never create a post-admission version-bump commit.',
+      'When supplied by hmaint, workflow-control SHA must equal the hosted workflow SHA before actor authorization or mutation.',
       'The local dispatcher resolves integrated/stable through the public release contract; deep is never a normal release dispatch.',
       'Refuses to publish from a dirty worktree by default (use --allow-dirty true when intentional).',
       'Use --dry-run first; once green, re-run without --dry-run to dispatch.',

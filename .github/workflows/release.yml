@@ -3,15 +3,6 @@ name: RELEASE — Publish (preview + production)
 on:
   workflow_dispatch:
     inputs:
-      checks_profile:
-        description: "Checks — Profile (full=all standard checks, fast=skip slow builds/smoke, none=skip all checks)"
-        required: true
-        type: choice
-        default: full
-        options:
-          - full
-          - fast
-          - none
       validation_profile:
         description: "Release validation contract (stable adds update and daemon continuity)"
         required: true
@@ -77,6 +68,11 @@ on:
         required: false
         default: ""
         type: string
+      workflow_control_sha:
+        description: "Safety — dispatcher-observed dev SHA; leave empty only for direct manual dispatch"
+        required: false
+        default: ""
+        type: string
       confirm:
         description: "Confirm — Choose the exact action for this environment"
         required: true
@@ -117,6 +113,23 @@ jobs:
             "$WORKFLOW_REPOSITORY/.github/workflows/release.yml@refs/heads/main") ;;
             *) echo "Untrusted release workflow ref: $WORKFLOW_REF" >&2; exit 1 ;;
           esac
+      - name: Verify workflow-control SHA
+        env:
+          WORKFLOW_CONTROL_SHA: ${{ inputs.workflow_control_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$WORKFLOW_CONTROL_SHA" ]; then
+            exit 0
+          fi
+          if ! [[ "$WORKFLOW_CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "workflow_control_sha must be exactly 40 lowercase hexadecimal characters." >&2
+            exit 1
+          fi
+          if [ "$WORKFLOW_SHA" != "$WORKFLOW_CONTROL_SHA" ]; then
+            echo "Workflow-control SHA drift: loaded '$WORKFLOW_SHA', expected '$WORKFLOW_CONTROL_SHA'." >&2
+            exit 1
+          fi
 
   release_actor_guard:
     name: Release actor guard
@@ -138,10 +151,48 @@ jobs:
           app_id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private_key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
 
+  resolve_validation_profile:
+    name: Resolve public release validation profile
+    needs: [release_actor_guard]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      profile: ${{ steps.resolve.outputs.profile }}
+      checks_profile: ${{ steps.resolve.outputs.checks_profile }}
+    steps:
+      - name: Checkout trusted release control
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - name: Resolve profile
+        id: resolve
+        env:
+          VALIDATION_PROFILE: ${{ inputs.validation_profile }}
+        run: |
+          set -euo pipefail
+          node scripts/pipeline/run.mjs release-contract | node --input-type=module -e '
+            let raw = "";
+            for await (const chunk of process.stdin) raw += chunk;
+            const contract = JSON.parse(raw);
+            const profile = contract.validationProfiles?.find((candidate) => candidate.id === process.env.VALIDATION_PROFILE);
+            if (
+              contract.kind !== "happier.public-release-contract.v1" ||
+              contract.schemaVersion !== 1 ||
+              !profile?.normalRelease ||
+              (profile?.checksProfile !== "fast" && profile?.checksProfile !== "full")
+            ) {
+              throw new Error(`Unsupported normal release validation profile: ${process.env.VALIDATION_PROFILE}`);
+            }
+            process.stdout.write(`profile=${profile.id}\nchecks_profile=${profile.checksProfile}\n`);
+          ' >> "$GITHUB_OUTPUT"
+
   ci:
     name: CI Checks (tests.yml)
-    needs: [release_actor_guard]
-    if: inputs.checks_profile != 'none'
+    needs: [resolve_validation_profile]
+    if: ${{ needs.resolve_validation_profile.result == 'success' }}
     uses: ./.github/workflows/tests.yml
     with:
       run_ui: true
@@ -150,9 +201,9 @@ jobs:
       run_stack: true
       run_typecheck: true
       run_cli_daemon_e2e: true
-      run_e2e_core: ${{ inputs.checks_profile == 'full' }}
-      run_e2e_core_slow: ${{ inputs.checks_profile == 'full' }}
-      run_server_db_contract: ${{ inputs.checks_profile == 'full' }}
+      run_e2e_core: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
+      run_e2e_core_slow: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
+      run_server_db_contract: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
       run_providers: false
       providers_preset: all
       providers_tier: smoke
@@ -167,8 +218,8 @@ jobs:
 
   plan:
     name: Release Plan (inputs + changes + bump/publish decisions)
-    needs: [release_actor_guard, ci]
-    if: ${{ always() && needs.release_actor_guard.result == 'success' && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
+    needs: [release_actor_guard, resolve_validation_profile, ci]
+    if: ${{ always() && needs.release_actor_guard.result == 'success' && needs.resolve_validation_profile.result == 'success' && needs.ci.result == 'success' }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -189,7 +240,8 @@ jobs:
       publish_cli: ${{ steps.bump_plan.outputs.publish_cli }}
       publish_stack: ${{ steps.bump_plan.outputs.publish_stack }}
       publish_server: ${{ steps.bump_plan.outputs.publish_server }}
-      validation_profile: ${{ steps.validation_profile.outputs.profile }}
+      validation_profile: ${{ needs.resolve_validation_profile.outputs.profile }}
+      checks_profile: ${{ needs.resolve_validation_profile.outputs.checks_profile }}
     steps:
       - name: Validate inputs
         env:
@@ -298,23 +350,6 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve bounded public release validation profile
-        id: validation_profile
-        env:
-          REQUESTED_PROFILE: ${{ inputs.validation_profile }}
-        run: |
-          set -euo pipefail
-          node scripts/pipeline/run.mjs release-contract > "$RUNNER_TEMP/release-contract.json"
-          node --input-type=module <<'NODE'
-          import { appendFileSync, readFileSync } from 'node:fs';
-          const contract = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/release-contract.json', 'utf8'));
-          const profile = contract.validationProfiles?.find((candidate) => candidate.id === process.env.REQUESTED_PROFILE);
-          if (!profile?.normalRelease) {
-            throw new Error(`Unsupported normal release validation profile: ${process.env.REQUESTED_PROFILE}`);
-          }
-          appendFileSync(process.env.GITHUB_OUTPUT, `profile=${profile.id}\n`);
-          NODE
-
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -323,13 +358,13 @@ jobs:
           cache-dependency-path: yarn.lock
 
       - name: Enable Corepack (Yarn)
-        if: ${{ inputs.checks_profile == 'full' }}
+        if: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
         run: |
           corepack enable
           corepack prepare yarn@1.22.22 --activate
 
       - name: Install dependencies
-        if: ${{ inputs.checks_profile == 'full' }}
+        if: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
         env:
           YARN_PRODUCTION: "false"
           npm_config_production: "false"
@@ -338,21 +373,20 @@ jobs:
           args: --frozen-lockfile --ignore-engines
 
       - name: Test + typecheck
-        if: inputs.checks_profile != 'none'
         run: |
           set -euo pipefail
           echo "CI checks ran in job 'ci' (tests/typecheck/e2e/providers/stress as configured)."
 
       - name: Build website
-        if: ${{ inputs.checks_profile == 'full' }}
+        if: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
         run: yarn website:build
 
       - name: Build docs
-        if: ${{ inputs.checks_profile == 'full' }}
+        if: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
         run: yarn docs:build
 
       - name: CLI smoke test (Linux)
-        if: ${{ inputs.checks_profile == 'full' }}
+        if: ${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}
         run: node scripts/pipeline/run.mjs smoke-cli
 
       - name: Compute changed components (main..authorized source)
@@ -397,7 +431,7 @@ jobs:
           CHANGED_STACK: ${{ steps.plan.outputs.changed_stack }}
           CHANGED_UI: ${{ steps.plan.outputs.changed_ui }}
           CHANGED_WEBSITE: ${{ steps.plan.outputs.changed_website }}
-          CHECKS_PROFILE: ${{ inputs.checks_profile }}
+          CHECKS_PROFILE: ${{ needs.resolve_validation_profile.outputs.checks_profile }}
           CLI_BASELINE_TAG: ${{ steps.versioned_plan.outputs.cli_baseline_tag || 'none' }}
           COMMIT_COUNT: ${{ steps.plan.outputs.commit_count }}
           CONFIRM: ${{ inputs.confirm }}
@@ -891,7 +925,7 @@ jobs:
   release_verify:
     name: Release Verification (release-verify.yml)
     needs: [plan, bind_server_source, publish_hstack_binaries, promote_hstack_binaries, promote_cli_binaries, promote_server_runtime, promote_ui_web, publish_docker, publish_npm]
-    if: ${{ always() && inputs.checks_profile == 'full' && inputs.dry_run != true && needs.plan.result == 'success' && (needs.promote_hstack_binaries.result == 'success' || needs.promote_hstack_binaries.result == 'skipped') && (needs.promote_cli_binaries.result == 'success' || needs.promote_cli_binaries.result == 'skipped') && (needs.promote_server_runtime.result == 'success' || needs.promote_server_runtime.result == 'skipped') && (needs.promote_ui_web.result == 'success' || needs.promote_ui_web.result == 'skipped') && (needs.publish_docker.result == 'success' || needs.publish_docker.result == 'skipped') && (needs.publish_npm.result == 'success' || needs.publish_npm.result == 'skipped') }}
+    if: ${{ always() && needs.plan.outputs.checks_profile == 'full' && inputs.dry_run != true && needs.plan.result == 'success' && (needs.promote_hstack_binaries.result == 'success' || needs.promote_hstack_binaries.result == 'skipped') && (needs.promote_cli_binaries.result == 'success' || needs.promote_cli_binaries.result == 'skipped') && (needs.promote_server_runtime.result == 'success' || needs.promote_server_runtime.result == 'skipped') && (needs.promote_ui_web.result == 'success' || needs.promote_ui_web.result == 'skipped') && (needs.publish_docker.result == 'success' || needs.publish_docker.result == 'skipped') && (needs.publish_npm.result == 'success' || needs.publish_npm.result == 'skipped') }}
     uses: ./.github/workflows/release-verify.yml
     with:
       channel: ${{ inputs.environment == 'production' && 'production' || 'preview' }}
@@ -964,7 +998,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   sync_dev:
-    if: ${{ inputs.dry_run != true && inputs.environment == 'production' && (vars.RELEASE_SYNC_DEV_FROM_MAIN == '' || vars.RELEASE_SYNC_DEV_FROM_MAIN == 'true') && (needs.release_verify.result == 'success' || needs.release_verify.result == 'skipped') }}
+    if: ${{ inputs.dry_run != true && inputs.environment == 'production' && (vars.RELEASE_SYNC_DEV_FROM_MAIN == '' || vars.RELEASE_SYNC_DEV_FROM_MAIN == 'true') && needs.release_verify.result == 'success' }}
     needs: [plan, promote_main, bind_server_source, release_verify]
     uses: ./.github/workflows/promote-branch.yml
     secrets: inherit

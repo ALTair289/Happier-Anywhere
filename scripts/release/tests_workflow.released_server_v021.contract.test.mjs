@@ -38,10 +38,11 @@ test('the registered Ubuntu slow gate prepares and runs both exact server-v0.2.1
   );
 });
 
-test('full hosted releases require the registered exact server-v0.2.1 gate', () => {
+test('stable/full releases require the registered exact server-v0.2.1 gate while integrated stays lightweight', () => {
   const releaseWorkflow = workflow('release.yml');
+  assert.ok(releaseWorkflow.jobs.ci.needs.includes('resolve_validation_profile'));
   assert.equal(
     releaseWorkflow.jobs.ci.with.run_e2e_core_slow,
-    "${{ inputs.checks_profile == 'full' }}",
+    "${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}",
   );
 });

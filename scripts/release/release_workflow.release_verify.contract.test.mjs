@@ -49,13 +49,13 @@ test('release workflow verifies immutable candidates before promoting preview or
   );
   assert.match(
     raw,
-    /plan:[\s\S]*?needs:\s*\[release_actor_guard, ci\][\s\S]*?\(needs\.ci\.result == 'success' \|\| needs\.ci\.result == 'skipped'\)/,
-    'release.yml planning should only wait for the pre-release CI gate before continuing',
+    /plan:[\s\S]*?needs:\s*\[release_actor_guard, resolve_validation_profile, ci\][\s\S]*?needs\.resolve_validation_profile\.result == 'success'[\s\S]*?needs\.ci\.result == 'success'/,
+    'release.yml planning must fail closed unless the canonical profile and its pre-release CI gate succeed',
   );
   assert.match(
     raw,
-    /sync_dev:[\s\S]*?\(needs\.release_verify\.result == 'success' \|\| needs\.release_verify\.result == 'skipped'\)[\s\S]*?needs:\s*\[plan, promote_main, bind_server_source, release_verify\]/,
-    'release.yml should gate the final production sync on release verification succeeding or being skipped',
+    /sync_dev:[\s\S]*?needs\.release_verify\.result == 'success'[\s\S]*?needs:\s*\[plan, promote_main, bind_server_source, release_verify\]/,
+    'release.yml must gate the final production sync on release verification succeeding',
   );
 });
 
@@ -65,15 +65,21 @@ test('release workflow derives validation, notes, and terminal status from the e
 
   assert.match(
     raw,
-    /plan:[\s\S]*?validation_profile:\s*\$\{\{\s*steps\.validation_profile\.outputs\.profile\s*\}\}[\s\S]*?Resolve bounded public release validation profile[\s\S]*?release-contract/,
-    'the public contract must own the normal profile selected for candidate verification',
+    /resolve_validation_profile:[\s\S]*?profile:\s*\$\{\{\s*steps\.resolve\.outputs\.profile\s*\}\}[\s\S]*?checks_profile:\s*\$\{\{\s*steps\.resolve\.outputs\.checks_profile\s*\}\}[\s\S]*?VALIDATION_PROFILE:\s*\$\{\{\s*inputs\.validation_profile\s*\}\}[\s\S]*?profile\?\.normalRelease[\s\S]*?profile\?\.checksProfile/,
+    'the trusted public-contract resolver must own normal profile and checks-profile admission before CI',
   );
+  assert.match(
+    raw,
+    /plan:[\s\S]*?validation_profile:\s*\$\{\{\s*needs\.resolve_validation_profile\.outputs\.profile\s*\}\}[\s\S]*?checks_profile:\s*\$\{\{\s*needs\.resolve_validation_profile\.outputs\.checks_profile\s*\}\}/,
+  );
+  assert.doesNotMatch(raw, /inputs\.checks_profile/, 'no release path may accept a caller-selected checks profile');
   assert.match(
     raw,
     /bind_server_source:[\s\S]*?release_notes_github_markdown:[\s\S]*?release_notes_expo_message:[\s\S]*?path:\s*release-source[\s\S]*?ref:\s*\$\{\{\s*steps\.source\.outputs\.authorized_sha\s*\}\}[\s\S]*?project-release-notes\.mjs/,
     'one exact candidate checkout must project both publication note variants',
   );
   assert.match(candidateVerification, /validation_profile:\s*\$\{\{\s*needs\.plan\.outputs\.validation_profile\s*\}\}/);
+  assert.match(raw, /release_verify:[\s\S]*?needs\.plan\.outputs\.checks_profile == 'full'/);
   assert.doesNotMatch(candidateVerification, /run_(?:installers_smoke|binary_smoke|cli_update_continuity|daemon_continuity|session_continuity):/);
 
   for (const job of [

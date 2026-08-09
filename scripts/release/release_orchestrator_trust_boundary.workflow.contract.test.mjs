@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,34 +74,35 @@ test('deploy planning keeps release source inert and executes trusted workflow c
   assertNoExpressionInterpolationInShell(job, 'deploy_plan');
 });
 
-test('version bumping runs trusted control against nested dev data with ephemeral credentials', async () => {
+test('release workflow fences dispatcher-observed workflow control before any release actor or mutation', async () => {
   const workflow = await loadReleaseWorkflow();
-  const job = workflow.jobs.bump_versions_dev;
-  const appTokenIndex = job.steps.findIndex((step) => step?.uses === 'actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547');
-  const checkouts = checkoutSteps(job);
+  const input = workflow.on.workflow_dispatch.inputs.workflow_control_sha;
+  const guard = workflow.jobs.trusted_ref_guard;
+  const step = guard.steps.find((candidate) => candidate?.name === 'Verify workflow-control SHA');
+  const sha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
-  assert.equal(job.permissions?.contents, 'read');
-  assert.equal(checkouts.length, 2);
-  assertTrustedControlCheckout(checkouts[0]);
-  assert.ok(job.steps.indexOf(checkouts[0]) < appTokenIndex, 'trusted control checkout must precede App-token creation');
-  assert.ok(appTokenIndex < job.steps.indexOf(checkouts[1]), 'candidate checkout must follow App-token creation');
-  assert.equal(checkouts[1]?.with?.repository, '${{ github.repository }}');
-  assert.equal(checkouts[1]?.with?.ref, 'dev');
-  assert.equal(checkouts[1]?.with?.path, 'release-source');
-  assert.equal(checkouts[1]?.with?.['persist-credentials'], false);
+  assert.equal(workflow.jobs.bump_versions_dev, undefined, 'final exact-SHA promotion must not retain a post-admission bump mutation job');
+  assert.equal(input?.required, false);
+  assert.equal(input?.default, '');
+  assert.equal(input?.type, 'string');
+  assert.equal(step?.env?.WORKFLOW_CONTROL_SHA, '${{ inputs.workflow_control_sha }}');
+  assert.equal(step?.env?.WORKFLOW_SHA, '${{ github.sha }}');
+  assert.ok(workflow.jobs.release_actor_guard.needs.includes('trusted_ref_guard'));
 
-  const install = job.steps.find((step) => step?.uses === './.github/actions/install-yarn-dependencies');
-  assert.ok(install, 'dependency installation must use the trusted root action');
-  assert.equal(install?.['working-directory'], undefined);
-
-  const bump = job.steps.find((step) => step?.id === 'bumps');
-  assert.equal(bump?.['working-directory'], 'release-source');
-  assert.match(bump?.run ?? '', /node \.\.\/scripts\/pipeline\/release\/bump-versions-dev\.mjs/);
-  assert.doesNotMatch(bump?.run ?? '', /node scripts\//, 'candidate source must not supply executable bump code');
-  for (const key of ['BUMP_APP', 'BUMP_SERVER', 'BUMP_WEBSITE', 'BUMP_CLI', 'BUMP_STACK']) {
-    assert.match(String(bump?.env?.[key] ?? ''), /^\$\{\{ needs\.plan\.outputs\./);
-  }
-  assertNoExpressionInterpolationInShell(job, 'bump_versions_dev');
+  const runGuard = (workflowControlSha, workflowSha) => spawnSync('bash', ['-c', step.run], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      WORKFLOW_CONTROL_SHA: workflowControlSha,
+      WORKFLOW_SHA: workflowSha,
+    },
+  });
+  assert.equal(runGuard('', sha).status, 0, 'supported direct manual dispatch keeps the optional input empty');
+  assert.equal(runGuard(sha, sha).status, 0);
+  const drifted = runGuard(sha, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+  assert.notEqual(drifted.status, 0);
+  assert.match(drifted.stderr, /workflow-control SHA drift/i);
+  assert.notEqual(runGuard('not-a-sha', sha).status, 0);
 });
 
 test('trusted bump orchestrator never executes a candidate-local bump script', async () => {

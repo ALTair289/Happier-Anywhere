@@ -191,3 +191,16 @@ test('pipeline help covers every supported subcommand', async () => {
     assert.match(out, new RegExp(`\\b${cmd.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\b`));
   }
 });
+
+test('release help exposes the workflow-control fence without reviving manual release notes', () => {
+  const help = execFileSync(process.execPath, [pipelineCli, 'help', 'release'], {
+    cwd: repoRoot,
+    env: { ...process.env },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 30_000,
+  });
+
+  assert.match(help, /--workflow-control-sha/);
+  assert.doesNotMatch(help, /--release-message/);
+});

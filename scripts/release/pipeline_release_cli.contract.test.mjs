@@ -49,7 +49,8 @@ test('pipeline CLI release dry-run reports hosted deploy inputs without predicti
     );
 
     assert.match(out, /\[pipeline\] release: environment=preview confirm=release dev to preview/);
-    assert.match(out, /release profile=integrated hosted checks profile=fast/);
+    assert.match(out, /release profile=integrated/);
+    assert.doesNotMatch(out, /hosted checks profile|checks_profile/, 'the hosted workflow resolves checks from the public profile');
     assert.match(out, /\[pipeline\] dry-run: hosted dispatch inputs/);
     assert.match(out, /- deploy_targets: server/);
     assert.match(out, /- force_deploy: true/);
@@ -97,7 +98,8 @@ test('pipeline CLI release dry-run defaults production to the stable release pro
     );
 
     assert.match(out, /\[pipeline\] release: environment=production confirm=release preview to main/);
-    assert.match(out, /release profile=stable hosted checks profile=full/);
+    assert.match(out, /release profile=stable/);
+    assert.doesNotMatch(out, /hosted checks profile|checks_profile/, 'the local dispatcher must not become a second checks-profile owner');
   } finally {
     stub.cleanup();
   }
