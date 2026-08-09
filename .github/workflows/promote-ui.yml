@@ -115,11 +115,6 @@ on:
         required: false
         default: ""
         type: string
-      android_release_status:
-        description: "Deploy (Android store) — EAS submit releaseStatus"
-        required: false
-        default: draft
-        type: string
       desktop_mode:
         description: "Deploy (Desktop) — Desktop bundle mode"
         required: false
@@ -337,6 +332,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      release_notes_github_markdown: ${{ steps.release_notes.outputs.github_markdown }}
+      release_notes_expo_message: ${{ steps.release_notes.outputs.expo_message }}
     env:
       EAS_CLI_VERSION: 18.0.1
     steps:
@@ -376,6 +374,33 @@ jobs:
         run: yarn --cwd apps/ui tsx sources/scripts/parseReleaseNotes.ts
       - name: Build release notes assets
         run: node scripts/pipeline/release/release-notes/build-release-notes-assets.mjs --out-dir "$RUNNER_TEMP/release-notes-assets"
+      - name: Project approved release notes from exact candidate
+        id: release_notes
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/ui/package.json').version")"
+          VERSION="$version" node scripts/pipeline/release/release-notes/project-release-notes.mjs \
+            --version "$version" \
+            --changelog "$GITHUB_WORKSPACE/apps/ui/CHANGELOG.md" | \
+            VERSION="$version" node --input-type=module -e '
+              import { appendFileSync } from "node:fs";
+              import { createHash } from "node:crypto";
+              let raw = "";
+              for await (const chunk of process.stdin) raw += chunk;
+              const bundle = JSON.parse(raw);
+              if (bundle.kind !== "happier.release-notes.projection.v1" || bundle.schemaVersion !== 1 || bundle.version !== process.env.VERSION) {
+                throw new Error("Invalid exact-candidate release-notes projection");
+              }
+              const values = {
+                github_markdown: bundle.projections?.github?.markdown,
+                expo_message: bundle.projections?.expo?.message,
+              };
+              for (const [key, value] of Object.entries(values)) {
+                if (typeof value !== "string") throw new Error(`Missing ${key} projection`);
+                const delimiter = `RELEASE_NOTES_${createHash("sha256").update(`${key}:${value}`).digest("hex")}`;
+                appendFileSync(process.env.GITHUB_OUTPUT, `${key}<<${delimiter}\\n${value}\\n${delimiter}\\n`);
+              }
+            '
       - name: Upload release notes assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -424,6 +449,8 @@ jobs:
       source_ref: ${{ needs.resolve_source.outputs.source_ref }}
       release_sha: ${{ needs.apply_bump.outputs.release_sha }}
       desktop_mode: ${{ inputs.desktop_mode }}
+      release_notes_github_markdown: ${{ needs.validate_candidate.outputs.release_notes_github_markdown }}
+      release_notes_expo_message: ${{ needs.validate_candidate.outputs.release_notes_expo_message }}
     steps:
       - name: Checkout trusted promotion control
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -478,7 +505,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: happier-assets
           permission-contents: write
-      - name: Publish release notes assets
+      - name: Publish release notes assets with trusted control
         env:
           GH_TOKEN: ${{ steps.release_notes_assets_token.outputs.token }}
           GH_REPO: happier-dev/happier-assets
@@ -581,7 +608,7 @@ jobs:
       profile: auto
       action: ${{ inputs.expo_action == 'native_submit' && 'build_and_submit' || 'build_only' }}
       publish_apk_release: "false"
-      android_release_status: ${{ inputs.android_release_status || 'draft' }}
+      release_message: ${{ needs.promote.outputs.release_notes_expo_message }}
 
   mobile_apk_release:
     name: Mobile APK release (local runner)
@@ -598,7 +625,7 @@ jobs:
       profile: ${{ inputs.environment == 'production' && 'production-apk' || 'preview-apk' }}
       action: build_only
       publish_apk_release: "true"
-      android_release_status: ${{ inputs.android_release_status || 'draft' }}
+      release_message: ${{ needs.promote.outputs.release_notes_github_markdown }}
 
   desktop:
     name: Desktop bundles (Tauri)
@@ -612,3 +639,4 @@ jobs:
       environment: ${{ inputs.environment }}
       source_ref: ${{ needs.promote.outputs.release_sha }}
       publish_release: ${{ inputs.desktop_mode == 'build_and_publish' }}
+      release_message: ${{ needs.promote.outputs.release_notes_github_markdown }}

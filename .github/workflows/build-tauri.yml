@@ -26,6 +26,16 @@ on:
         required: true
         default: true
         type: boolean
+      retry_version:
+        description: "Production version — Reproject an existing immutable release without rebuilding"
+        required: false
+        default: ""
+        type: string
+      release_message:
+        description: "Release notes — Exact approved candidate changelog projection"
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       environment:
@@ -38,6 +48,14 @@ on:
         required: false
         default: true
         type: boolean
+      retry_version:
+        required: false
+        default: ""
+        type: string
+      release_message:
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -104,11 +122,13 @@ jobs:
       source_sha: ${{ steps.resolve.outputs.source_sha }}
       ui_version: ${{ steps.resolve.outputs.ui_version }}
       build_version: ${{ steps.resolve.outputs.build_version }}
+      retry_version: ${{ steps.resolve.outputs.retry_version }}
+      release_notes_github_markdown: ${{ inputs.release_message != '' && inputs.release_message || steps.resolve.outputs.release_notes_github_markdown }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ inputs.retry_version != '' && format('ui-desktop-v{0}', inputs.retry_version) || inputs.source_ref }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -117,6 +137,7 @@ jobs:
         env:
           SOURCE_REF: ${{ inputs.source_ref }}
           RELEASE_ENVIRONMENT: ${{ inputs.environment }}
+          RETRY_VERSION: ${{ inputs.retry_version }}
         run: |
           set -euo pipefail
           source_sha="$(git rev-parse HEAD)"
@@ -130,6 +151,34 @@ jobs:
             echo "apps/ui/package.json version must be a canonical semantic version" >&2
             exit 1
           fi
+          retry_version="${RETRY_VERSION:-}"
+          if [ -n "${retry_version}" ]; then
+            if [ "${RELEASE_ENVIRONMENT}" != "production" ]; then
+              echo "retry_version is supported only for production desktop releases" >&2
+              exit 1
+            fi
+            if [[ ! "${retry_version}" =~ ${canonical_semver_re} ]]; then
+              echo "retry_version must be a canonical semantic version" >&2
+              exit 1
+            fi
+          fi
+          VERSION="${ui_version}" node scripts/pipeline/release/release-notes/project-release-notes.mjs \
+            --version "${ui_version}" \
+            --changelog "$GITHUB_WORKSPACE/apps/ui/CHANGELOG.md" | \
+            VERSION="${ui_version}" node --input-type=module -e '
+              import { appendFileSync } from "node:fs";
+              import { createHash } from "node:crypto";
+              let raw = "";
+              for await (const chunk of process.stdin) raw += chunk;
+              const bundle = JSON.parse(raw);
+              if (bundle.kind !== "happier.release-notes.projection.v1" || bundle.schemaVersion !== 1 || bundle.version !== process.env.VERSION) {
+                throw new Error("Invalid exact-candidate release-notes projection");
+              }
+              const value = bundle.projections?.github?.markdown;
+              if (typeof value !== "string") throw new Error("Missing github_markdown projection");
+              const delimiter = `RELEASE_NOTES_${createHash("sha256").update(`github_markdown:${value}`).digest("hex")}`;
+              appendFileSync(process.env.GITHUB_OUTPUT, `release_notes_github_markdown<<${delimiter}\\n${value}\\n${delimiter}\\n`);
+            '
           case "${RELEASE_ENVIRONMENT}" in
             preview|dev)
               if [[ ! "${GITHUB_RUN_NUMBER}" =~ ^[0-9]+$ ]]; then
@@ -156,9 +205,11 @@ jobs:
           printf '%s=%s\n' source_sha "${source_sha}" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' ui_version "${ui_version}" >> "$GITHUB_OUTPUT"
           printf '%s=%s\n' build_version "${build_version}" >> "$GITHUB_OUTPUT"
+          printf '%s=%s\n' retry_version "${retry_version}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build desktop candidate (${{ matrix.platform_key }})
+    if: ${{ needs.resolve_source.outputs.retry_version == '' }}
     runs-on: ${{ matrix.os }}
     needs: [resolve_source]
     permissions:
@@ -609,6 +660,7 @@ jobs:
     needs: [resolve_source, finalize]
     permissions:
       contents: read
+    environment: release-shared
     outputs:
       ui_version: ${{ needs.resolve_source.outputs.ui_version }}
       target_sha: ${{ needs.resolve_source.outputs.source_sha }}
@@ -626,6 +678,9 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Install minisign
+        uses: ./.github/actions/bootstrap-minisign
+
       - name: Download updater assets artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -638,6 +693,8 @@ jobs:
           REPO: ${{ env.UI_REPO }}
           ENVIRONMENT: ${{ inputs.environment }}
           UI_VERSION: ${{ needs.resolve_source.outputs.ui_version }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSPHRASE: ${{ secrets.MINISIGN_PASSPHRASE }}
         run: |
           set -euo pipefail
           node scripts/pipeline/run.mjs tauri-prepare-assets \
@@ -656,7 +713,7 @@ jobs:
 
   publish_preview:
     if: ${{ inputs.publish_release == true && inputs.environment == 'preview' }}
-    needs: [prepare_assets]
+    needs: [prepare_assets, resolve_source]
     uses: ./.github/workflows/publish-ui-release.yml
     secrets: inherit
     with:
@@ -666,7 +723,7 @@ jobs:
       prerelease: true
       rolling_tag: true
       generate_notes: false
-      notes: Rolling preview build.
+      notes: ${{ needs.resolve_source.outputs.release_notes_github_markdown }}
       assets_artifact: ui-desktop-assets
       assets_artifact_path: dist/ui-desktop-assets
       assets_dir: dist/ui-desktop-assets/ui-desktop-preview
@@ -674,7 +731,7 @@ jobs:
 
   publish_dev:
     if: ${{ inputs.publish_release == true && inputs.environment == 'dev' }}
-    needs: [prepare_assets]
+    needs: [prepare_assets, resolve_source]
     uses: ./.github/workflows/publish-ui-release.yml
     secrets: inherit
     with:
@@ -684,15 +741,15 @@ jobs:
       prerelease: true
       rolling_tag: true
       generate_notes: false
-      notes: Rolling dev build.
+      notes: ${{ needs.resolve_source.outputs.release_notes_github_markdown }}
       assets_artifact: ui-desktop-assets
       assets_artifact_path: dist/ui-desktop-assets
       assets_dir: dist/ui-desktop-assets/ui-desktop-dev
       clobber: true
 
   publish_stable_release:
-    if: ${{ inputs.publish_release == true && inputs.environment == 'production' }}
-    needs: [prepare_assets]
+    if: ${{ inputs.publish_release == true && inputs.environment == 'production' && needs.resolve_source.outputs.retry_version == '' }}
+    needs: [prepare_assets, resolve_source]
     uses: ./.github/workflows/publish-ui-release.yml
     secrets: inherit
     with:
@@ -701,26 +758,64 @@ jobs:
       target_sha: ${{ needs.prepare_assets.outputs.target_sha }}
       prerelease: false
       rolling_tag: false
-      generate_notes: true
+      generate_notes: false
+      notes: ${{ needs.resolve_source.outputs.release_notes_github_markdown }}
       assets_artifact: ui-desktop-assets
       assets_artifact_path: dist/ui-desktop-assets
       assets_dir: dist/ui-desktop-assets/ui-desktop-v
-      clobber: true
+      clobber: false
 
-  publish_stable_feed:
-    if: ${{ inputs.publish_release == true && inputs.environment == 'production' }}
-    needs: [prepare_assets, publish_stable_release]
-    uses: ./.github/workflows/publish-ui-release.yml
-    secrets: inherit
-    with:
-      tag: ui-desktop-stable
-      title: Happier UI Desktop Stable
-      target_sha: ${{ needs.prepare_assets.outputs.target_sha }}
-      prerelease: false
-      rolling_tag: true
-      generate_notes: false
-      notes: Stable update feed.
-      assets_artifact: ui-desktop-assets
-      assets_artifact_path: dist/ui-desktop-assets
-      assets_dir: dist/ui-desktop-assets/ui-desktop-stable
-      clobber: true
+  promote_stable_feed:
+    name: Promote immutable desktop release to stable feed
+    if: ${{ always() && inputs.publish_release == true && inputs.environment == 'production' && (needs.publish_stable_release.result == 'success' || needs.resolve_source.outputs.retry_version != '') }}
+    needs: [resolve_source, publish_stable_release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    environment: release-shared
+    steps:
+      - name: Checkout trusted workflow control bytes
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install minisign
+        uses: ./.github/actions/bootstrap-minisign
+
+      - name: Create scoped release token
+        id: app_token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Promote verified immutable desktop release
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_TAG: ui-desktop-v${{ needs.resolve_source.outputs.retry_version != '' && needs.resolve_source.outputs.retry_version || needs.resolve_source.outputs.ui_version }}
+          TARGET_SHA: ${{ needs.resolve_source.outputs.source_sha }}
+          RELEASE_MESSAGE: ${{ needs.resolve_source.outputs.release_notes_github_markdown }}
+        run: |
+          set -euo pipefail
+          node scripts/pipeline/github/promote-rolling-release.mjs \
+            --source-tag "$SOURCE_TAG" \
+            --rolling-tag ui-desktop-stable \
+            --title "Happier UI Desktop Stable" \
+            --target-sha "$TARGET_SHA" \
+            --prerelease false \
+            --notes "$RELEASE_MESSAGE" \
+            --release-message "$RELEASE_MESSAGE" \
+            --repo "$GH_REPO" \
+            --public-key scripts/release/installers/happier-release.pub

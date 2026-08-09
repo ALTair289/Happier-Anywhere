@@ -2542,6 +2542,7 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
       options: {
         environment: { type: 'string' },
         'apk-path': { type: 'string' },
+        'retry-version': { type: 'string', default: '' },
         'target-sha': { type: 'string' },
         'release-message': { type: 'string', default: '' },
         'dry-run': { type: 'boolean', default: false },
@@ -2559,8 +2560,9 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
     const environmentArg = formatMobileReleaseEnvironment(environment);
 
     const apkPath = String(values['apk-path'] ?? '').trim();
+    const retryVersion = String(values['retry-version'] ?? '').trim();
     const targetSha = String(values['target-sha'] ?? '').trim();
-    if (!apkPath) fail('--apk-path is required');
+    if (!apkPath && !retryVersion) fail('--apk-path is required unless --retry-version is supplied');
     if (!targetSha) fail('--target-sha is required');
 
     const releaseMessage = String(values['release-message'] ?? '').trim();
@@ -2599,8 +2601,8 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
       args: [
         '--environment',
         environmentArg,
-        '--apk-path',
-        apkPath,
+        ...(apkPath ? ['--apk-path', apkPath] : []),
+        ...(retryVersion ? ['--retry-version', retryVersion] : []),
         '--target-sha',
         targetSha,
         ...(releaseMessage ? ['--release-message', releaseMessage] : []),

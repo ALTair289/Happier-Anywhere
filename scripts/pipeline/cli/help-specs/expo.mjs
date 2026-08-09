@@ -220,10 +220,11 @@ export const COMMAND_HELP_EXPO = {
   'expo-publish-apk-release': {
     summary: 'Publish an Android APK asset as a GitHub Release (used for dev/preview distribution).',
     usage:
-      `node scripts/pipeline/run.mjs expo-publish-apk-release --environment <${MOBILE_RELEASE_ENVIRONMENT_CHOICES}> --apk-path <path> --target-sha <sha> [--release-message <text>]`,
+      `node scripts/pipeline/run.mjs expo-publish-apk-release --environment <${MOBILE_RELEASE_ENVIRONMENT_CHOICES}> (--apk-path <path> | --retry-version <version>) --target-sha <sha> [--release-message <text>]`,
     options: [
       `--environment <${MOBILE_RELEASE_ENVIRONMENT_CHOICES}>  Required.`,
-      '--apk-path <path>                 Required.',
+      '--apk-path <path>                 Required unless --retry-version is supplied.',
+      '--retry-version <version>         Reproject an existing immutable production APK release.',
       '--target-sha <sha>                Required.',
       '--release-message <text>          Optional.',
       '--dry-run',
