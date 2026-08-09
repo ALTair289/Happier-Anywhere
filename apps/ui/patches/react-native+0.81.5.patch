@@ -95,3 +95,46 @@ index 577bebe..2cf6d02 100644
  
    // A zero-length selection range can cause the caret position to change on iOS,
    // and we have already updated the caret position, so we can safely ignore caret changing in this place.
+diff --git a/node_modules/react-native/third-party-podspecs/RCT-Folly.podspec b/node_modules/react-native/third-party-podspecs/RCT-Folly.podspec
+index 8852179..8464945 100644
+--- a/node_modules/react-native/third-party-podspecs/RCT-Folly.podspec
++++ b/node_modules/react-native/third-party-podspecs/RCT-Folly.podspec
+@@ -25,7 +25,9 @@ Pod::Spec.new do |spec|
+   spec.dependency "DoubleConversion"
+   spec.dependency "glog"
+   spec.dependency "fast_float", "8.0.0"
+-  spec.dependency "fmt", "11.0.2"
++  # HAPPIER PATCH(fmt-clang21-consteval): kept in lockstep with third-party-podspecs/fmt.podspec,
++  # which is bumped to 11.2.0 so fmt compiles under Apple clang 21 (Xcode 26.6).
++  spec.dependency "fmt", "11.2.0"
+   spec.compiler_flags = '-Wno-documentation -faligned-new'
+   spec.source_files = 'folly/String.cpp',
+                       'folly/Conv.cpp',
+diff --git a/node_modules/react-native/third-party-podspecs/fmt.podspec b/node_modules/react-native/third-party-podspecs/fmt.podspec
+index 2f38990..4a91ec4 100644
+--- a/node_modules/react-native/third-party-podspecs/fmt.podspec
++++ b/node_modules/react-native/third-party-podspecs/fmt.podspec
+@@ -8,14 +8,21 @@ fmt_git_url = fmt_config[:git]
+ 
+ Pod::Spec.new do |spec|
+   spec.name = "fmt"
+-  spec.version = "11.0.2"
++  # HAPPIER PATCH(fmt-clang21-consteval): React Native 0.81 pins fmt 11.0.2, whose FMT_STRING
++  # compile-time format strings in format-inl.h fail to compile under Apple clang 21 (Xcode 26.6)
++  # with "call to consteval function ... is not a constant expression": the two string-literal
++  # evaluations behind a compile string no longer share object identity during constant evaluation,
++  # so the `it - begin()` pointer subtraction in basic_format_parse_context::advance_to is not a
++  # constant expression. Upstream fixed this in the 11.1/11.2 line; 11.2.0 compiles clean.
++  # Revert once React Native ships fmt >= 11.2.0 itself.
++  spec.version = "11.2.0"
+   spec.license = { :type => "MIT" }
+   spec.homepage = "https://github.com/fmtlib/fmt"
+   spec.summary = "{fmt} is an open-source formatting library for C++. It can be used as a safe and fast alternative to (s)printf and iostreams."
+   spec.authors = "The fmt contributors"
+   spec.source = {
+     :git => fmt_git_url,
+-    :tag => "11.0.2"
++    :tag => "11.2.0"
+   }
+   spec.pod_target_xcconfig = {
+     "CLANG_CXX_LANGUAGE_STANDARD" => rct_cxx_language_standard(),
