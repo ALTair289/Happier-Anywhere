@@ -1,19 +1,39 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const store = new Map<string, string>();
+// One map per MMKV instance id: the warm cache lives in its own encrypted instance, separate from
+// the shared `default` one that older builds wrote it into in plaintext.
+const storesById = new Map<string, Map<string, string>>();
+
+function storeFor(id: string): Map<string, string> {
+    const existing = storesById.get(id);
+    if (existing) return existing;
+    const created = new Map<string, string>();
+    storesById.set(id, created);
+    return created;
+}
 
 vi.mock('react-native-mmkv', () => {
     class MMKV {
+        private readonly values: Map<string, string>;
+
+        constructor(config?: { id?: string }) {
+            this.values = storeFor(config?.id ?? 'mmkv.default');
+        }
+
         getString(key: string) {
-            return store.get(key);
+            return this.values.get(key);
         }
 
         set(key: string, value: string) {
-            store.set(key, value);
+            this.values.set(key, value);
         }
 
         delete(key: string) {
-            store.delete(key);
+            this.values.delete(key);
+        }
+
+        getAllKeys() {
+            return [...this.values.keys()];
         }
     }
 
@@ -24,15 +44,27 @@ import {
     clearWarmCacheAccountScope,
     loadMachineDisplayWarmCacheEntries,
     loadSessionListWarmCacheEntries,
+    loadSessionOrganizationWarmCacheSnapshot,
     resolveWarmCacheAccountScope,
     saveMachineDisplayWarmCacheEntries,
     saveSessionListWarmCacheEntries,
+    saveSessionOrganizationWarmCacheSnapshot,
     setWarmCacheAccountScope,
+    WARM_CACHE_STORAGE_ID,
 } from './warmCachePersistence';
+import { prepareWarmCacheEncryptionKey } from './warmCacheEncryptionKey';
+
+function store(): Map<string, string> {
+    return storeFor(WARM_CACHE_STORAGE_ID);
+}
 
 describe('warmCachePersistence', () => {
-    beforeEach(() => {
-        store.clear();
+    beforeEach(async () => {
+        // Nothing reads or writes the cache until its at-rest key resolves, exactly as on a device.
+        await prepareWarmCacheEncryptionKey();
+        // Clear the maps in place: the module caches its MMKV instance, which holds a reference to
+        // the map it was constructed with, so dropping the registry entry would not reach it.
+        for (const instanceStore of storesById.values()) instanceStore.clear();
         clearWarmCacheAccountScope();
     });
 
@@ -76,11 +108,11 @@ describe('warmCachePersistence', () => {
     });
 
     it('drops invalid payloads safely', () => {
-        store.set(
+        store().set(
             'session-list-warm-cache-v1:server-a:account-a',
             JSON.stringify({ s1: { sessionId: 's1', metadataVersion: 'bad' } }),
         );
-        store.set(
+        store().set(
             'machine-display-warm-cache-v1:server-a:account-a',
             JSON.stringify({ m1: { machineId: 'm1', metadataVersion: 'bad' } }),
         );
@@ -90,7 +122,7 @@ describe('warmCachePersistence', () => {
     });
 
     it('rejects an unsafe activity revision instead of corrupting ordering', () => {
-        store.set(
+        store().set(
             'session-list-warm-cache-v1:server-a:account-a',
             JSON.stringify({
                 s1: {
@@ -127,7 +159,7 @@ describe('warmCachePersistence', () => {
             path: '',
         };
 
-        store.set(
+        store().set(
             'session-list-warm-cache-v1:server-a:account-a',
             JSON.stringify({
                 s1: {
@@ -146,7 +178,7 @@ describe('warmCachePersistence', () => {
             runtimeActivityRevision: 17,
         }));
 
-        store.set(
+        store().set(
             'session-list-warm-cache-v1:server-a:account-a',
             JSON.stringify({
                 s1: {
@@ -181,6 +213,58 @@ describe('warmCachePersistence', () => {
                 displayName: 'Work Mac',
             }),
         });
+    });
+
+    it('roundtrips the session organization snapshot by server and account scope', () => {
+        const snapshot = {
+            schemaVersion: 1 as const,
+            version: 7,
+            pins: [{ sessionId: 's1', sortKey: '00000001', pinnedAt: 10 }],
+            folders: [{
+                folderId: 'f1',
+                folderKey: 'folder-key-1',
+                parentFolderId: null,
+                parentFolderKey: null,
+                sortKey: '00000001',
+                display: { t: 'plain' as const, v: { name: 'Work' } },
+                archivedAt: null,
+                createdAt: 1,
+                updatedAt: 2,
+            }],
+            folderAssignments: [{ sessionId: 's1', folderId: 'f1' }],
+            tags: [],
+            tagAssignments: [],
+            orderEntries: [
+                { scopeKind: 'group' as const, scopeKey: 'pinned', itemKind: 'session' as const, itemKey: 's1', sortKey: '00000001' },
+            ],
+            labels: [],
+        };
+
+        saveSessionOrganizationWarmCacheSnapshot('server-a', 'account-a', snapshot);
+
+        expect(loadSessionOrganizationWarmCacheSnapshot('server-a', 'account-a')).toEqual(snapshot);
+        expect(loadSessionOrganizationWarmCacheSnapshot('server-a', 'other-account')).toBeNull();
+        expect(loadSessionOrganizationWarmCacheSnapshot('server-b', 'account-a')).toBeNull();
+    });
+
+    it('drops an unparseable organization snapshot instead of repainting a corrupt organization', () => {
+        saveSessionOrganizationWarmCacheSnapshot('server-a', 'account-a', {
+            schemaVersion: 1,
+            version: 7,
+            pins: [],
+            folders: [],
+            folderAssignments: [],
+            tags: [],
+            tagAssignments: [],
+            orderEntries: [],
+            labels: [],
+        });
+        const key = [...store().keys()].find((candidate) => candidate.includes('session-organization-warm-cache'));
+        expect(key).toBeDefined();
+        store().set(String(key), JSON.stringify({ schemaVersion: 1, version: 'not-a-version' }));
+
+        expect(loadSessionOrganizationWarmCacheSnapshot('server-a', 'account-a')).toBeNull();
+        expect(store().has(String(key))).toBe(false);
     });
 
     it('prefers the authenticated runtime account scope over stale persisted profile ids', () => {

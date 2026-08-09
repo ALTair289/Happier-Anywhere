@@ -50,6 +50,7 @@ describe('runAppBootSequence', () => {
                 started.push('credentials');
                 return CREDENTIALS;
             },
+            prepareWarmCache: async () => {},
             restoreSync: async () => {},
             onReady: () => {},
             fontLoadTimeoutMs: 5_000,
@@ -74,6 +75,7 @@ describe('runAppBootSequence', () => {
             loadFonts: () => fonts.promise,
             sodiumReady: Promise.resolve(),
             resolveCredentials: async () => CREDENTIALS,
+            prepareWarmCache: async () => {},
             restoreSync: async () => {},
             onReady: (state) => ready.push(state),
             fontLoadTimeoutMs: 500,
@@ -95,6 +97,7 @@ describe('runAppBootSequence', () => {
             loadFonts: async () => {},
             sodiumReady: Promise.resolve(),
             resolveCredentials: () => credentials.promise,
+            prepareWarmCache: async () => {},
             restoreSync: async (value) => {
                 restored.push(value);
             },
@@ -126,6 +129,7 @@ describe('runAppBootSequence', () => {
             loadFonts: async () => {},
             sodiumReady: Promise.resolve(),
             resolveCredentials: () => credentials.promise,
+            prepareWarmCache: async () => {},
             restoreSync: async () => {},
             onReady: (state) => ready.push(state),
             fontLoadTimeoutMs: 500,
@@ -146,6 +150,7 @@ describe('runAppBootSequence', () => {
             loadFonts: async () => {},
             sodiumReady: Promise.resolve(),
             resolveCredentials: async () => CREDENTIALS,
+            prepareWarmCache: async () => {},
             restoreSync: async () => {
                 order.push('restore');
             },
@@ -164,6 +169,7 @@ describe('runAppBootSequence', () => {
             },
             sodiumReady: Promise.resolve(),
             resolveCredentials: async () => CREDENTIALS,
+            prepareWarmCache: async () => {},
             restoreSync: async () => {},
             onReady: (state) => ready.push(state),
         });
@@ -178,6 +184,7 @@ describe('runAppBootSequence', () => {
             loadFonts: async () => {},
             sodiumReady: Promise.resolve(),
             resolveCredentials: async () => CREDENTIALS,
+            prepareWarmCache: async () => {},
             restoreSync: async () => {
                 throw new Error('restore failed');
             },
@@ -185,5 +192,63 @@ describe('runAppBootSequence', () => {
         });
 
         expect(ready).toEqual([{ credentials: CREDENTIALS, authGeneration: 0 }]);
+    });
+
+    it('settles the warm cache key before restoring sync, alongside the credential read', async () => {
+        const warmCacheKey = createDeferred<void>();
+        const order: string[] = [];
+        const started: string[] = [];
+
+        const run = runAppBootSequence({
+            loadFonts: async () => {},
+            sodiumReady: Promise.resolve(),
+            resolveCredentials: async () => {
+                started.push('credentials');
+                return CREDENTIALS;
+            },
+            prepareWarmCache: () => {
+                started.push('warm-cache-key');
+                return warmCacheKey.promise;
+            },
+            restoreSync: async () => {
+                order.push('restore');
+            },
+            onReady: () => order.push('ready'),
+        });
+
+        // Both keystore reads are in flight together, so the key normally costs nothing on top of
+        // the credential read the boot already pays for.
+        await vi.advanceTimersByTimeAsync(0);
+        expect([...started].sort()).toEqual(['credentials', 'warm-cache-key']);
+        // Restore reads the cache synchronously: starting it before the key lands would hydrate
+        // nothing and paint an empty list.
+        expect(order).toEqual([]);
+
+        warmCacheKey.resolve();
+        await run;
+        expect(order).toEqual(['restore', 'ready']);
+    });
+
+    it('paints cold rather than holding the splash when the warm cache key never settles', async () => {
+        const order: string[] = [];
+
+        const run = runAppBootSequence({
+            loadFonts: async () => {},
+            sodiumReady: Promise.resolve(),
+            resolveCredentials: async () => CREDENTIALS,
+            prepareWarmCache: () => new Promise<void>(() => {}),
+            restoreSync: async () => {
+                order.push('restore');
+            },
+            onReady: () => order.push('ready'),
+            warmCacheKeyTimeoutMs: 1_000,
+        });
+
+        await vi.advanceTimersByTimeAsync(999);
+        expect(order).toEqual([]);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await run;
+        expect(order).toEqual(['restore', 'ready']);
     });
 });

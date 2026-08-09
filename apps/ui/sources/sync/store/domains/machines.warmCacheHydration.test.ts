@@ -1,29 +1,58 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ServerProfile } from '../../domains/server/serverProfiles';
+import { WARM_CACHE_STORAGE_ID } from '../../domains/state/warmCachePersistence';
 
 const ACCOUNT_ID = 'account_a';
 const SERVER_ID = 'server_a';
 const MACHINE_DISPLAY_WARM_CACHE_KEY = `machine-display-warm-cache-v1:${SERVER_ID}:${ACCOUNT_ID}`;
 
-const mmkv = vi.hoisted(() => ({
-    store: new Map<string, string>(),
-    setCallsByKey: new Map<string, number>(),
-}));
+// One map per MMKV instance id, because the warm cache now lives in its own encrypted instance and
+// a conflated double would let a read of the retired plaintext instance pass for a read of it.
+const mmkv = vi.hoisted(() => {
+    const storesById = new Map<string, Map<string, string>>();
+    const setCallsById = new Map<string, Map<string, number>>();
+    function mapFor<T>(byId: Map<string, Map<string, T>>, id: string): Map<string, T> {
+        const existing = byId.get(id);
+        if (existing) return existing;
+        const created = new Map<string, T>();
+        byId.set(id, created);
+        return created;
+    }
+    return {
+        storeFor: (id: string) => mapFor(storesById, id),
+        setCallsFor: (id: string) => mapFor(setCallsById, id),
+        reset: () => {
+            storesById.clear();
+            setCallsById.clear();
+        },
+    };
+});
 
 vi.mock('react-native-mmkv', () => {
     class MMKV {
+        private readonly instanceId: string;
+
+        constructor(config?: { id?: string }) {
+            this.instanceId = config?.id ?? 'mmkv.default';
+        }
+
         getString(key: string) {
-            return mmkv.store.get(key);
+            return mmkv.storeFor(this.instanceId).get(key);
         }
 
         set(key: string, value: string) {
-            mmkv.setCallsByKey.set(key, (mmkv.setCallsByKey.get(key) ?? 0) + 1);
-            mmkv.store.set(key, value);
+            const calls = mmkv.setCallsFor(this.instanceId);
+            calls.set(key, (calls.get(key) ?? 0) + 1);
+            mmkv.storeFor(this.instanceId).set(key, value);
         }
 
         delete(key: string) {
-            mmkv.store.delete(key);
+            mmkv.storeFor(this.instanceId).delete(key);
+        }
+
+        getAllKeys() {
+            return [...mmkv.storeFor(this.instanceId).keys()];
         }
     }
 
@@ -33,8 +62,7 @@ vi.mock('react-native-mmkv', () => {
 beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    mmkv.store.clear();
-    mmkv.setCallsByKey.clear();
+    mmkv.reset();
 });
 
 afterEach(() => {
@@ -108,10 +136,21 @@ function seedWarmCacheBlob(machineCount: number): void {
             homeDir: '/home/u',
         };
     }
-    mmkv.store.set(MACHINE_DISPLAY_WARM_CACHE_KEY, JSON.stringify(entries));
+    warmCacheStore().set(MACHINE_DISPLAY_WARM_CACHE_KEY, JSON.stringify(entries));
+}
+
+function warmCacheStore(): Map<string, string> {
+    return mmkv.storeFor(WARM_CACHE_STORAGE_ID);
+}
+
+function warmCacheSetCalls(): Map<string, number> {
+    return mmkv.setCallsFor(WARM_CACHE_STORAGE_ID);
 }
 
 async function hydrateWarmCacheIntoDomain(domain: any) {
+    // The cache is encrypted at rest, so nothing reads or writes it until the at-rest key resolves.
+    const { prepareWarmCacheEncryptionKey } = await import('../../domains/state/warmCacheEncryptionKey');
+    await prepareWarmCacheEncryptionKey();
     const { loadMachineDisplayWarmCacheEntries } = await import('../../domains/state/warmCachePersistence');
     const { buildMachineDisplayRenderableFromCacheEntry } = await import('../../domains/state/warmCacheAdapters');
     const entries = loadMachineDisplayWarmCacheEntries(SERVER_ID, ACCOUNT_ID);
@@ -134,7 +173,7 @@ describe('machines domain: warm-cache boot hydration', () => {
 
         expect(Object.keys(entries)).toHaveLength(12);
         expect(Object.keys(get().machineDisplayById)).toHaveLength(12);
-        expect(mmkv.setCallsByKey.get(MACHINE_DISPLAY_WARM_CACHE_KEY) ?? 0).toBe(0);
+        expect(warmCacheSetCalls().get(MACHINE_DISPLAY_WARM_CACHE_KEY) ?? 0).toBe(0);
     });
 
     it('still persists the cache once real data changes a hydrated machine', async () => {
@@ -146,7 +185,7 @@ describe('machines domain: warm-cache boot hydration', () => {
 
         await hydrateWarmCacheIntoDomain(domain);
         await vi.advanceTimersByTimeAsync(1_000);
-        expect(mmkv.setCallsByKey.get(MACHINE_DISPLAY_WARM_CACHE_KEY) ?? 0).toBe(0);
+        expect(warmCacheSetCalls().get(MACHINE_DISPLAY_WARM_CACHE_KEY) ?? 0).toBe(0);
 
         const hydrated = get().machineDisplayById.m1;
         domain.replaceMachineDisplays(
@@ -158,8 +197,8 @@ describe('machines domain: warm-cache boot hydration', () => {
         );
         await vi.advanceTimersByTimeAsync(1_000);
 
-        expect(mmkv.setCallsByKey.get(MACHINE_DISPLAY_WARM_CACHE_KEY) ?? 0).toBe(1);
-        expect(JSON.parse(mmkv.store.get(MACHINE_DISPLAY_WARM_CACHE_KEY) ?? '{}').m1.activeAt)
+        expect(warmCacheSetCalls().get(MACHINE_DISPLAY_WARM_CACHE_KEY) ?? 0).toBe(1);
+        expect(JSON.parse(warmCacheStore().get(MACHINE_DISPLAY_WARM_CACHE_KEY) ?? '{}').m1.activeAt)
             .toBe(hydrated.activeAt + 5);
     });
 });

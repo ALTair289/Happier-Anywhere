@@ -24,6 +24,7 @@ import * as Sentry from '@sentry/react-native';
 import { tracking } from '@/track/tracking';
 import { SettingsAnalyticsRuntime } from '@/track/settingsAnalytics/SettingsAnalyticsRuntime';
 import { syncRestore } from '@/sync/sync';
+import { prepareWarmCacheStorage } from '@/sync/domains/state/warmCachePersistence';
 import { storage } from '@/sync/domains/state/storage';
 import {
     clearActiveViewingSessionsForNonSessionRoute,
@@ -655,6 +656,7 @@ function AppBoot(props: {
             loadFonts,
             sodiumReady: sodium.ready,
             resolveCredentials: () => resolveBootCredentials(Platform.OS),
+            prepareWarmCache: prepareWarmCacheStorage,
             restoreSync: syncRestore,
             onReady: (ready) => {
                 if (cancelled) return;

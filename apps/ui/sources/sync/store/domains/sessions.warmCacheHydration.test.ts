@@ -4,29 +4,58 @@ import { installPersistenceModuleMock } from '@/dev/testkit';
 import { purchasesDefaults } from '@/sync/domains/purchases/purchases';
 import { profileDefaults } from '@/sync/domains/profiles/profile';
 import { localSettingsDefaults } from '@/sync/domains/settings/localSettings';
+import { WARM_CACHE_STORAGE_ID } from '../../domains/state/warmCachePersistence';
 
 const ACCOUNT_ID = 'account_a';
 const SERVER_ID = 'server_a';
 const SESSION_LIST_WARM_CACHE_KEY = `session-list-warm-cache-v1:${SERVER_ID}:${ACCOUNT_ID}`;
 
-const mmkv = vi.hoisted(() => ({
-    store: new Map<string, string>(),
-    setCallsByKey: new Map<string, number>(),
-}));
+// One map per MMKV instance id, because the warm cache now lives in its own encrypted instance and
+// a conflated double would let a read of the retired plaintext instance pass for a read of it.
+const mmkv = vi.hoisted(() => {
+    const storesById = new Map<string, Map<string, string>>();
+    const setCallsById = new Map<string, Map<string, number>>();
+    function mapFor<T>(byId: Map<string, Map<string, T>>, id: string): Map<string, T> {
+        const existing = byId.get(id);
+        if (existing) return existing;
+        const created = new Map<string, T>();
+        byId.set(id, created);
+        return created;
+    }
+    return {
+        storeFor: (id: string) => mapFor(storesById, id),
+        setCallsFor: (id: string) => mapFor(setCallsById, id),
+        reset: () => {
+            storesById.clear();
+            setCallsById.clear();
+        },
+    };
+});
 
 vi.mock('react-native-mmkv', () => {
     class MMKV {
+        private readonly instanceId: string;
+
+        constructor(config?: { id?: string }) {
+            this.instanceId = config?.id ?? 'mmkv.default';
+        }
+
         getString(key: string) {
-            return mmkv.store.get(key);
+            return mmkv.storeFor(this.instanceId).get(key);
         }
 
         set(key: string, value: string) {
-            mmkv.setCallsByKey.set(key, (mmkv.setCallsByKey.get(key) ?? 0) + 1);
-            mmkv.store.set(key, value);
+            const calls = mmkv.setCallsFor(this.instanceId);
+            calls.set(key, (calls.get(key) ?? 0) + 1);
+            mmkv.storeFor(this.instanceId).set(key, value);
         }
 
         delete(key: string) {
-            mmkv.store.delete(key);
+            mmkv.storeFor(this.instanceId).delete(key);
+        }
+
+        getAllKeys() {
+            return [...mmkv.storeFor(this.instanceId).keys()];
         }
     }
 
@@ -38,8 +67,7 @@ const storageStateRef = vi.hoisted(() => ({ current: null as any }));
 beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    mmkv.store.clear();
-    mmkv.setCallsByKey.clear();
+    mmkv.reset();
     storageStateRef.current = null;
 });
 
@@ -157,10 +185,21 @@ function seedWarmCacheBlob(sessionCount: number): void {
             hiddenSystemSession: false,
         };
     }
-    mmkv.store.set(SESSION_LIST_WARM_CACHE_KEY, JSON.stringify(entries));
+    warmCacheStore().set(SESSION_LIST_WARM_CACHE_KEY, JSON.stringify(entries));
+}
+
+function warmCacheStore(): Map<string, string> {
+    return mmkv.storeFor(WARM_CACHE_STORAGE_ID);
+}
+
+function warmCacheSetCalls(): Map<string, number> {
+    return mmkv.setCallsFor(WARM_CACHE_STORAGE_ID);
 }
 
 async function hydrateWarmCacheIntoDomain(domain: any) {
+    // The cache is encrypted at rest, so nothing reads or writes it until the at-rest key resolves.
+    const { prepareWarmCacheEncryptionKey } = await import('../../domains/state/warmCacheEncryptionKey');
+    await prepareWarmCacheEncryptionKey();
     const { loadSessionListWarmCacheEntries } = await import('../../domains/state/warmCachePersistence');
     const { buildSessionListRenderableFromCacheEntry } = await import('../../domains/state/warmCacheAdapters');
     const entries = loadSessionListWarmCacheEntries(SERVER_ID, ACCOUNT_ID);
@@ -181,7 +220,7 @@ describe('sessions domain: warm-cache boot hydration', () => {
 
         expect(Object.keys(entries)).toHaveLength(12);
         expect(Object.keys(get().sessionListRenderables)).toHaveLength(12);
-        expect(mmkv.setCallsByKey.get(SESSION_LIST_WARM_CACHE_KEY) ?? 0).toBe(0);
+        expect(warmCacheSetCalls().get(SESSION_LIST_WARM_CACHE_KEY) ?? 0).toBe(0);
     });
 
     it('trims an oversized legacy blob down to the retained window on the first hydration', async () => {
@@ -194,8 +233,8 @@ describe('sessions domain: warm-cache boot hydration', () => {
         await hydrateWarmCacheIntoDomain(domain);
 
         expect(Object.keys(get().sessionListRenderables)).toHaveLength(SESSION_LIST_WARM_CACHE_MAX_ENTRIES);
-        expect(mmkv.setCallsByKey.get(SESSION_LIST_WARM_CACHE_KEY) ?? 0).toBe(1);
-        expect(Object.keys(JSON.parse(mmkv.store.get(SESSION_LIST_WARM_CACHE_KEY) ?? '{}')))
+        expect(warmCacheSetCalls().get(SESSION_LIST_WARM_CACHE_KEY) ?? 0).toBe(1);
+        expect(Object.keys(JSON.parse(warmCacheStore().get(SESSION_LIST_WARM_CACHE_KEY) ?? '{}')))
             .toHaveLength(SESSION_LIST_WARM_CACHE_MAX_ENTRIES);
     });
 
@@ -206,7 +245,7 @@ describe('sessions domain: warm-cache boot hydration', () => {
         const { domain, get } = createHarness(createSessionsDomain);
 
         await hydrateWarmCacheIntoDomain(domain);
-        expect(mmkv.setCallsByKey.get(SESSION_LIST_WARM_CACHE_KEY) ?? 0).toBe(0);
+        expect(warmCacheSetCalls().get(SESSION_LIST_WARM_CACHE_KEY) ?? 0).toBe(0);
 
         const hydrated = get().sessionListRenderables.s1;
         domain.replaceSessionListRenderables(
@@ -217,7 +256,7 @@ describe('sessions domain: warm-cache boot hydration', () => {
             )),
         );
 
-        expect(mmkv.setCallsByKey.get(SESSION_LIST_WARM_CACHE_KEY) ?? 0).toBe(1);
-        expect(JSON.parse(mmkv.store.get(SESSION_LIST_WARM_CACHE_KEY) ?? '{}').s1.active).toBe(true);
+        expect(warmCacheSetCalls().get(SESSION_LIST_WARM_CACHE_KEY) ?? 0).toBe(1);
+        expect(JSON.parse(warmCacheStore().get(SESSION_LIST_WARM_CACHE_KEY) ?? '{}').s1.active).toBe(true);
     });
 });

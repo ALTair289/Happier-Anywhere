@@ -77,7 +77,11 @@ import {
     type DeferredSessionStateHydrationState,
 } from '@/sync/domains/session/realtime/deferredSessionStateHydration';
 import { normalizeSessionListAttentionPromotionMode } from '@/sync/domains/session/listing/attentionPromotion/sessionListAttentionPromotion';
-import { buildSessionOrganizationProjection } from '@/sync/domains/session/organization';
+import {
+    buildSessionOrganizationProjection,
+    buildSessionOrganizationSnapshotFromProjection,
+    type SessionOrganizationProjection,
+} from '@/sync/domains/session/organization';
 import { fetchAndApplySessionOrganizationSnapshot } from '@/sync/ops/sessionOrganization';
 import { createSessionListOrganizationSnapshotRequest } from '@/sync/engine/sessions/sessionListOrganizationSnapshotRequest';
 import { ActivityUpdateAccumulator, type ActivityUpdateAccumulatorFlushOptions } from './reducer/activityUpdateAccumulator';
@@ -175,11 +179,11 @@ import { createSyncGenerationGuard } from './domains/scope/syncGenerationGuard';
 import {
     clearWarmCacheAccountScope,
     loadMachineDisplayWarmCacheEntries,
-    loadSessionListPinnedSessionIdsWarmCache,
     loadSessionListWarmCacheEntries,
+    loadSessionOrganizationWarmCacheSnapshot,
     readPersistedSessionListWarmCacheEntries,
     resolveWarmCacheAccountScope,
-    saveSessionListPinnedSessionIdsWarmCache,
+    saveSessionOrganizationWarmCacheSnapshot,
     setWarmCacheAccountScope,
 } from './domains/state/warmCachePersistence';
 import {
@@ -856,10 +860,13 @@ type SessionOrganizationSyncState = Pick<
     | 'sessionOrganizationLabelsByLabelKey'
 >;
 
-function resolveOrganizationPinnedSessionIdsForServer(state: SessionOrganizationSyncState, serverId: string | null): string[] {
+function buildOrganizationProjectionForServer(
+    state: SessionOrganizationSyncState,
+    serverId: string | null,
+): SessionOrganizationProjection | null {
     const normalizedServerId = typeof serverId === 'string' && serverId.trim().length > 0 ? serverId.trim() : null;
-    if (!normalizedServerId) return [];
-    return [...buildSessionOrganizationProjection({
+    if (!normalizedServerId) return null;
+    return buildSessionOrganizationProjection({
         schemaVersionByServerId: state.sessionOrganizationSchemaVersionByServerId,
         snapshotVersionByServerId: state.sessionOrganizationSnapshotVersionByServerId,
         pinsBySessionKey: state.sessionOrganizationPinsBySessionKey,
@@ -869,7 +876,24 @@ function resolveOrganizationPinnedSessionIdsForServer(state: SessionOrganization
         tagAssignmentsBySessionKey: state.sessionOrganizationTagAssignmentsBySessionKey,
         orderEntriesByScopeKey: state.sessionOrganizationOrderEntriesByScopeKey,
         labelsByLabelKey: state.sessionOrganizationLabelsByLabelKey,
-    }, normalizedServerId).pinnedSessionIds];
+    }, normalizedServerId);
+}
+
+/**
+ * Persist the organization the list is currently painting so the next boot repaints it before
+ * the refresh lands. Written from the store rather than from a response so partial refreshes
+ * (`refreshSessionOrganization`) stay represented, and skipped whenever the store does not hold
+ * a complete snapshot for this server yet.
+ */
+function persistSessionOrganizationWarmCache(
+    serverId: string | null,
+    accountId: string | null,
+    projection: SessionOrganizationProjection | null,
+): void {
+    if (!serverId || !projection) return;
+    const snapshot = buildSessionOrganizationSnapshotFromProjection(projection);
+    if (!snapshot) return;
+    saveSessionOrganizationWarmCacheSnapshot(serverId, accountId, snapshot);
 }
 
 function shouldIncludeSessionListAttentionRows(settings: Pick<Settings, 'sessionListAttentionPromotionModeV1'>): boolean {
@@ -1741,6 +1765,18 @@ class Sync {
         if (Object.keys(sessionEntries).length > 0) {
             storage.getState().replaceSessionListRenderables(
                 Object.values(sessionEntries).map((entry) => buildSessionListRenderableFromCacheEntry(entry)),
+            );
+        }
+
+        // Warm rows without their organization would paint unpinned and ungrouped and then
+        // rearrange, so the organization is restored through the same owner the refresh uses;
+        // that refresh is version-gated and replaces this only when the server is ahead.
+        const organizationSnapshot = loadSessionOrganizationWarmCacheSnapshot(serverId, accountId);
+        if (organizationSnapshot) {
+            storage.getState().applySessionOrganizationSnapshot(
+                serverId,
+                organizationSnapshot,
+                createSessionListOrganizationSnapshotRequest(),
             );
         }
     }
@@ -3843,16 +3879,15 @@ class Sync {
         const isAppend = options?.mode === 'append';
         const includeActiveSessionRows = !isAppend;
         const includeSessionListAttentionRows = !isAppend && shouldIncludeSessionListAttentionRows(initialState.settings);
+        // The list paints pinned rows, folders and manual order from organization state, so a
+        // boot with none of it would either wait for this round trip or rearrange itself once
+        // the snapshot lands. The warm cache removes both: boot hydration restores the
+        // organization the user left behind, which is what makes this a background refresh.
+        // Only a scope that has never cached an organization still waits, and it has nothing
+        // on screen that could move.
         const hasLastKnownOrganizationSnapshot = activeServerId
             ? typeof initialState.sessionOrganizationSnapshotVersionByServerId[activeServerId] === 'number'
             : false;
-        // The initial page merges pinned rows server-side from the ids we send, so the
-        // list only has to wait for the organization snapshot when we cannot name the
-        // pinned sessions at all. The persisted id set is what keeps that true on a cold
-        // boot; the snapshot version alone would name nothing and drop pinned hydration.
-        const warmPinnedSessionIds = !isAppend && activeServerId
-            ? loadSessionListPinnedSessionIdsWarmCache(activeServerId, warmCacheAccountId)
-            : [];
         const organizationSnapshotRefresh = !isAppend && activeServerId
             ? fetchAndApplySessionOrganizationSnapshot({
                 credentials: this.credentials,
@@ -3863,23 +3898,30 @@ class Sync {
             })
             : null;
         if (organizationSnapshotRefresh) {
-            if (hasLastKnownOrganizationSnapshot || warmPinnedSessionIds.length > 0) {
-                void organizationSnapshotRefresh.catch(() => undefined);
+            if (hasLastKnownOrganizationSnapshot) {
+                void organizationSnapshotRefresh
+                    .then(() => {
+                        if (!shouldContinue()) return;
+                        persistSessionOrganizationWarmCache(
+                            activeServerId,
+                            warmCacheAccountId,
+                            buildOrganizationProjectionForServer(storage.getState(), activeServerId),
+                        );
+                    })
+                    .catch(() => undefined);
             } else {
                 await organizationSnapshotRefresh;
             }
         }
-        const stateAfterOrganizationRefresh = storage.getState();
-        const hasOrganizationSnapshot = activeServerId
-            ? typeof stateAfterOrganizationRefresh.sessionOrganizationSnapshotVersionByServerId[activeServerId] === 'number'
-            : false;
-        const organizationPinnedSessionIds = isAppend
-            ? []
-            : hasOrganizationSnapshot
-                ? resolveOrganizationPinnedSessionIdsForServer(stateAfterOrganizationRefresh, activeServerId)
-                : [...warmPinnedSessionIds];
-        if (!isAppend && activeServerId && hasOrganizationSnapshot) {
-            saveSessionListPinnedSessionIdsWarmCache(activeServerId, warmCacheAccountId, organizationPinnedSessionIds);
+        const organizationProjection = isAppend
+            ? null
+            : buildOrganizationProjectionForServer(storage.getState(), activeServerId);
+        const hasOrganizationSnapshot = organizationProjection?.version != null;
+        const organizationPinnedSessionIds = hasOrganizationSnapshot
+            ? [...(organizationProjection?.pinnedSessionIds ?? [])]
+            : [];
+        if (hasOrganizationSnapshot) {
+            persistSessionOrganizationWarmCache(activeServerId, warmCacheAccountId, organizationProjection);
         }
         const requiredHydrationSessionIds = Array.from(new Set([
             ...normalizeSessionListHydrationSessionIds(options?.requiredHydrationSessionIds),

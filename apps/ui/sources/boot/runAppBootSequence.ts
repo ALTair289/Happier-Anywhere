@@ -16,6 +16,14 @@ export const APP_BOOT_FONT_LOAD_TIMEOUT_MS = 6_000;
  */
 export const APP_BOOT_CREDENTIAL_RESOLUTION_TIMEOUT_MS = 8_000;
 
+/**
+ * The warm cache's at-rest key is a second keystore read, so it runs alongside the credential read
+ * rather than after it and normally costs nothing on top. The bound only matters if the keystore
+ * stalls on this read but not on the credential one: missing it means this boot hydrates nothing
+ * and paints cold, never that boot waits.
+ */
+export const APP_BOOT_WARM_CACHE_KEY_TIMEOUT_MS = 3_000;
+
 export type AppBootReadyState = Readonly<{
     credentials: AuthCredentials | null;
     /**
@@ -29,10 +37,16 @@ export type AppBootSequence = Readonly<{
     loadFonts: () => Promise<unknown>;
     sodiumReady: PromiseLike<unknown>;
     resolveCredentials: () => Promise<AuthCredentials | null>;
+    /**
+     * Resolves the warm cache's at-rest key. Sync restore reads that cache synchronously, so this
+     * has to have settled before `restoreSync` runs or the boot hydrates nothing.
+     */
+    prepareWarmCache: () => Promise<unknown>;
     restoreSync: (credentials: AuthCredentials) => Promise<unknown>;
     onReady: (state: AppBootReadyState) => void;
     fontLoadTimeoutMs?: number;
     credentialResolutionTimeoutMs?: number;
+    warmCacheKeyTimeoutMs?: number;
 }>;
 
 type CredentialOutcome = Readonly<{ credentials: AuthCredentials | null }>;
@@ -71,6 +85,8 @@ async function restoreSyncWithoutBlockingBoot(
  * - the credential read misses its deadline -> boot unauthenticated **without** discarding the
  *   session: the same in-flight read is still awaited, and if it yields credentials they are
  *   restored and published with a bumped `authGeneration`.
+ * - the warm cache key misses its deadline -> paint cold; the cache is derived state and the key
+ *   applies to whatever is written after it lands.
  *
  * Sync restore stays on the critical path on purpose: the warm cache is what makes the first frame
  * show real content instead of an empty list, so trading it for an earlier empty frame is a
@@ -80,6 +96,7 @@ export async function runAppBootSequence(sequence: AppBootSequence): Promise<voi
     const fontLoadTimeoutMs = sequence.fontLoadTimeoutMs ?? APP_BOOT_FONT_LOAD_TIMEOUT_MS;
     const credentialResolutionTimeoutMs =
         sequence.credentialResolutionTimeoutMs ?? APP_BOOT_CREDENTIAL_RESOLUTION_TIMEOUT_MS;
+    const warmCacheKeyTimeoutMs = sequence.warmCacheKeyTimeoutMs ?? APP_BOOT_WARM_CACHE_KEY_TIMEOUT_MS;
 
     // Every leg starts here, at t0, so each deadline measures wall clock from boot rather than from
     // whenever the previous leg happened to finish.
@@ -98,6 +115,13 @@ export async function runAppBootSequence(sequence: AppBootSequence): Promise<voi
             return { credentials: null };
         },
     );
+    const warmCacheReady = start(sequence.prepareWarmCache).then(
+        () => {},
+        (error: unknown) => {
+            // No key means a cold boot, which the cache is designed to survive.
+            console.error('Failed to prepare the warm cache key during init, continuing startup:', error);
+        },
+    );
     const sodiumReady = Promise.resolve(sequence.sodiumReady);
 
     // `fontsLoaded` / `credentialsResolved` never reject, so the only rejection either race can
@@ -114,6 +138,11 @@ export async function runAppBootSequence(sequence: AppBootSequence): Promise<voi
         console.error('Credential read missed its boot deadline, continuing startup:', error);
         return null;
     });
+    const warmCacheGate = withTimeout(warmCacheReady, warmCacheKeyTimeoutMs, 'warm cache key').catch(
+        (error: unknown) => {
+            console.error('Warm cache key missed its boot deadline, painting cold:', error);
+        },
+    );
 
     let gatedCredentials: CredentialOutcome | null = null;
     try {
@@ -125,6 +154,8 @@ export async function runAppBootSequence(sequence: AppBootSequence): Promise<voi
 
     const initialCredentials = gatedCredentials?.credentials ?? null;
     if (initialCredentials) {
+        // Restore reads the warm cache synchronously, so the key has to be settled first.
+        await warmCacheGate;
         await restoreSyncWithoutBlockingBoot(sequence, initialCredentials);
     }
     await fontGate;

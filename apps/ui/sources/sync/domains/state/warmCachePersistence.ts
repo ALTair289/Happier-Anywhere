@@ -2,29 +2,203 @@ import { MMKV } from 'react-native-mmkv';
 import {
     parseSessionRuntimeActivityProjectionFields,
     PrimaryTurnStatusV1Schema,
+    SessionOrganizationSnapshotSchema,
     SessionRuntimeActivityStateSchema,
     SessionRuntimeIssueV1Schema,
+    type SessionOrganizationSnapshot,
 } from '@happier-dev/protocol';
 import { z } from 'zod';
 
 import { readStorageScopeFromEnv, scopedStorageId } from '@/utils/system/storageScope';
+import { prepareWarmCacheEncryptionKey, readResolvedWarmCacheEncryptionKey } from './warmCacheEncryptionKey';
 import { selectMostRecentWarmCacheSessionIds } from './warmCacheAdapters';
 
-const isWebRuntime = typeof window !== 'undefined' && typeof document !== 'undefined';
-
-var warmCacheStorage: MMKV | null = null;
-let warmCacheAccountScope: string | null = null;
-
-function getWarmCacheStorage(): MMKV {
-    if (warmCacheStorage) return warmCacheStorage;
-    const storageScope = isWebRuntime ? null : readStorageScopeFromEnv();
-    warmCacheStorage = storageScope ? new MMKV({ id: scopedStorageId('default', storageScope) }) : new MMKV();
-    return warmCacheStorage;
+/**
+ * The same predicate the rest of this corridor uses (`state/persistence.ts`,
+ * `warmCacheEncryptionKey.ts`, `utils/system/sentry.ts`): React Native defines `window` but never
+ * `document`, so a DOM document is what actually separates the browser and Tauri desktop bundles
+ * from a native build. Evaluated per call rather than once at import, so nothing here depends on
+ * when this module happens to be first imported.
+ */
+function isWebRuntime(): boolean {
+    return typeof window !== 'undefined' && typeof document !== 'undefined';
 }
 
 const SESSION_LIST_WARM_CACHE_PREFIX = 'session-list-warm-cache-v1';
 const MACHINE_DISPLAY_WARM_CACHE_PREFIX = 'machine-display-warm-cache-v1';
-const SESSION_LIST_PINNED_IDS_WARM_CACHE_PREFIX = 'session-list-pinned-ids-warm-cache-v1';
+const SESSION_ORGANIZATION_WARM_CACHE_PREFIX = 'session-organization-warm-cache-v1';
+/**
+ * Superseded by `SESSION_ORGANIZATION_WARM_CACHE_PREFIX`, which carries the pinned ids as part
+ * of the whole organization snapshot. Only deleted here, never read; drop this constant once no
+ * supported build can still have written the key.
+ */
+const LEGACY_SESSION_LIST_PINNED_IDS_WARM_CACHE_PREFIX = 'session-list-pinned-ids-warm-cache-v1';
+
+/**
+ * On a native build everything below is decrypted session content — names, summaries, filesystem
+ * paths, hostnames — so it lives in an encrypted MMKV instance of its own rather than in the shared
+ * `default` one.
+ *
+ * The instance is separate for two reasons that both bite: an existing plaintext MMKV file cannot
+ * be reopened with an encryption key, and `default` is shared with `state/persistence.ts` and
+ * Sentry, so it is not this module's to re-key. A new id lets the cache repopulate on the next
+ * refresh, which costs one cold boot and nothing else, because every byte here is derived state.
+ */
+export const WARM_CACHE_STORAGE_ID = 'warm-cache-v2';
+
+/**
+ * MMKV's no-argument instance is `mmkv.default`, not `default` (`react-native-mmkv/src/MMKV.ts`
+ * defaults the whole configuration to `{ id: 'mmkv.default' }`). Naming it here keeps the shared
+ * instance one expression, so the web store and the native purge cannot drift onto different bytes.
+ */
+const DEFAULT_MMKV_STORAGE_ID = 'mmkv.default';
+
+function sharedDefaultStorageId(storageScope: string | null): string {
+    return storageScope ? scopedStorageId('default', storageScope) : DEFAULT_MMKV_STORAGE_ID;
+}
+
+/**
+ * The prefixes older native builds wrote into the shared unencrypted instance. Moving to a new id
+ * would only orphan those bytes; the plaintext titles and paths would still be sitting in the old
+ * memory-mapped file. First use deletes them by prefix — surgically, because the instance holds
+ * unrelated state this module does not own.
+ */
+const LEGACY_PLAINTEXT_WARM_CACHE_PREFIXES: readonly string[] = [
+    SESSION_LIST_WARM_CACHE_PREFIX,
+    MACHINE_DISPLAY_WARM_CACHE_PREFIX,
+    SESSION_ORGANIZATION_WARM_CACHE_PREFIX,
+    LEGACY_SESSION_LIST_PINNED_IDS_WARM_CACHE_PREFIX,
+];
+
+const LEGACY_PLAINTEXT_PURGE_COMPACTION_KEY = 'warm-cache-plaintext-purge-compaction-v1';
+// MMKV starts at one page and `trim()` skips rewriting files that have not grown beyond their
+// expected capacity. This deliberately exceeds that floor so the first trim must perform a full
+// writeback after the sensitive keys have been deleted.
+const LEGACY_PLAINTEXT_PURGE_COMPACTION_VALUE = '0'.repeat(16 * 1024);
+
+var warmCacheStorage: MMKV | null = null;
+let warmCacheStorageUnopenable = false;
+let legacyPlaintextWarmCachePurged = false;
+let warmCacheAccountScope: string | null = null;
+
+function warmCacheStorageScope(): string | null {
+    return isWebRuntime() ? null : readStorageScopeFromEnv();
+}
+
+function purgeLegacyPlaintextWarmCache(storageScope: string | null): void {
+    if (legacyPlaintextWarmCachePurged) return;
+    // Web has no legacy copy to retire, because it never moved: `resolveWarmCacheStoragePlacement`
+    // still reads and writes these very keys. Purging them here would delete the live warm cache on
+    // every page load — the same blank-then-refetch-then-re-decrypt boot the placement rule exists
+    // to prevent, arriving by a second route.
+    if (isWebRuntime()) return;
+    legacyPlaintextWarmCachePurged = true;
+    try {
+        const legacyStorage = new MMKV({ id: sharedDefaultStorageId(storageScope) });
+        let purgedAny = false;
+        for (const key of legacyStorage.getAllKeys()) {
+            if (LEGACY_PLAINTEXT_WARM_CACHE_PREFIXES.some((prefix) => key.startsWith(`${prefix}:`))) {
+                legacyStorage.delete(key);
+                purgedAny = true;
+            }
+        }
+        // `delete` alone does not retire the plaintext. MMKV's file is append-only: a delete writes a
+        // tombstone and the earlier value's bytes stay in the mmap until the file is rewritten. A bare
+        // `trim()` is not sufficient either: MMKV returns early when the file has not grown beyond its
+        // expected capacity. Temporarily writing an oversized non-sensitive value forces growth, so the
+        // first trim performs a full writeback without the deleted cache entries. The second trim
+        // removes the temporary value and returns the file to its normal size.
+        //
+        // This is the last point at which the application can act. Bytes already written may still
+        // survive below it — filesystem journaling, copy-on-write snapshots, and flash wear levelling
+        // all retain prior copies that no userspace call can reach. Compaction is the correct and
+        // complete application-level action, not a guarantee about the physical medium.
+        if (purgedAny) {
+            legacyStorage.set(
+                LEGACY_PLAINTEXT_PURGE_COMPACTION_KEY,
+                LEGACY_PLAINTEXT_PURGE_COMPACTION_VALUE,
+            );
+            legacyStorage.trim();
+            legacyStorage.delete(LEGACY_PLAINTEXT_PURGE_COMPACTION_KEY);
+            legacyStorage.trim();
+        }
+    } catch {
+        // Nothing to purge is indistinguishable from nothing readable, and neither is worth a boot
+        // failure over derived state.
+    }
+}
+
+/**
+ * Boot's single entry point into this module's at-rest concerns: retire the plaintext bytes older
+ * builds left behind, and settle the key the synchronous accessors below need.
+ *
+ * The purge runs here rather than lazily on first read because a signed-out or never-hydrated boot
+ * never reaches a read, and that is exactly the boot where the old plaintext would otherwise sit on
+ * disk indefinitely. Neither half can reject: both failures mean "cold boot", never "broken boot".
+ */
+export async function prepareWarmCacheStorage(): Promise<void> {
+    purgeLegacyPlaintextWarmCache(warmCacheStorageScope());
+    await prepareWarmCacheEncryptionKey();
+}
+
+/**
+ * Where this runtime's warm cache lives and whether it is encrypted at rest — the single decision,
+ * so there is no second per-platform storage path to keep in step.
+ *
+ * **Native is encrypted.** Credentials live in the OS keystore (`nativeSecureStoreWithDevFallback`)
+ * and MMKV does not, so an unencrypted cache file would be the one place decrypted session names,
+ * summaries, paths and hostnames sit readable without the keystore. That asymmetry is real and the
+ * encryption closes it.
+ *
+ * **Web and the Tauri desktop shell are plaintext, deliberately.** `tokenStorage.ts` stores the auth
+ * credential — the API token *and* the E2EE secret — in plain `localStorage` on web. Anyone who can
+ * read this cache can already read the secret that decrypts the whole account and the token that
+ * fetches it, so encrypting the cache adds no exposure class; it only removes the cache. And it
+ * removes it entirely rather than partially: MMKV's web backend *throws* on `encryptionKey`
+ * (`react-native-mmkv/src/createMMKV.web.ts`), which turns the store into a permanent miss, so every
+ * page load paints an empty list, refetches, and re-decrypts every row.
+ *
+ * Revisit this together with web credential storage, not on its own: the day the token and secret
+ * stop living in `localStorage`, the trade above stops holding and this cache becomes the weakest
+ * thing in it.
+ *
+ * `null` is returned only when a store genuinely cannot be produced, and means exactly one thing to
+ * every caller: treat the cache as a miss. On native that is a keystore that failed or was cleared,
+ * and the window before boot has resolved the key. It is not latched while the key is still missing,
+ * so a boot that raced ahead of the keystore starts persisting as soon as it lands.
+ */
+function resolveWarmCacheStoragePlacement(
+    storageScope: string | null,
+): Readonly<{ id: string; encryptionKey?: string }> | null {
+    if (isWebRuntime()) return { id: sharedDefaultStorageId(storageScope) };
+    const encryptionKey = readResolvedWarmCacheEncryptionKey();
+    if (!encryptionKey) return null;
+    return { id: scopedStorageId(WARM_CACHE_STORAGE_ID, storageScope), encryptionKey };
+}
+
+/**
+ * The warm-cache store, or `null` when this runtime cannot produce one — see
+ * `resolveWarmCacheStoragePlacement` for which runtimes those are and why.
+ */
+function getWarmCacheStorage(): MMKV | null {
+    if (warmCacheStorage) return warmCacheStorage;
+    if (warmCacheStorageUnopenable) return null;
+    const storageScope = warmCacheStorageScope();
+    purgeLegacyPlaintextWarmCache(storageScope);
+
+    const placement = resolveWarmCacheStoragePlacement(storageScope);
+    if (!placement) return null;
+
+    try {
+        warmCacheStorage = new MMKV(placement);
+    } catch {
+        // A store we cannot open stays unopened for this process: retrying per read would turn one
+        // unusable cache into a throw on every session-list update.
+        warmCacheStorageUnopenable = true;
+        warmCacheStorage = null;
+    }
+    return warmCacheStorage;
+}
 
 export const SessionListCacheEntryV1Schema = z.object({
     sessionId: z.string().min(1),
@@ -177,6 +351,7 @@ function loadScopedRecord<T>(
 ): T | null {
     if (!key) return null;
     const storage = getWarmCacheStorage();
+    if (!storage) return null;
     const raw = storage.getString(key);
     if (!raw) return null;
 
@@ -197,6 +372,7 @@ function loadScopedRecord<T>(
 function saveScopedRecord<T extends Record<string, unknown>>(key: string | null, value: T): void {
     if (!key) return;
     const storage = getWarmCacheStorage();
+    if (!storage) return;
     if (Object.keys(value).length === 0) {
         storage.delete(key);
         return;
@@ -247,42 +423,43 @@ export function saveSessionListWarmCacheEntries(
     persistedSessionListBaseline.remember(key, entries);
 }
 
-const SessionListPinnedSessionIdsSchema = z.object({
-    pinnedSessionIds: z.array(z.string().min(1)),
-});
-
 /**
- * Pinned rows must be hydrated with the first session-list page, and the request carries
- * the pinned ids so the server can merge those rows into it. Persisting the id *set*
- * (not merely the organization snapshot version) is what lets a cold boot issue that
- * request immediately instead of blocking the whole list behind the organization
- * snapshot round trip; persisting only the version would silently drop pinned hydration
- * on the first boot after install or cache eviction.
+ * The organization snapshot the session list last painted from, for one server and account.
+ *
+ * Pinned rows, folders, and manual order all come from organization state, and the store starts
+ * every process empty. Without this key a boot must either hold the session-list request until
+ * the organization round trip lands or paint a list it will immediately rearrange. Persisting
+ * the snapshot itself — rather than a derived subset such as the pinned ids — keeps one answer
+ * for "what organization did we last know", so the first paint is the organization the user
+ * left behind and the refresh only has to reconcile what actually changed.
+ *
+ * The value is a single record rather than a keyed entry map, so it does not use the entry
+ * baseline above; the serialized-bytes comparison is what keeps an unchanged refresh from
+ * rewriting the key.
  */
-export function loadSessionListPinnedSessionIdsWarmCache(
+export function loadSessionOrganizationWarmCacheSnapshot(
     serverId: string | null | undefined,
     accountId: string | null | undefined,
-): readonly string[] {
-    const record = loadScopedRecord(
-        buildScopedKey(SESSION_LIST_PINNED_IDS_WARM_CACHE_PREFIX, serverId, accountId),
-        SessionListPinnedSessionIdsSchema,
+): SessionOrganizationSnapshot | null {
+    // The superseded pinned-ids key only ever existed in the unencrypted instance, and
+    // `purgeLegacyPlaintextWarmCache` deletes it there along with the rest of the plaintext bytes,
+    // so there is no per-scope deletion to do here any more.
+    return loadScopedRecord(
+        buildScopedKey(SESSION_ORGANIZATION_WARM_CACHE_PREFIX, serverId, accountId),
+        SessionOrganizationSnapshotSchema,
     );
-    return record?.pinnedSessionIds ?? [];
 }
 
-export function saveSessionListPinnedSessionIdsWarmCache(
+export function saveSessionOrganizationWarmCacheSnapshot(
     serverId: string | null | undefined,
     accountId: string | null | undefined,
-    pinnedSessionIds: readonly string[],
+    snapshot: SessionOrganizationSnapshot,
 ): void {
-    const key = buildScopedKey(SESSION_LIST_PINNED_IDS_WARM_CACHE_PREFIX, serverId, accountId);
+    const key = buildScopedKey(SESSION_ORGANIZATION_WARM_CACHE_PREFIX, serverId, accountId);
     if (!key) return;
     const storage = getWarmCacheStorage();
-    if (pinnedSessionIds.length === 0) {
-        storage.delete(key);
-        return;
-    }
-    const serialized = JSON.stringify({ pinnedSessionIds: [...pinnedSessionIds] });
+    if (!storage) return;
+    const serialized = JSON.stringify(snapshot);
     if (storage.getString(key) === serialized) return;
     storage.set(key, serialized);
 }
