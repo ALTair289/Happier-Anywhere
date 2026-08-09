@@ -4,8 +4,21 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { buildReleaseNotesBundle } from '../pipeline/release/release-notes/project-release-notes.mjs';
+
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
+
+test('nightly-dev current UI version has an exact publishable changelog section', async () => {
+  const uiPackage = JSON.parse(await readFile(join(repoRoot, 'apps', 'ui', 'package.json'), 'utf8'));
+  const changelog = await readFile(join(repoRoot, 'apps', 'ui', 'CHANGELOG.md'), 'utf8');
+
+  const bundle = buildReleaseNotesBundle(changelog, uiPackage.version);
+
+  assert.equal(bundle.version, uiPackage.version);
+  assert.ok(bundle.projections.github.markdown.trim());
+  assert.ok(bundle.projections.expo.message.trim());
+});
 
 test('nightly-dev verifies exact immutable candidates before promoting rolling references', async () => {
   const raw = await readFile(join(repoRoot, '.github', 'workflows', 'nightly-dev.yml'), 'utf8');

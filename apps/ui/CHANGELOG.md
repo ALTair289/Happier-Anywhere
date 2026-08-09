@@ -1,5 +1,9 @@
 # Changelog
 
+## Version 0.2.10 - 2026-08-09
+
+This development release delivers the latest fixes and improvements for Happier's public dev channel.
+
 ## Version 0.2.6 - 2026-05-14
 
 This update improves session folder organization reliability.
