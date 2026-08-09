@@ -423,6 +423,31 @@ function isCurrentRenderableCompleteForWarmHydration(
     return true;
 }
 
+/**
+ * Single owner of "this row's plaintext is already decrypted and current".
+ *
+ * Keyed on the server's `metadataVersion` / `agentStateVersion`, which are safe
+ * discriminators: both session metadata writers compare-and-swap on the expected
+ * version and write `expectedVersion + 1` whenever the stored ciphertext changes,
+ * and the only path that leaves the version alone requires a byte-identical
+ * payload (or, for `plain` sessions, deeply equal JSON). An unchanged version
+ * therefore cannot conceal changed plaintext.
+ *
+ * Consumed both by the hydration-candidate filter and by the hydration row
+ * itself, so the "already decrypted" decision has exactly one definition.
+ */
+function canReuseDecryptedSessionPayload(
+    row: SessionListRow,
+    existingSession: Session | null | undefined,
+): existingSession is Session {
+    if (!existingSession) return false;
+    const metadataMatches = existingSession.metadataVersion === row.metadataVersion
+        && (row.metadata == null || existingSession.metadata != null);
+    const agentStateMatches = existingSession.agentStateVersion === row.agentStateVersion
+        && (row.agentState == null || existingSession.agentState != null || row.agentStateVersion === 0);
+    return metadataMatches && agentStateMatches;
+}
+
 function needsWarmHydration(params: {
     row: SessionListRow;
     existingSession?: Session | null | undefined;
@@ -430,14 +455,15 @@ function needsWarmHydration(params: {
     isRequiredHydrationRow?: boolean;
 }): boolean {
     const { row } = params;
+    // A required row is always re-applied: its moving scalar projection
+    // (`seq`, `updatedAt`, the runtime-activity tuple) has to reach the stored
+    // session even when the encrypted payload did not change. Whether that
+    // re-application costs a decrypt is a separate question, answered by
+    // `canReuseDecryptedSessionPayload` at hydration time.
     if (params.isRequiredHydrationRow) return true;
     const existingSession = params.existingSession;
     if (existingSession) {
-        const existingMetadataMatches = existingSession.metadataVersion === row.metadataVersion
-            && (row.metadata == null || existingSession.metadata != null);
-        const existingAgentStateMatches = existingSession.agentStateVersion === row.agentStateVersion
-            && (row.agentState == null || existingSession.agentState != null || row.agentStateVersion === 0);
-        if (existingMetadataMatches && existingAgentStateMatches) {
+        if (canReuseDecryptedSessionPayload(row, existingSession)) {
             return false;
         }
         return true;
@@ -897,6 +923,38 @@ function reportStaleHydratedSessionsSkipped(params: Readonly<{
         beforeEnqueue: params.phase === 'beforeEnqueue' ? 1 : 0,
         flush: params.phase === 'flush' ? 1 : 0,
     });
+}
+
+/**
+ * Re-projects a row onto plaintext this client already decrypted, without
+ * touching the crypto path.
+ *
+ * A row is re-hydrated whenever any of its scalars move — `seq`, `updatedAt`,
+ * the runtime-activity tuple — and those move on every streaming tick. Only the
+ * encrypted payload is expensive, and only `metadataVersion` /
+ * `agentStateVersion` say whether it changed. Splitting the two lets a required
+ * row keep publishing its fresh scalars while the unchanged envelope is decrypted
+ * once instead of once per refresh.
+ */
+function reuseHydratedSessionForRow(
+    row: SessionListRow,
+    existingSession: Session | null | undefined,
+    serverId?: string | null,
+): HydratedSession | null {
+    if (!canReuseDecryptedSessionPayload(row, existingSession)) return null;
+    const encryptionMode: 'e2ee' | 'plain' = row.encryptionMode === 'plain' ? 'plain' : 'e2ee';
+    const hydrated = buildHydratedSessionFromDecryptedRow(
+        row,
+        encryptionMode,
+        { metadata: existingSession.metadata, agentState: existingSession.agentState },
+        serverId,
+    );
+    syncPerformanceTelemetry.count('sync.sessions.snapshot.decryptRow.reusedPayload', {
+        sessions: 1,
+        encrypted: encryptionMode === 'plain' ? 0 : 1,
+        plain: encryptionMode === 'plain' ? 1 : 0,
+    });
+    return hydrated;
 }
 
 async function decryptSessionRow(
@@ -1691,7 +1749,11 @@ export async function fetchAndApplySessions(params: {
                                             return null;
                                         }
                                         const decryptStartedAtMs = nowMs();
-                                        const decryptedSession = await decryptSessionRow(row, encryption, params.serverId);
+                                        const decryptedSession = reuseHydratedSessionForRow(
+                                            row,
+                                            params.getExistingSession?.(row.id),
+                                            params.serverId,
+                                        ) ?? await decryptSessionRow(row, encryption, params.serverId);
                                         addBackgroundHydrationDuration(
                                             hydrationAttribution,
                                             'decryptRowMs',
@@ -1861,7 +1923,11 @@ export async function fetchAndApplySessions(params: {
                     missingEncryptedDataKeySessionIds,
                     encryption,
                 }))
-                .map((row) => async () => decryptSessionRow(row, encryption, params.serverId)),
+                .map((row) => async () => reuseHydratedSessionForRow(
+                    row,
+                    params.getExistingSession?.(row.id),
+                    params.serverId,
+                ) ?? decryptSessionRow(row, encryption, params.serverId)),
             concurrencyLimit,
         ),
     );
