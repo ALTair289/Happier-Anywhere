@@ -39,7 +39,7 @@ export {
   resolveYarnCommand,
 };
 export { prepareMinisignSecretKeyFile } from './minisign-secret-key.mjs';
-export { fileSha256 } from './release-files.mjs';
+export { fileSha256, writeChecksumsFile } from './release-files.mjs';
 export { maybeSignFile } from './minisign-signing.mjs';
 export { normalizeChannel, parseArgs } from './release-arguments.mjs';
 
@@ -643,17 +643,6 @@ async function execTarWithRetry(args, options = {}) {
       throw error;
     }
   }
-}
-
-export async function writeChecksumsFile({ product, version, artifacts, outDir }) {
-  const checksumsPath = join(outDir, `checksums-${product}-v${version}.txt`);
-  const lines = [];
-  for (const artifact of artifacts) {
-    const hash = await fileSha256(artifact.path);
-    lines.push(`${hash}  ${artifact.name}`);
-  }
-  await writeFile(checksumsPath, `${lines.join('\n')}\n`, 'utf-8');
-  return checksumsPath;
 }
 
 export function readVersionFromPackageJson(path) {
