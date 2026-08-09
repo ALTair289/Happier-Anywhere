@@ -340,15 +340,15 @@ jobs:
       run_server_db_contract: false
       run_providers: false
       run_release_contracts: false
-      run_installers_smoke: ${{ needs.resolve_validation_profile.outputs.run_installers_smoke }}
+      run_installers_smoke: ${{ fromJSON(needs.resolve_validation_profile.outputs.run_installers_smoke) }}
       installers_channel: ${{ inputs.channel == 'production' && 'stable' || inputs.channel == 'dev' && 'dev' || 'preview' }}
       installers_source: ${{ inputs.candidate_cli_version != '' && 'published-tag' || 'published-channel' }}
       installers_ref: ${{ inputs.candidate_cli_version != '' && format('cli-v{0}', inputs.candidate_cli_version) || '' }}
-      run_binary_smoke: ${{ needs.resolve_validation_profile.outputs.run_binary_smoke }}
-      run_cli_update_continuity: ${{ needs.resolve_validation_profile.outputs.run_cli_update_continuity }}
-      run_daemon_continuity: ${{ needs.resolve_validation_profile.outputs.run_daemon_continuity }}
-      run_session_continuity: ${{ needs.resolve_validation_profile.outputs.run_session_continuity }}
-      run_self_host_systemd: ${{ needs.resolve_validation_profile.outputs.run_self_host_systemd }}
-      run_self_host_launchd: ${{ needs.resolve_validation_profile.outputs.run_self_host_launchd }}
-      run_self_host_schtasks: ${{ needs.resolve_validation_profile.outputs.run_self_host_schtasks }}
-      run_self_host_daemon: ${{ needs.resolve_validation_profile.outputs.run_self_host_daemon }}
+      run_binary_smoke: ${{ fromJSON(needs.resolve_validation_profile.outputs.run_binary_smoke) }}
+      run_cli_update_continuity: ${{ fromJSON(needs.resolve_validation_profile.outputs.run_cli_update_continuity) }}
+      run_daemon_continuity: ${{ fromJSON(needs.resolve_validation_profile.outputs.run_daemon_continuity) }}
+      run_session_continuity: ${{ fromJSON(needs.resolve_validation_profile.outputs.run_session_continuity) }}
+      run_self_host_systemd: ${{ fromJSON(needs.resolve_validation_profile.outputs.run_self_host_systemd) }}
+      run_self_host_launchd: ${{ fromJSON(needs.resolve_validation_profile.outputs.run_self_host_launchd) }}
+      run_self_host_schtasks: ${{ fromJSON(needs.resolve_validation_profile.outputs.run_self_host_schtasks) }}
+      run_self_host_daemon: ${{ fromJSON(needs.resolve_validation_profile.outputs.run_self_host_daemon) }}

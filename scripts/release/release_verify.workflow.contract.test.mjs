@@ -23,6 +23,13 @@ test('release-verify resolves public validation profiles centrally while retaini
   assert.match(String(workflow.jobs.resolve_validation_profile.steps?.at(-1)?.run ?? ''), /release-contract/);
   assert.ok(workflow.jobs.verify.needs.includes('resolve_validation_profile'));
 
+  const verifyBlock = raw.slice(raw.indexOf('\n  verify:'));
+  assert.equal(
+    (verifyBlock.match(/^    if:/gm) ?? []).length,
+    1,
+    'the nested reusable verification job must have exactly one condition key',
+  );
+
   for (const inputName of [
     'run_cli_update_continuity',
     'run_daemon_continuity',
@@ -38,10 +45,23 @@ test('release-verify resolves public validation profiles centrally while retaini
       new RegExp(`${inputName}:\\n\\s+required: false\\n\\s+default: true\\n\\s+type: boolean`),
       `release-verify workflow_call should expose ${inputName}`,
     );
+  }
+
+  for (const inputName of [
+    'run_installers_smoke',
+    'run_binary_smoke',
+    'run_cli_update_continuity',
+    'run_daemon_continuity',
+    'run_session_continuity',
+    'run_self_host_systemd',
+    'run_self_host_launchd',
+    'run_self_host_schtasks',
+    'run_self_host_daemon',
+  ]) {
     assert.equal(
       workflow.jobs.verify.with?.[inputName],
-      '${{ needs.resolve_validation_profile.outputs.' + inputName + ' }}',
-      `release-verify should forward resolver-owned ${inputName} into tests.yml`,
+      '${{ fromJSON(needs.resolve_validation_profile.outputs.' + inputName + ') }}',
+      `release-verify should convert resolver-owned ${inputName} to a boolean before calling tests.yml`,
     );
   }
 });
