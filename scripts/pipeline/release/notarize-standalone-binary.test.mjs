@@ -26,9 +26,12 @@ import {
 
 const MACH_O_64_LE_MAGIC = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
 
-function writeMachOFixture(filePath, suffix) {
+function writeMachOFixture(filePath, suffix, fileType = 2) {
   mkdirSync(path.dirname(filePath), { recursive: true });
-  writeFileSync(filePath, Buffer.concat([MACH_O_64_LE_MAGIC, Buffer.from(suffix)]));
+  const header = Buffer.alloc(32);
+  MACH_O_64_LE_MAGIC.copy(header);
+  header.writeUInt32LE(fileType, 12);
+  writeFileSync(filePath, Buffer.concat([header, Buffer.from(suffix)]));
   chmodSync(filePath, 0o755);
 }
 
@@ -42,8 +45,7 @@ test('Darwin payload Mach-O discovery is exhaustive, deterministic, inside-out, 
       'esbuild',
     );
     const dylibPath = path.join(payloadDir, 'node_modules', 'native', 'addon.node');
-    writeMachOFixture(dylibPath, 'addon');
-    chmodSync(dylibPath, 0o644);
+    writeMachOFixture(dylibPath, 'addon', 6);
     const scriptPath = path.join(payloadDir, 'scripts', 'run.sh');
     mkdirSync(path.dirname(scriptPath), { recursive: true });
     writeFileSync(scriptPath, '#!/bin/sh\nexit 0\n', 'utf8');
@@ -57,21 +59,24 @@ test('Darwin payload Mach-O discovery is exhaustive, deterministic, inside-out, 
     chmodSync(javaClassPath, 0o755);
 
     assert.deepEqual(
-      listDarwinPayloadMachOCode(payloadDir).map(({ relativePath, executable }) => ({
+      listDarwinPayloadMachOCode(payloadDir).map(({ relativePath, executable, gatekeeperAssessable }) => ({
         relativePath,
         executable,
+        gatekeeperAssessable,
       })),
       [
         {
           relativePath: 'node_modules/esbuild/node_modules/@esbuild/darwin-arm64/bin/esbuild',
           executable: true,
+          gatekeeperAssessable: true,
         },
         {
           relativePath: 'node_modules/native/addon.node',
-          executable: false,
+          executable: true,
+          gatekeeperAssessable: false,
         },
-        { relativePath: 'tools/rg', executable: true },
-        { relativePath: 'happier', executable: true },
+        { relativePath: 'tools/rg', executable: true, gatekeeperAssessable: true },
+        { relativePath: 'happier', executable: true, gatekeeperAssessable: true },
       ],
     );
   } finally {
@@ -88,16 +93,19 @@ test('Darwin payload notarization signs and strictly verifies every Mach-O leaf 
         path: '/tmp/happier-v1.2.3-darwin-arm64/node_modules/@esbuild/darwin-arm64/bin/esbuild',
         relativePath: 'node_modules/@esbuild/darwin-arm64/bin/esbuild',
         executable: true,
+        gatekeeperAssessable: true,
       },
       {
         path: '/tmp/happier-v1.2.3-darwin-arm64/node_modules/native/addon.node',
         relativePath: 'node_modules/native/addon.node',
-        executable: false,
+        executable: true,
+        gatekeeperAssessable: false,
       },
       {
         path: '/tmp/happier-v1.2.3-darwin-arm64/happier',
         relativePath: 'happier',
         executable: true,
+        gatekeeperAssessable: true,
       },
     ],
     zipPath: '/tmp/notary/happier-payload.zip',
@@ -190,6 +198,7 @@ test('Darwin payload evidence binds every staged byte, mode, symlink, and discov
   try {
     writeMachOFixture(path.join(payloadDir, 'happier'), 'root');
     writeMachOFixture(path.join(payloadDir, 'tools', 'nested'), 'nested');
+    writeMachOFixture(path.join(payloadDir, 'node_modules', 'native', 'addon.node'), 'addon', 6);
     mkdirSync(path.join(payloadDir, 'scripts'), { recursive: true });
     writeFileSync(path.join(payloadDir, 'scripts', 'run.sh'), '#!/bin/sh\nexit 0\n', 'utf8');
     chmodSync(path.join(payloadDir, 'scripts', 'run.sh'), 0o755);
@@ -213,15 +222,17 @@ test('Darwin payload evidence binds every staged byte, mode, symlink, and discov
       },
     }, null, 2)}\n`, 'utf8');
 
+    const assessedPaths = [];
     assert.equal(
       verifyDarwinPayloadNotarizationEvidence({
         payloadPath: payloadDir,
         evidencePath,
         verifyCode: () => {},
-        assessCode: () => {},
+        assessCode: (entryPath) => assessedPaths.push(path.relative(payloadDir, entryPath)),
       }).payloadSha256,
       snapshot.payloadSha256,
     );
+    assert.deepEqual(assessedPaths, ['tools/nested', 'happier']);
 
     writeFileSync(path.join(payloadDir, 'scripts', 'run.sh'), '#!/bin/sh\nexit 9\n', 'utf8');
     assert.throws(
