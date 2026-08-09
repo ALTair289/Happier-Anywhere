@@ -14,19 +14,25 @@ async function loadWorkflow() {
   return { raw, parsed: parse(raw) };
 }
 
-test('release workflow keeps workflow_dispatch inputs under GitHub limit', async () => {
+test('release workflow keeps workflow_dispatch inputs under GitHub current limit', async () => {
   const { parsed } = await loadWorkflow();
   const inputs = parsed?.on?.workflow_dispatch?.inputs ?? {};
-  assert.ok(Object.keys(inputs).length <= 10, 'workflow_dispatch inputs must stay <= 10');
+  assert.ok(Object.keys(inputs).length <= 25, 'workflow_dispatch inputs must stay <= 25');
 });
 
 test('release workflow uses compact grouped inputs', async () => {
   const { parsed } = await loadWorkflow();
   const inputs = parsed?.on?.workflow_dispatch?.inputs ?? {};
 
-  for (const key of ['checks_profile', 'deploy_targets', 'force_deploy', 'ui_expo_action', 'desktop_mode', 'bump', 'confirm', 'release_message']) {
+  for (const key of ['validation_profile', 'deploy_targets', 'force_deploy', 'ui_expo_action', 'desktop_mode', 'bump', 'confirm', 'authorized_promotion_source_sha', 'workflow_control_sha']) {
     assert.ok(inputs[key], `expected grouped input ${key}`);
   }
+  assert.equal(inputs.checks_profile, undefined, 'the public release profile owns its checks mapping');
+  assert.deepEqual(inputs.validation_profile.options, ['integrated', 'stable']);
+  assert.equal(inputs.validation_profile.default, 'integrated');
+  assert.equal(inputs.workflow_control_sha.required, false);
+  assert.equal(inputs.workflow_control_sha.default, '');
+  assert.equal(inputs.release_message, undefined, 'release notes must come from the exact candidate rather than a manual input');
 
   for (const legacyKey of [
     'custom_checks',
@@ -43,6 +49,30 @@ test('release workflow uses compact grouped inputs', async () => {
   ]) {
     assert.equal(inputs[legacyKey], undefined, `workflow_dispatch input ${legacyKey} should be removed from the compact manual surface`);
   }
+});
+
+test('release workflow resolves the public profile internally before CI and planning', async () => {
+  const { raw, parsed } = await loadWorkflow();
+  const resolver = parsed.jobs.resolve_validation_profile;
+  const resolverStep = resolver?.steps?.find((step) => step?.id === 'resolve');
+
+  assert.ok(resolver, 'workflow dispatch must resolve profile ownership before callers can schedule checks');
+  assert.deepEqual(resolver.needs, ['release_actor_guard']);
+  assert.equal(resolver.outputs.profile, '${{ steps.resolve.outputs.profile }}');
+  assert.equal(resolver.outputs.checks_profile, '${{ steps.resolve.outputs.checks_profile }}');
+  assert.equal(resolverStep?.env?.VALIDATION_PROFILE, '${{ inputs.validation_profile }}');
+  assert.match(resolverStep?.run ?? '', /profile\?\.normalRelease/);
+  assert.match(resolverStep?.run ?? '', /profile\?\.checksProfile/);
+  assert.doesNotMatch(resolverStep?.run ?? '', /CHECKS_PROFILE/);
+
+  assert.deepEqual(parsed.jobs.ci.needs, ['resolve_validation_profile']);
+  assert.equal(parsed.jobs.ci.if, "${{ needs.resolve_validation_profile.result == 'success' }}");
+  assert.equal(parsed.jobs.ci.with.run_e2e_core, "${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}");
+  assert.equal(parsed.jobs.ci.with.run_e2e_core_slow, "${{ needs.resolve_validation_profile.outputs.checks_profile == 'full' }}");
+  assert.ok(parsed.jobs.plan.needs.includes('resolve_validation_profile'));
+  assert.equal(parsed.jobs.plan.outputs.validation_profile, '${{ needs.resolve_validation_profile.outputs.profile }}');
+  assert.equal(parsed.jobs.plan.outputs.checks_profile, '${{ needs.resolve_validation_profile.outputs.checks_profile }}');
+  assert.doesNotMatch(raw, /inputs\.checks_profile/, 'no workflow path may retain a caller-selected checks profile');
 });
 
 test('release workflow derives promote mode from confirm and uses compact defaults for advanced options', async () => {

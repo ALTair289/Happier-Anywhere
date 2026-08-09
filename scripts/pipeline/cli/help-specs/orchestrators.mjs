@@ -15,24 +15,26 @@ export const COMMAND_HELP_ORCHESTRATORS = {
   release: {
     summary: 'Orchestrate a full dev/preview/production release (recommended entrypoint).',
     usage:
-      'node scripts/pipeline/run.mjs release --confirm <action> --repository <owner/repo> [--deploy-environment dev|preview|production] [--deploy-targets <csv>] [--dry-run]',
+      'node scripts/pipeline/run.mjs release --confirm <action> --repository <owner/repo> [--deploy-environment dev|preview|production] [--deploy-targets <csv>] [--source-sha <sha>] [--dry-run] [--json]',
     options: [
       '--confirm <action>                Required safety confirmation.',
       '--repository <owner/repo>         Required; e.g. happier-dev/happier.',
       "--deploy-environment <env>        dev|preview|production (default: preview).",
       '--deploy-targets <csv>            ui,server,website,docs,cli,stack,server_runner (default: ui,server,website,docs).',
       '--force-deploy <bool>             true|false (default: false).',
-      '--bump <preset>                   none|patch|minor|major (default: none).',
+      '--bump <preset>                   Final releases require none; materialize version/changelog updates before dispatch.',
       '--ui-expo-action <mode>           none|ota|native|native_submit (default: none).',
       '--desktop-mode <mode>             none|build_only|build_and_publish (default: none).',
-      '--release-message <text>          Optional; included in GitHub releases.',
       '--release-profile <profile>       integrated|stable|deep (default: integrated for dev/preview, stable for production; deep is manual-only).',
+      '--source-sha <sha>                Required for non-dry hosted dispatch; exact source commit to promote.',
       '--allow-dirty <bool>              true|false (default: false).',
       '--dry-run                          Print release facts and hosted inputs without mutating.',
+      '--json                            With --dry-run, emit the exact promotion-source dispatch plan as JSON.',
     ],
     bullets: [
       'Dry-run computes non-mutating release facts and prints hosted dispatch inputs without predicting hosted jobs.',
       'Non-dry preview/production releases dispatch release.yml; privileged release writes remain hosted.',
+      'Final release dispatches require an exact source SHA and never create a post-admission version-bump commit.',
       'The local dispatcher resolves integrated/stable through the public release contract; deep is never a normal release dispatch.',
       'Refuses to publish from a dirty worktree by default (use --allow-dirty true when intentional).',
       'Use --dry-run first; once green, re-run without --dry-run to dispatch.',
@@ -40,7 +42,7 @@ export const COMMAND_HELP_ORCHESTRATORS = {
     examples: [
       'node scripts/pipeline/run.mjs release --confirm "release dev to dev" --repository happier-dev/happier --deploy-environment dev --dry-run',
       'node scripts/pipeline/run.mjs release --confirm "release dev to preview" --repository happier-dev/happier --deploy-environment preview --dry-run',
-      'node scripts/pipeline/run.mjs release --confirm "release dev to preview" --repository happier-dev/happier --deploy-environment preview',
+      'node scripts/pipeline/run.mjs release --confirm "release dev to preview" --repository happier-dev/happier --deploy-environment preview --source-sha <40-character-sha>',
     ],
   },
 
@@ -68,9 +70,10 @@ export const COMMAND_HELP_ORCHESTRATORS = {
   'promote-branch': {
     summary: 'Promote one branch to another (fast-forward or reset) via GitHub API.',
     usage:
-      'node scripts/pipeline/run.mjs promote-branch --source <branch> --target <branch> --mode <fast_forward|reset> --confirm <string> [--allow-reset true|false] [--summary-file <path>] [--dry-run]',
+      'node scripts/pipeline/run.mjs promote-branch --source <branch> --target <branch> --mode <fast_forward|reset> --confirm <string> [--source-sha <sha>] [--allow-reset true|false] [--summary-file <path>] [--dry-run]',
     options: [
       '--source <branch>                 Required; e.g. dev.',
+      '--source-sha <sha>                Required unless --dry-run; exact source commit to mutate from.',
       '--target <branch>                 Required; e.g. main.',
       '--mode <fast_forward|reset>       Required.',
       '--confirm <text>                  Required safety text (free-form).',

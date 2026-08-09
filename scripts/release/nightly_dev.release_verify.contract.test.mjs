@@ -27,10 +27,10 @@ test('nightly-dev verifies exact immutable candidates before promoting rolling r
     'release verification should consume the exact SHA and immutable versions produced by candidate jobs',
   );
 
-  assert.match(raw, /promote_server:[\s\S]*?needs:\s*\[server_runtime, release_verify\]/);
-  assert.match(raw, /promote_hstack:[\s\S]*?needs:\s*\[hstack, promote_server\]/);
-  assert.match(raw, /promote_cli:[\s\S]*?needs:\s*\[cli, promote_hstack\]/);
-  assert.match(raw, /promote_ui_web:[\s\S]*?needs:\s*\[ui_web, promote_cli\]/);
+  assert.match(raw, /promote_server:[\s\S]*?needs:\s*\[prepare_release_candidate, server_runtime, release_verify\]/);
+  assert.match(raw, /promote_hstack:[\s\S]*?needs:\s*\[prepare_release_candidate, hstack, promote_server\]/);
+  assert.match(raw, /promote_cli:[\s\S]*?needs:\s*\[prepare_release_candidate, cli, promote_hstack\]/);
+  assert.match(raw, /promote_ui_web:[\s\S]*?needs:\s*\[prepare_release_candidate, ui_web, promote_cli\]/);
   assert.match(
     raw,
     /docker:[\s\S]*?needs:\s*\[prepare_release_candidate, cli, server_runtime, promote_ui_web\][\s\S]*?server_version:\s*\$\{\{ needs\.server_runtime\.outputs\.version \}\}[\s\S]*?cli_version:\s*\$\{\{ needs\.cli\.outputs\.version \}\}/,
@@ -43,5 +43,48 @@ test('nightly-dev verifies exact immutable candidates before promoting rolling r
     releaseVerifyBlock,
     /needs:\s*\[[^\]]*(?:ui_mobile|ui_desktop|docker)/,
     'candidate verification must not depend on jobs that already publish user-consumed mobile, desktop, or Docker outputs',
+  );
+});
+
+test('nightly-dev projects one exact candidate note bundle and terminal status', async () => {
+  const raw = await readFile(join(repoRoot, '.github', 'workflows', 'nightly-dev.yml'), 'utf8');
+
+  assert.match(
+    raw,
+    /prepare_release_candidate:[\s\S]*?release_notes_github_markdown:[\s\S]*?release_notes_expo_message:[\s\S]*?project-release-notes\.mjs/,
+    'the exact nightly checkout must produce both note projections',
+  );
+
+  for (const job of [
+    'cli',
+    'hstack',
+    'server_runtime',
+    'ui_web',
+    'promote_server',
+    'promote_hstack',
+    'promote_cli',
+    'promote_ui_web',
+  ]) {
+    assert.match(
+      raw,
+      new RegExp(job + ':[\\s\\S]*?needs:\\s*\\[[^\\]]*prepare_release_candidate[^\\]]*\\][\\s\\S]*?release_message:\\s*\\$\\{\\{\\s*needs\\.prepare_release_candidate\\.outputs\\.release_notes_github_markdown\\s*\\}\\}'),
+      job + ' must consume the exact candidate GitHub note projection',
+    );
+  }
+
+  assert.match(
+    raw,
+    /ui_mobile:[\s\S]*?release_message:\s*\$\{\{\s*needs\.prepare_release_candidate\.outputs\.release_notes_expo_message\s*\}\}/,
+    'mobile OTA metadata must use the bounded Expo note projection',
+  );
+  assert.match(
+    raw,
+    /ui_desktop:[\s\S]*?release_message:\s*\$\{\{\s*needs\.prepare_release_candidate\.outputs\.release_notes_github_markdown\s*\}\}/,
+    'desktop publication must receive the same approved GitHub note projection',
+  );
+  assert.match(
+    raw,
+    /release_status:[\s\S]*?if:\s*\$\{\{\s*always\(\)\s*\}\}[\s\S]*?needs:\s*\[[^\]]*hstack[^\]]*promote_hstack[^\]]*\][\s\S]*?summarize-release-status\.mjs[\s\S]*?GITHUB_STEP_SUMMARY/,
+    'nightly terminal status must include the HStack candidate and promotion outcomes',
   );
 });

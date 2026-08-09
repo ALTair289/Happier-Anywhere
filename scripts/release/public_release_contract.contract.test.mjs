@@ -5,7 +5,10 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { versionedComponents } from '../pipeline/release/component-registry.mjs';
-import { RELEASE_VALIDATION_SUITES } from '../pipeline/release-validation/registry.mjs';
+import { resolveHostedChecksProfileForReleaseProfile } from '../pipeline/release/public-release-contract.mjs';
+import * as releaseValidationRegistry from '../pipeline/release-validation/registry.mjs';
+
+const { RELEASE_VALIDATION_SUITES } = releaseValidationRegistry;
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
@@ -87,6 +90,7 @@ test('release-contract profiles distinguish bounded normal release validation fr
     {
       id: 'integrated',
       normalRelease: true,
+      checksProfile: 'fast',
       automaticSuiteIds: integratedAutomaticSuiteIds,
       compatibilityDirections: expectedCompatibilityDirections,
       manualChecks: [supportedOlderRelayCompatibilityCheck],
@@ -94,6 +98,7 @@ test('release-contract profiles distinguish bounded normal release validation fr
     {
       id: 'stable',
       normalRelease: true,
+      checksProfile: 'full',
       automaticSuiteIds: stableAutomaticSuiteIds,
       compatibilityDirections: expectedCompatibilityDirections,
       manualChecks: [supportedOlderRelayCompatibilityCheck, 'agent-diff-sanity'],
@@ -101,6 +106,7 @@ test('release-contract profiles distinguish bounded normal release validation fr
     {
       id: 'deep',
       normalRelease: false,
+      checksProfile: null,
       automaticSuiteIds: [],
       compatibilityDirections: expectedCompatibilityDirections,
       manualChecks: [
@@ -114,6 +120,10 @@ test('release-contract profiles distinguish bounded normal release validation fr
       ],
     },
   ]);
+  assert.deepEqual(releaseValidationRegistry.RELEASE_VALIDATION_PROFILES, contract.validationProfiles);
+  assert.equal(resolveHostedChecksProfileForReleaseProfile('integrated'), 'fast');
+  assert.equal(resolveHostedChecksProfileForReleaseProfile('stable'), 'full');
+  assert.equal(resolveHostedChecksProfileForReleaseProfile('deep'), null);
 });
 
 test('release-contract is discoverable from pipeline help', () => {

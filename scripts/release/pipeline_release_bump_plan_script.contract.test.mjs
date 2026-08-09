@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -178,4 +178,26 @@ test('resolve-bump-plan honors per-component versioned change inputs over global
     bump_website: 'none',
     should_bump: true,
   });
+});
+
+test('resolve-bump-plan rejects an automatic bump when called by the final release admission path', () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      resolve(repoRoot, 'scripts', 'pipeline', 'release', 'resolve-bump-plan.mjs'),
+      '--environment', 'preview',
+      '--bump-preset', 'patch',
+      '--changed-ui', 'true',
+      '--changed-cli', 'false',
+      '--changed-stack', 'false',
+      '--changed-server', 'false',
+      '--changed-website', 'false',
+      '--changed-shared', 'false',
+      '--require-materialized',
+    ],
+    { cwd: repoRoot, env: process.env, encoding: 'utf8' },
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Materialize and commit changelog and version updates, then rerun with --bump none\./);
 });

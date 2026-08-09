@@ -39,11 +39,13 @@ import {
   normalizePublicReleaseChannel,
 } from './release/lib/public-release-rings.mjs';
 import { resolveRemoteReleasePlanningRefs } from './release/lib/release-planning-remote-refs.mjs';
+import { MATERIALIZED_RELEASE_BUMP_ADMISSION_MESSAGE } from './release/resolve-bump-plan.mjs';
 import {
   resolveHostedChecksProfileForReleaseProfile,
   resolvePublicReleaseValidationProfile,
 } from './release/public-release-contract.mjs';
 import { releaseTargets } from './release/component-registry.mjs';
+import { resolveAuthorizedReleaseSource } from './github/resolve-authorized-release-source.mjs';
 
 function fail(message) {
   console.error(message);
@@ -56,6 +58,7 @@ const TAURI_RELEASE_ENVIRONMENT_CHOICES = formatPublicReleaseChannelChoices({
   preferredOrder: ['dev', 'preview', 'stable'],
 });
 const ANDROID_RELEASE_STATUS_CHOICES = ['profile', 'completed', 'draft', 'halted', 'inProgress'];
+const FULL_GIT_SHA = /^[a-f0-9]{40}$/;
 
 /**
  * @param {unknown} value
@@ -112,6 +115,14 @@ function isDeployEnvironment(v) {
  */
 function isReleaseDeployEnvironment(v) {
   return v === 'dev' || v === 'production' || v === 'preview';
+}
+
+/**
+ * @param {string} action
+ * @returns {'dev' | 'preview'}
+ */
+function resolveReleasePromotionSourceBranch(action) {
+  return action === 'release preview to main' || action === 'reset main from preview' ? 'preview' : 'dev';
 }
 
 /**
@@ -4067,6 +4078,7 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
         args: rest,
         options: {
           source: { type: 'string' },
+          'source-sha': { type: 'string', default: '' },
           target: { type: 'string' },
           mode: { type: 'string' },
           confirm: { type: 'string', default: '' },
@@ -4082,18 +4094,21 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
     });
 
     const source = String(values.source ?? '').trim();
+    const sourceSha = String(values['source-sha'] ?? '').trim();
     const target = String(values.target ?? '').trim();
       const mode = String(values.mode ?? '').trim();
       const confirm = String(values.confirm ?? '').trim();
       const allowReset = String(values['allow-reset'] ?? '').trim();
       const summaryFile = String(values['summary-file'] ?? '').trim();
-      const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
-      const dryRun = values['dry-run'] === true;
-      if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
-
       if (!source || !target || !mode) {
         fail('--source, --target, and --mode are required');
       }
+      const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+      const dryRun = values['dry-run'] === true;
+      if (!dryRun && !sourceSha) {
+        fail('--source-sha is required unless --dry-run is used.');
+      }
+      if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
 
     const { env, sources } = loadPipelineEnv({ repoRoot });
     const secretsSourceRaw = String(values['secrets-source'] ?? '').trim();
@@ -4130,6 +4145,7 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
       args: [
         '--source',
         source,
+        ...(sourceSha ? ['--source-sha', sourceSha] : []),
         '--target',
         target,
         '--mode',
@@ -4240,10 +4256,11 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               bump: { type: 'string', default: 'none' },
               'ui-expo-action': { type: 'string', default: 'none' },
               'desktop-mode': { type: 'string', default: 'none' },
-              'release-message': { type: 'string', default: '' },
               'release-profile': { type: 'string', default: '' },
+              'source-sha': { type: 'string', default: '' },
               'allow-dirty': { type: 'string', default: 'false' },
               'dry-run': { type: 'boolean', default: false },
+              json: { type: 'boolean', default: false },
             },
             allowPositionals: false,
           });
@@ -4293,18 +4310,29 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           }
 
           const dryRun = values['dry-run'] === true;
-          const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
-          if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
-          assertNoStagedChanges({ cwd: repoRoot, allowDirty, dryRun });
-
+          const json = values.json === true;
           const forceDeploy = parseBoolString(values['force-deploy'], '--force-deploy');
           const bumpPreset = String(values.bump ?? '').trim() || 'none';
+          const authorizedPromotionSourceSha = String(values['source-sha'] ?? '').trim().toLowerCase();
+          const promotionSourceBranch = resolveReleasePromotionSourceBranch(action);
 
           const uiExpoAction = String(values['ui-expo-action'] ?? '').trim() || 'none';
           const desktopMode = String(values['desktop-mode'] ?? '').trim() || 'none';
 
           if (!['none', 'patch', 'minor', 'major'].includes(bumpPreset)) {
             fail(`--bump must be one of: none, patch, minor, major (got: ${bumpPreset})`);
+          }
+          if (bumpPreset !== 'none') {
+            fail(MATERIALIZED_RELEASE_BUMP_ADMISSION_MESSAGE);
+          }
+          if (json && !dryRun) {
+            fail('--json is only available with --dry-run.');
+          }
+          if (authorizedPromotionSourceSha && !FULL_GIT_SHA.test(authorizedPromotionSourceSha)) {
+            fail('--source-sha must be a full 40-character commit SHA when provided.');
+          }
+          if (!dryRun && !authorizedPromotionSourceSha) {
+            fail('--source-sha is required for a hosted release dispatch.');
           }
           if (!['none', 'ota', 'native', 'native_submit'].includes(uiExpoAction)) {
             fail(`--ui-expo-action must be one of: none, ota, native, native_submit (got: ${uiExpoAction})`);
@@ -4313,7 +4341,6 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             fail(`--desktop-mode must be one of: none, build_only, build_and_publish (got: ${desktopMode})`);
           }
 
-          const releaseMessage = String(values['release-message'] ?? '').trim();
           const requestedReleaseProfileId = String(values['release-profile'] ?? '').trim();
           const releaseProfileId = requestedReleaseProfileId || (deployEnvironment === 'production' ? 'stable' : 'integrated');
           const releaseProfile = resolvePublicReleaseValidationProfile(releaseProfileId);
@@ -4327,6 +4354,10 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           if (!hostedChecksProfile) {
             fail(`--release-profile ${releaseProfile.id} has no hosted checks mapping.`);
           }
+
+          const allowDirty = parseBoolString(values['allow-dirty'], '--allow-dirty');
+          if (!dryRun) assertCleanWorktree({ cwd: repoRoot, allowDirty });
+          assertNoStagedChanges({ cwd: repoRoot, allowDirty, dryRun });
 
           if (!dryRun) {
             if (deployEnvironment === 'dev') {
@@ -4342,6 +4373,12 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             if (!/(^|\/)(dev|upstream-dev)$/.test(currentBranch)) {
               fail(`Local release dispatch expects branch 'dev' or '*\\/upstream-dev' (current: ${currentBranch}).`);
             }
+            const authorizedPromotionSource = await resolveAuthorizedReleaseSource({
+              repoRoot,
+              remoteUrl: 'origin',
+              sourceRef: `refs/heads/${promotionSourceBranch}`,
+              authorizedSha: authorizedPromotionSourceSha,
+            });
             const workflowArgs = [
               'workflow', 'run', 'release.yml',
               '--repo', repository,
@@ -4355,8 +4392,8 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               '-f', `ui_expo_action=${uiExpoAction}`,
               '-f', `desktop_mode=${desktopMode}`,
               '-f', `bump=${bumpPreset}`,
+              '-f', `authorized_promotion_source_sha=${authorizedPromotionSource.sha}`,
               '-f', `confirm=${action}`,
-              '-f', `release_message=${releaseMessage}`,
             ];
             execFileSync('gh', workflowArgs, {
               cwd: repoRoot,
@@ -4366,6 +4403,24 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               timeout: 30_000,
             });
             console.log(`[pipeline] dispatched hosted release workflow for ${deployEnvironment} (release profile=${releaseProfile.id}); privileged release writes run only in GitHub Actions.`);
+            return;
+          }
+
+          if (json) {
+            const authorizedPromotionSource = await resolveAuthorizedReleaseSource({
+              repoRoot,
+              remoteUrl: 'origin',
+              sourceRef: `refs/heads/${promotionSourceBranch}`,
+              authorizedSha: authorizedPromotionSourceSha,
+            });
+            process.stdout.write(
+              `${JSON.stringify({
+                kind: 'happier.release-dispatch-plan.v1',
+                schemaVersion: 1,
+                sourceBranch: promotionSourceBranch,
+                authorizedPromotionSourceSha: authorizedPromotionSource.sha,
+              })}\n`,
+            );
             return;
           }
 
@@ -4403,18 +4458,14 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
               fail(`Local release expects to run from branch 'dev' or '*\\/upstream-dev' (current: ${currentBranch}).`);
             }
 
-            const devSha = execFileSync('git', ['rev-parse', 'HEAD'], {
-              cwd: repoRoot,
-              env: process.env,
-              encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'pipe'],
-            timeout: 10_000,
-          }).trim();
+          const authorizedPromotionSource = await resolveAuthorizedReleaseSource({
+            repoRoot,
+            remoteUrl: 'origin',
+            sourceRef: `refs/heads/${promotionSourceBranch}`,
+            authorizedSha: authorizedPromotionSourceSha,
+          });
           const mainSha = remotePlanningRefs.branches.main;
-          const previewSha = remotePlanningRefs.branches.preview;
-
-          const planHeadSha =
-            action === 'release preview to main' || action === 'reset main from preview' ? previewSha : devSha;
+          const planHeadSha = authorizedPromotionSource.sha;
 
           const changedRaw = runJsonScript({
             repoRoot,
@@ -4510,7 +4561,8 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             publish_server: String(bumpPlanRaw?.publish_server ?? '').trim() === 'true',
           };
 
-          console.log('[pipeline] release plan: changed components (main..dev)');
+          console.log(`[pipeline] release plan: source=${promotionSourceBranch}@${planHeadSha}`);
+          console.log('[pipeline] release plan: changed components (main..authorized source)');
           for (const [k, v] of Object.entries(changed)) {
             console.log(`- ${k.replace(/^changed_/, '')}: ${v}`);
           }
@@ -4580,7 +4632,6 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
             console.log(`- desktop_mode: ${desktopMode}`);
             console.log(`- bump: ${bumpPreset}`);
             console.log(`- confirm: ${action}`);
-            console.log(`- release_message: ${releaseMessage}`);
             console.log(`- release_profile: ${releaseProfile.id}`);
             console.log(`- checks_profile: ${hostedChecksProfile}`);
             return;

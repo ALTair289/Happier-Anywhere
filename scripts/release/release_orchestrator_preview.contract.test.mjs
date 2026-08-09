@@ -16,7 +16,7 @@ async function loadFile(rel) {
   return readFile(join(repoRoot, rel), 'utf8');
 }
 
-test('release workflow only promotes/bumps on production and routes source_ref by environment', async () => {
+test('release workflow only promotes a materialized source on production and routes source_ref by environment', async () => {
   const raw = await loadWorkflow('release.yml');
 
   // If CI gate fails, checks is skipped; downstream must not treat that as OK to promote/deploy.
@@ -26,12 +26,13 @@ test('release workflow only promotes/bumps on production and routes source_ref b
     'release orchestrator must not treat skipped checks as eligible for promotion/deploy',
   );
 
-  // promote_main must not be skipped when bump_versions_dev is skipped (GitHub skips dependent jobs by default).
+  // promote_main must remain reachable after plan success; final releases never create a post-admission bump commit.
   assert.match(
     raw,
-    /promote_main:[\s\S]*?if:\s*always\(\)\s*&&[\s\S]*?inputs\.dry_run != true && inputs\.environment == 'production'[\s\S]*?needs\.plan\.result == 'success'[\s\S]*?\(needs\.bump_versions_dev\.result == 'success' \|\| needs\.bump_versions_dev\.result == 'skipped'\)/,
+    /promote_main:[\s\S]*?if:\s*always\(\)\s*&&[\s\S]*?inputs\.dry_run != true && inputs\.environment == 'production'[\s\S]*?needs\.plan\.result == 'success'/,
   );
-  assert.match(raw, /bump_versions_dev:[\s\S]*?if:\s*inputs\.dry_run != true && needs\.plan\.outputs\.should_bump == 'true'/);
+  assert.doesNotMatch(raw, /^  bump_versions_dev:/m);
+  assert.doesNotMatch(raw, /needs\.bump_versions_dev/);
   assert.match(raw, /if \[ "\$env_name" = "preview" \]; then[\s\S]*?if \[ "\$confirm" != "release dev to preview" \]; then/);
   assert.doesNotMatch(raw, /\[ "\$confirm" != "release dev to preview" \] && \[ "\$confirm" != "release dev to main" \]/);
 
@@ -40,8 +41,9 @@ test('release workflow only promotes/bumps on production and routes source_ref b
   assert.match(raw, /deploy_ui:[\s\S]*?bump:\s*none/);
   assert.match(
     raw,
-    /sync_dev:[\s\S]*?if:\s*\$\{\{\s*inputs\.dry_run != true && inputs\.environment == 'production'[\s\S]*?\(needs\.release_verify\.result == 'success' \|\| needs\.release_verify\.result == 'skipped'\)/,
+    /sync_dev:[\s\S]*?if:\s*\$\{\{\s*inputs\.dry_run != true && inputs\.environment == 'production'[\s\S]*?needs\.release_verify\.result == 'success'/,
   );
+  assert.doesNotMatch(raw, /needs\.release_verify\.result == 'skipped'/, 'production sync must not accept skipped release verification');
   assert.match(
     raw,
     /Compute versioned component changes \(latest release tags\.\.release head\)[\s\S]*?node scripts\/pipeline\/run\.mjs release-compute-versioned-component-changes/,
@@ -95,11 +97,12 @@ test('release workflow accepts the public validation profile and routes its auto
   assert.equal(validationProfile?.default, 'integrated');
   assert.deepEqual(validationProfile?.options, ['integrated', 'stable']);
 
-  assert.match(String(candidateVerifier?.with?.run_binary_smoke ?? ''), /inputs\.validation_profile == 'integrated'.*inputs\.validation_profile == 'stable'/);
-  assert.match(String(candidateVerifier?.with?.run_session_continuity ?? ''), /inputs\.validation_profile == 'integrated'.*inputs\.validation_profile == 'stable'/);
-  assert.match(String(candidateVerifier?.with?.run_cli_update_continuity ?? ''), /inputs\.validation_profile == 'stable'/);
-  assert.match(String(candidateVerifier?.with?.run_daemon_continuity ?? ''), /inputs\.validation_profile == 'stable'/);
-  assert.equal(candidateVerifier?.with?.run_installers_smoke, false);
+  assert.equal(candidateVerifier?.with?.validation_profile, '${{ needs.plan.outputs.validation_profile }}');
+  assert.equal(candidateVerifier?.with?.run_binary_smoke, undefined);
+  assert.equal(candidateVerifier?.with?.run_session_continuity, undefined);
+  assert.equal(candidateVerifier?.with?.run_cli_update_continuity, undefined);
+  assert.equal(candidateVerifier?.with?.run_daemon_continuity, undefined);
+  assert.equal(candidateVerifier?.with?.run_installers_smoke, undefined);
 });
 
 test('release workflow fans a versioned Stack target through immutable publication, staged promotion, npm, and exact signoff', async () => {
@@ -282,18 +285,17 @@ test('release-npm derives unique preview prerelease versions from base versions'
   assert.doesNotMatch(script, /GITHUB_RUN_NUMBER/);
 });
 
-test('stack version bumps use shared bump-version script across release workflows', async () => {
+test('final release workflows only consume already-materialized version bumps', async () => {
   const orchestrator = await loadWorkflow('release.yml');
   const releaseNpm = await loadWorkflow('release-npm.yml');
 
-  assert.match(orchestrator, /node \.\.\/scripts\/pipeline\/release\/bump-versions-dev\.mjs/);
-  assert.match(orchestrator, /BUMP_STACK:\s*\$\{\{ needs\.plan\.outputs\.bump_stack \}\}/);
-  assert.match(orchestrator, /--bump-stack "\$BUMP_STACK"/);
+  assert.doesNotMatch(orchestrator, /bump-versions-dev\.mjs/);
+  assert.doesNotMatch(orchestrator, /BUMP_STACK:\s*\$\{\{ needs\.plan\.outputs\.bump_stack \}\}/);
+  assert.doesNotMatch(orchestrator, /--bump-stack "\$BUMP_STACK"/);
   assert.doesNotMatch(orchestrator, /node scripts\/release\/bump-version\.mjs --component stack/, 'release.yml should delegate version bumps to the pipeline script');
   assert.doesNotMatch(orchestrator, /BUMP="\$\{\{ needs\.plan\.outputs\.bump_stack \}\}" node - <<'NODE'/);
 
-  // Version bumps are centralized in the release orchestrator (dev commit),
-  // so release-npm must not bump versions on main for production.
+  // The final release consumes an already committed source, so release-npm must not create its own version bumps.
   assert.doesNotMatch(releaseNpm, /bump-version\.mjs --component cli/, 'release-npm should not bump cli on main');
   assert.doesNotMatch(releaseNpm, /bump-version\.mjs --component stack/, 'release-npm should not bump stack on main');
   assert.doesNotMatch(releaseNpm, /npm version "\$\{\{ inputs\.version_bump_stack \}\}"/, 'release-npm must not use npm version for stack bumps');
@@ -369,11 +371,12 @@ test('promote-ui prepares OTA bytes without secrets and publishes the exact boun
   assert.match(script, /--input-dir/);
 });
 
-test('release workflow can pass a top-level release message down to promote-ui for Expo updates', async () => {
+test('release workflow passes exact-candidate Expo notes down to promote-ui', async () => {
   const raw = await loadWorkflow('release.yml');
-  assert.match(raw, /release_message:/, 'release.yml should expose a release_message input');
+  const workflow = parse(raw);
+  assert.equal(workflow?.on?.workflow_dispatch?.inputs?.release_message, undefined, 'release.yml must not accept operator-authored release notes');
   assert.match(raw, /deploy_ui:[\s\S]*?uses:\s*\.\/\.github\/workflows\/promote-ui\.yml/);
-  assert.match(raw, /expo_update_message:\s*\$\{\{\s*inputs\.release_message\s*\}\}/);
+  assert.match(raw, /expo_update_message:\s*\$\{\{\s*needs\.bind_server_source\.outputs\.release_notes_expo_message\s*\}\}/);
 });
 
 test('local release planning resolves remote identities without changing local refs', async () => {

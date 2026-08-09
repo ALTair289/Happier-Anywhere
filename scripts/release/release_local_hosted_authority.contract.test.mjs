@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const repoRoot = resolve(new URL('../..', import.meta.url).pathname);
+const AUTHORIZED_DEV_SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 function executable(path, source) {
   writeFileSync(path, source, { encoding: 'utf8', mode: 0o755 });
@@ -25,6 +26,11 @@ set -eu
 echo "git $*" >> ${JSON.stringify(log)}
 if [ "$1" = "diff" ] && [ "$2" = "--cached" ]; then exit 0; fi
 if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then printf 'dev\\n'; exit 0; fi
+if [ "$1" = "rev-parse" ] && [ "$2" = "FETCH_HEAD" ]; then printf '${AUTHORIZED_DEV_SHA}\\n'; exit 0; fi
+if [ "$1" = "fetch" ]; then exit 0; fi
+if [ "$1" = "ls-remote" ] && [ "$3" = "refs/heads/dev" ]; then printf '${AUTHORIZED_DEV_SHA}\\trefs/heads/dev\\n'; exit 0; fi
+if [ "$1" = "ls-remote" ] && [ "$3" = "refs/tags/dev^{}" ]; then exit 0; fi
+if [ "$1" = "ls-remote" ] && [ "$3" = "refs/tags/dev" ]; then exit 0; fi
 echo "unexpected git call: $*" >&2
 exit 2
 `,
@@ -48,7 +54,9 @@ exit 0
         '--repository', 'happier-dev/happier',
         '--deploy-environment', 'preview',
         '--deploy-targets', 'server,server_runner',
-        '--bump', 'patch',
+        '--bump', 'none',
+        '--source-sha', AUTHORIZED_DEV_SHA,
+        '--workflow-control-sha', AUTHORIZED_DEV_SHA,
         '--release-profile', 'stable',
         '--allow-dirty', 'true',
       ],
@@ -67,8 +75,11 @@ exit 0
     assert.match(commands, /gh workflow run release\.yml/);
     assert.match(commands, /-f environment=preview/);
     assert.match(commands, /-f deploy_targets=server,server_runner/);
-    assert.match(commands, /-f checks_profile=full/);
+    assert.doesNotMatch(commands, /-f checks_profile=/, 'the hosted workflow must resolve checks from the public profile itself');
     assert.match(commands, /-f validation_profile=stable/);
+    assert.match(commands, new RegExp(`-f authorized_promotion_source_sha=${AUTHORIZED_DEV_SHA}`));
+    assert.match(commands, new RegExp(`-f workflow_control_sha=${AUTHORIZED_DEV_SHA}`));
+    assert.doesNotMatch(commands, /-f release_message=/);
     assert.match(output, /release profile=stable/);
     assert.match(output, /hosted release workflow/i);
     assert.doesNotMatch(commands, /publish-server-runtime|promote-deploy-branch|release upload/);
@@ -116,6 +127,7 @@ exit 0
       ['--secrets-source', 'env'],
       ['--keychain-service', 'custom/service'],
       ['--keychain-account', 'custom-account'],
+      ['--release-message', 'operator-authored copy'],
     ]) {
       writeFileSync(log, '');
       const result = spawnSync(
@@ -142,6 +154,42 @@ exit 0
       assert.equal(result.status, 1, `${option} must fail closed`);
       assert.equal(readFileSync(log, 'utf8'), '', `${option} must fail before git or GitHub access`);
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the local release command rejects automatic bumps before any release mutation or source lookup', () => {
+  const root = mkdtempSync(join(tmpdir(), 'hosted-release-bump-admission-'));
+  const bin = join(root, 'bin');
+  const log = join(root, 'commands.log');
+  mkdirSync(bin);
+  writeFileSync(log, '');
+  executable(join(bin, 'git'), `#!/bin/sh\necho "git $*" >> ${JSON.stringify(log)}\nexit 0\n`);
+  executable(join(bin, 'gh'), `#!/bin/sh\necho "gh $*" >> ${JSON.stringify(log)}\nexit 0\n`);
+
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        'scripts/pipeline/run.mjs',
+        'release',
+        '--confirm', 'release dev to preview',
+        '--repository', 'happier-dev/happier',
+        '--deploy-environment', 'preview',
+        '--deploy-targets', 'server',
+        '--bump', 'patch',
+      ],
+      {
+        cwd: repoRoot,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+        encoding: 'utf8',
+      },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Materialize and commit changelog and version updates, then rerun with --bump none\./);
+    assert.equal(readFileSync(log, 'utf8'), '', 'automatic bump admission must fail before external commands');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

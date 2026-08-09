@@ -49,7 +49,7 @@ test('pipeline CLI release dry-run reports hosted deploy inputs without predicti
     );
 
     assert.match(out, /\[pipeline\] release: environment=preview confirm=release dev to preview/);
-    assert.match(out, /release profile=integrated hosted checks profile=full/);
+    assert.match(out, /release profile=integrated hosted checks profile=fast/);
     assert.match(out, /\[pipeline\] dry-run: hosted dispatch inputs/);
     assert.match(out, /- deploy_targets: server/);
     assert.match(out, /- force_deploy: true/);
@@ -130,4 +130,38 @@ test('pipeline CLI rejects the manual deep profile before release work begins', 
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /manual comprehensive certification/i);
+});
+
+test('pipeline CLI rejects automatic version bumps even for dry-run release planning', () => {
+  const stub = createReleaseCliDryRunEnv();
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        resolve(repoRoot, 'scripts', 'pipeline', 'run.mjs'),
+        'release',
+        '--confirm',
+        'release dev to preview',
+        '--deploy-environment',
+        'preview',
+        '--deploy-targets',
+        'server',
+        '--repository',
+        'happier-dev/happier',
+        '--bump',
+        'patch',
+        '--dry-run',
+      ],
+      {
+        cwd: repoRoot,
+        env: { ...stub.env },
+        encoding: 'utf8',
+      },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Materialize and commit changelog and version updates, then rerun with --bump none\./);
+  } finally {
+    stub.cleanup();
+  }
 });

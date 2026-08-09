@@ -110,7 +110,9 @@ exit 0
       '--rolling-tag',
       'true',
       '--generate-notes',
-      'false',
+      'true',
+      '--release-message',
+      'Approved exact candidate notes.',
       '--notes',
       'Rolling dev build.',
       '--prune-assets',
@@ -132,6 +134,10 @@ exit 0
   // `force` must be a JSON boolean, not the string "true" (GitHub API rejects `-f force=true` with HTTP 422).
   assert.match(log, /\s-F\s+force=true\b/);
   assert.doesNotMatch(log, /\s-f\s+force=true\b/);
+  assert.match(log, /gh release create dev-test --prerelease --title Dev Test --notes Approved exact candidate notes\./);
+  assert.match(log, /gh release edit dev-test --title Dev Test --notes Approved exact candidate notes\./);
+  assert.doesNotMatch(log, /--generate-notes/);
+  assert.doesNotMatch(log, /Rolling dev build\.|Full diff:|### Commits/);
 
   const gitCalls = fs.readFileSync(gitLog, 'utf8');
   assert.doesNotMatch(gitCalls, /\bgit push\b/);

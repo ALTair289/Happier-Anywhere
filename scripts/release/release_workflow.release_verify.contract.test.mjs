@@ -27,24 +27,24 @@ test('release workflow verifies immutable candidates before promoting preview or
   );
   assert.match(
     raw,
-    /verify_release_candidates:[\s\S]*?needs:\s*\[plan, bind_server_source, publish_cli_binaries, publish_server_runtime, publish_ui_web\][\s\S]*?candidate_source_sha:\s*\$\{\{\s*needs\.bind_server_source\.outputs\.authorized_sha\s*\}\}[\s\S]*?candidate_cli_version:\s*\$\{\{\s*needs\.publish_cli_binaries\.outputs\.version\s*\}\}[\s\S]*?candidate_server_version:\s*\$\{\{\s*needs\.publish_server_runtime\.outputs\.version\s*\}\}[\s\S]*?candidate_ui_web_version:\s*\$\{\{\s*needs\.publish_ui_web\.outputs\.version\s*\}\}/,
+    /verify_release_candidates:[\s\S]*?needs:\s*\[plan, bind_server_source, publish_cli_binaries, publish_hstack_binaries, publish_server_runtime, publish_ui_web\][\s\S]*?candidate_source_sha:\s*\$\{\{\s*needs\.bind_server_source\.outputs\.authorized_sha\s*\}\}[\s\S]*?candidate_cli_version:\s*\$\{\{\s*needs\.publish_cli_binaries\.outputs\.version\s*\}\}[\s\S]*?candidate_stack_version:\s*\$\{\{\s*needs\.publish_hstack_binaries\.outputs\.version\s*\}\}[\s\S]*?candidate_server_version:\s*\$\{\{\s*needs\.publish_server_runtime\.outputs\.version\s*\}\}[\s\S]*?candidate_ui_web_version:\s*\$\{\{\s*needs\.publish_ui_web\.outputs\.version\s*\}\}/,
     'the verifier must consume the exact source and immutable versions emitted by the candidate jobs',
   );
   assert.match(
     raw,
-    /promote_server_runtime:[\s\S]*?needs:\s*\[verify_release_candidates, publish_server_runtime\][\s\S]*?retry_version:\s*\$\{\{\s*needs\.publish_server_runtime\.outputs\.version\s*\}\}/,
+    /promote_server_runtime:[\s\S]*?needs:\s*\[bind_server_source, verify_release_candidates, publish_server_runtime\][\s\S]*?retry_version:\s*\$\{\{\s*needs\.publish_server_runtime\.outputs\.version\s*\}\}/,
   );
   assert.match(
     raw,
-    /promote_ui_web:[\s\S]*?needs:\s*\[verify_release_candidates, publish_ui_web, promote_server_runtime\][\s\S]*?retry_version:\s*\$\{\{\s*needs\.publish_ui_web\.outputs\.version\s*\}\}/,
+    /promote_ui_web:[\s\S]*?needs:\s*\[bind_server_source, verify_release_candidates, publish_ui_web, promote_server_runtime\][\s\S]*?retry_version:\s*\$\{\{\s*needs\.publish_ui_web\.outputs\.version\s*\}\}/,
   );
   assert.match(
     raw,
-    /promote_cli_binaries:[\s\S]*?needs:\s*\[verify_release_candidates, publish_cli_binaries, promote_ui_web\][\s\S]*?retry_version:\s*\$\{\{\s*needs\.publish_cli_binaries\.outputs\.version\s*\}\}/,
+    /promote_cli_binaries:[\s\S]*?needs:\s*\[bind_server_source, verify_release_candidates, publish_cli_binaries, promote_ui_web\][\s\S]*?retry_version:\s*\$\{\{\s*needs\.publish_cli_binaries\.outputs\.version\s*\}\}/,
   );
   assert.match(
     raw,
-    /release_verify:[\s\S]*?needs:\s*\[plan, promote_cli_binaries, promote_server_runtime, promote_ui_web, publish_docker, publish_npm\][\s\S]*?uses:\s*\.\/\.github\/workflows\/release-verify\.yml/,
+    /release_verify:[\s\S]*?needs:\s*\[plan, bind_server_source, publish_hstack_binaries, promote_hstack_binaries, promote_cli_binaries, promote_server_runtime, promote_ui_web, publish_docker, publish_npm\][\s\S]*?uses:\s*\.\/\.github\/workflows\/release-verify\.yml/,
     'full checks should verify the promoted projections after candidate verification and promotion',
   );
   assert.match(
@@ -54,7 +54,54 @@ test('release workflow verifies immutable candidates before promoting preview or
   );
   assert.match(
     raw,
-    /sync_dev:[\s\S]*?\(needs\.release_verify\.result == 'success' \|\| needs\.release_verify\.result == 'skipped'\)[\s\S]*?needs:\s*\[plan, bump_versions_dev, promote_main, release_verify\]/,
+    /sync_dev:[\s\S]*?\(needs\.release_verify\.result == 'success' \|\| needs\.release_verify\.result == 'skipped'\)[\s\S]*?needs:\s*\[plan, promote_main, bind_server_source, release_verify\]/,
     'release.yml should gate the final production sync on release verification succeeding or being skipped',
+  );
+});
+
+test('release workflow derives validation, notes, and terminal status from the exact bound candidate', async () => {
+  const raw = await readFile(join(repoRoot, '.github', 'workflows', 'release.yml'), 'utf8');
+  const candidateVerification = raw.slice(raw.indexOf('\n  verify_release_candidates:'), raw.indexOf('\n  promote_server_runtime:'));
+
+  assert.match(
+    raw,
+    /plan:[\s\S]*?validation_profile:\s*\$\{\{\s*steps\.validation_profile\.outputs\.profile\s*\}\}[\s\S]*?Resolve bounded public release validation profile[\s\S]*?release-contract/,
+    'the public contract must own the normal profile selected for candidate verification',
+  );
+  assert.match(
+    raw,
+    /bind_server_source:[\s\S]*?release_notes_github_markdown:[\s\S]*?release_notes_expo_message:[\s\S]*?path:\s*release-source[\s\S]*?ref:\s*\$\{\{\s*steps\.source\.outputs\.authorized_sha\s*\}\}[\s\S]*?project-release-notes\.mjs/,
+    'one exact candidate checkout must project both publication note variants',
+  );
+  assert.match(candidateVerification, /validation_profile:\s*\$\{\{\s*needs\.plan\.outputs\.validation_profile\s*\}\}/);
+  assert.doesNotMatch(candidateVerification, /run_(?:installers_smoke|binary_smoke|cli_update_continuity|daemon_continuity|session_continuity):/);
+
+  for (const job of [
+    'publish_server_runtime',
+    'publish_ui_web',
+    'publish_cli_binaries',
+    'publish_hstack_binaries',
+    'promote_server_runtime',
+    'promote_ui_web',
+    'promote_cli_binaries',
+    'promote_hstack_binaries',
+    'publish_npm',
+  ]) {
+    assert.match(
+      raw,
+      new RegExp(job + ':[\\s\\S]*?release_message:\\s*\\$\\{\\{\\s*needs\\.bind_server_source\\.outputs\\.release_notes_github_markdown\\s*\\}\\}'),
+      job + ' must consume the canonical GitHub note projection',
+    );
+  }
+
+  assert.match(
+    raw,
+    /deploy_ui:[\s\S]*?expo_update_message:\s*\$\{\{\s*needs\.bind_server_source\.outputs\.release_notes_expo_message\s*\}\}/,
+    'Expo metadata must use the bounded plain-text projection',
+  );
+  assert.match(
+    raw,
+    /release_status:[\s\S]*?if:\s*\$\{\{\s*always\(\)\s*\}\}[\s\S]*?needs:\s*\[[^\]]*publish_hstack_binaries[^\]]*promote_hstack_binaries[^\]]*\][\s\S]*?summarize-release-status\.mjs[\s\S]*?GITHUB_STEP_SUMMARY/,
+    'the terminal status projector must include HStack and all required release outcomes',
   );
 });

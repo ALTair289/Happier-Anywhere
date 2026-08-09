@@ -9,8 +9,19 @@ import YAML from 'yaml';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 
-test('release-verify workflow exposes and forwards continuity/update release-validation inputs', async () => {
+test('release-verify resolves public validation profiles centrally while retaining legacy flags', async () => {
   const raw = await readFile(join(repoRoot, '.github', 'workflows', 'release-verify.yml'), 'utf8');
+  const workflow = YAML.parse(raw, { prettyErrors: true });
+
+  assert.deepEqual(
+    workflow.on.workflow_dispatch.inputs.validation_profile.options,
+    ['integrated', 'stable'],
+    'manual verification should expose only normal public release profiles',
+  );
+  assert.equal(workflow.on.workflow_call.inputs.validation_profile.default, '');
+  assert.ok(workflow.jobs.resolve_validation_profile, 'one resolver must own automatic suite selection');
+  assert.match(String(workflow.jobs.resolve_validation_profile.steps?.at(-1)?.run ?? ''), /release-contract/);
+  assert.ok(workflow.jobs.verify.needs.includes('resolve_validation_profile'));
 
   for (const inputName of [
     'run_cli_update_continuity',
@@ -27,10 +38,10 @@ test('release-verify workflow exposes and forwards continuity/update release-val
       new RegExp(`${inputName}:\\n\\s+required: false\\n\\s+default: true\\n\\s+type: boolean`),
       `release-verify workflow_call should expose ${inputName}`,
     );
-    assert.match(
-      raw,
-      new RegExp(`${inputName}:\\s*\\$\\{\\{ inputs\\.${inputName} \\}\\}`),
-      `release-verify should forward ${inputName} into tests.yml`,
+    assert.equal(
+      workflow.jobs.verify.with?.[inputName],
+      '${{ needs.resolve_validation_profile.outputs.' + inputName + ' }}',
+      `release-verify should forward resolver-owned ${inputName} into tests.yml`,
     );
   }
 });

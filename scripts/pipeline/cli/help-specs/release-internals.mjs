@@ -79,7 +79,7 @@ export const COMMAND_HELP_RELEASE_INTERNALS = {
       '--commit-message <text>           Optional.',
       '--dry-run',
     ],
-    bullets: ['Used by release workflows to prepare version bumps on dev/main.'],
+    bullets: ['Preparation helper only. Final release workflows require already-materialized version/changelog updates and never invoke this command.'],
     examples: [
       'node scripts/pipeline/run.mjs release-bump-versions-dev --bump-cli patch --bump-stack patch --push-branch dev --dry-run',
     ],
