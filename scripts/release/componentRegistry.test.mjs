@@ -38,3 +38,17 @@ test('classifyChangedPaths ignores unknown paths', () => {
   const flags = classifyChangedPaths(['README.md', 'random/file.txt']);
   for (const v of Object.values(flags)) assert.equal(v, false);
 });
+
+test('release target registry owns every supported local release target', async () => {
+  const { releaseTargets } = await import('../pipeline/release/component-registry.mjs');
+
+  assert.deepEqual(releaseTargets, [
+    'ui',
+    'server',
+    'website',
+    'docs',
+    'cli',
+    'stack',
+    'server_runner',
+  ]);
+});

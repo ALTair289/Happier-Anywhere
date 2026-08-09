@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
+import { releaseTargets } from './component-registry.mjs';
 
 function fail(message) {
   console.error(message);
@@ -147,7 +148,7 @@ function main() {
 
   const deployTargets = parseCsvList(String(values['deploy-targets'] ?? ''));
   for (const t of deployTargets) {
-    if (!['ui', 'server', 'website', 'docs', 'cli', 'stack', 'server_runner'].includes(t)) {
+    if (!releaseTargets.includes(t)) {
       fail(`--deploy-targets contains unsupported entry '${t}'`);
     }
   }

@@ -39,6 +39,7 @@ import {
   normalizePublicReleaseChannel,
 } from './release/lib/public-release-rings.mjs';
 import { resolveRemoteReleasePlanningRefs } from './release/lib/release-planning-remote-refs.mjs';
+import { releaseTargets } from './release/component-registry.mjs';
 
 function fail(message) {
   console.error(message);
@@ -153,7 +154,7 @@ function isDeployComponent(v) {
  * @returns {v is 'ui' | 'server' | 'website' | 'docs' | 'cli' | 'stack' | 'server_runner'}
  */
 function isReleaseTarget(v) {
-  return isDeployComponent(v) || v === 'cli' || v === 'stack' || v === 'server_runner';
+  return releaseTargets.includes(v);
 }
 
 /**
@@ -4265,7 +4266,7 @@ function runJsonScript({ repoRoot, env, scriptRel, args }) {
           for (const t of deployTargets) {
             if (!isReleaseTarget(t)) {
               fail(
-                `--deploy-targets contains unsupported target '${t}' (supported: ui,server,website,docs,cli,stack,server_runner)`,
+                `--deploy-targets contains unsupported target '${t}' (supported: ${releaseTargets.join(',')})`,
               );
             }
           }
