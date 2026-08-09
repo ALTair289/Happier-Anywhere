@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SessionListRenderableSession } from '../../domains/session/listing/sessionListRenderable';
+import { projectSessionListPlacement } from '../../domains/session/listing/placement/sessionListPlacementProjection';
 import {
     planSessionListRenderableMerge,
     planSessionListRenderablePatches,
@@ -361,6 +362,109 @@ describe('sessionListRenderableStoreUpdate', () => {
         expect(plan.listViewRowRefreshSessionIds).toEqual([]);
         expect(plan.nextRenderables.s1.pendingBlockedCount).toBe(1);
         expect(plan.nextRenderables.s1.hasPendingUserActionRequests).toBe(true);
+    });
+
+    /**
+     * **A session that is already unread must not churn when more messages arrive.**
+     *
+     * Unread membership is a boolean edge, so while it stays true it is the same fact and must cost
+     * nothing: no attention/placement recompute, no view-data rebuild, no row refresh, no eager
+     * warm-cache write. The row's *activity* is a different fact — `seq` and `meaningfulActivityAt`
+     * legitimately move on every message and the row legitimately reorders — so this pair separates
+     * the two rather than asserting that nothing at all changed.
+     *
+     * The separation is what makes it discriminating. `unreadSince` is the attention lane's ordering
+     * key; the moment the unread fact is recomputed per message (the entry instant re-stamped from
+     * the latest activity, or the lane ordered by activity time instead of the entry instant) the
+     * placement timestamp moves with every message and the first test fails on the rebuild and
+     * attention counters. The second test holds the same activity delta fixed and moves only the
+     * read cursor, so the counters are proven to be reachable rather than stuck at zero.
+     */
+    describe('repeat unread activity', () => {
+        const UNREAD_SINCE = 4_000;
+        /** Everything a further message moves, and nothing else. */
+        const FURTHER_MESSAGE_PATCH = {
+            seq: 11,
+            updatedAt: 9_000,
+            activeAt: 9_000,
+            meaningfulActivityAt: 9_000,
+            hasUnreadMessages: true,
+            // An incoming row built from a server that has no entry instant for this session: the
+            // hostile shape, because it is the one a per-message re-stamp would fill from activity.
+            unreadSince: null,
+        } as const;
+
+        function makeUnreadRow(overrides: Partial<SessionListRenderableSession> = {}): SessionListRenderableSession {
+            return makeRenderable('s_unread', {
+                active: true,
+                presence: 'online',
+                // No terminal turn status and no ready event: this row's attention reason is generic
+                // unread, which is the lane under test. A `completed` status would project to the
+                // 'ready' lane instead and every assertion below would hold vacuously.
+                latestTurnStatus: null,
+                latestReadyEventSeq: null,
+                seq: 10,
+                lastViewedSessionSeq: 4,
+                hasUnreadMessages: true,
+                unreadSince: UNREAD_SINCE,
+                createdAt: 1_000,
+                updatedAt: UNREAD_SINCE,
+                activeAt: UNREAD_SINCE,
+                meaningfulActivityAt: UNREAD_SINCE,
+                ...overrides,
+            });
+        }
+
+        it('costs no attention, rebuild, row-refresh or eager persist while the session merely stays unread', () => {
+            const previous = makeUnreadRow();
+            // Fixture guard: the row must really be in the generic unread lane, or the assertions
+            // below hold for a reason that has nothing to do with the unread fact.
+            expect(projectSessionListPlacement({ session: previous, nowMs: 10_000 }).kind).toBe('unread');
+
+            const plan = planSessionListRenderablePatches({
+                previousRenderables: { s_unread: previous },
+                patches: [{ sessionId: 's_unread', patch: { ...FURTHER_MESSAGE_PATCH } }],
+                isSessionListViewDataUninitialized: false,
+                rebuildOnAttentionPromotionFieldsChange: true,
+            });
+            expect(projectSessionListPlacement({ session: plan.nextRenderables.s_unread, nowMs: 10_000 }).kind).toBe('unread');
+
+            // The unread fact contributes nothing, because its entry instant is frozen while
+            // membership holds — so the attention lane neither re-sorts nor re-renders.
+            expect(plan.nextRenderables.s_unread.unreadSince).toBe(UNREAD_SINCE);
+            expect(plan.attentionPromotionFieldChangeCount).toBe(0);
+            expect(plan.needsSessionListViewDataRebuild).toBe(false);
+            expect(plan.listViewFieldChangeCount).toBe(0);
+            expect(plan.listViewRowRefreshSessionIds).toEqual([]);
+            expect(plan.didImmediateWarmCacheRelevantRenderableChange).toBe(false);
+
+            // What DOES move is the activity ordering, which is correct and is what reorders the row.
+            // Without this the assertions above would also hold for a patch that changed nothing.
+            expect(plan.changedCount).toBe(1);
+            expect(plan.noopPatchCount).toBe(0);
+            expect(plan.nextRenderables.s_unread.seq).toBe(11);
+            expect(plan.nextRenderables.s_unread.meaningfulActivityAt).toBe(9_000);
+            expect(plan.didDeferredWarmCacheRelevantRenderableChange).toBe(true);
+        });
+
+        it('does rebuild when the same activity is what crosses the session into unread', () => {
+            const plan = planSessionListRenderablePatches({
+                previousRenderables: {
+                    s_unread: makeUnreadRow({
+                        lastViewedSessionSeq: 10,
+                        hasUnreadMessages: false,
+                        unreadSince: null,
+                    }),
+                },
+                patches: [{ sessionId: 's_unread', patch: { ...FURTHER_MESSAGE_PATCH } }],
+                isSessionListViewDataUninitialized: false,
+                rebuildOnAttentionPromotionFieldsChange: true,
+            });
+
+            expect(plan.attentionPromotionFieldChangeCount).toBe(1);
+            expect(plan.needsSessionListViewDataRebuild).toBe(true);
+            expect(plan.nextRenderables.s_unread.unreadSince).toBe(9_000);
+        });
     });
 
     describe('window-scoped replacement removal', () => {
