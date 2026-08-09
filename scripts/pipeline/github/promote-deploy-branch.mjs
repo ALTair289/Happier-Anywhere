@@ -12,7 +12,7 @@ function fail(message) {
 /**
  * @param {string} cmd
  * @param {string[]} args
- * @param {{ env?: Record<string, string>; dryRun?: boolean; allowFailure?: boolean }} [opts]
+ * @param {{ env?: Record<string, string>; dryRun?: boolean }} [opts]
  */
 function run(cmd, args, opts) {
   const dryRun = opts?.dryRun === true;
@@ -22,17 +22,26 @@ function run(cmd, args, opts) {
     return '';
   }
 
-  try {
-    return execFileSync(cmd, args, {
-      env: { ...process.env, ...(opts?.env ?? {}) },
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 120_000,
-    });
-  } catch (err) {
-    if (opts?.allowFailure) return '';
-    throw err;
-  }
+  return execFileSync(cmd, args, {
+    env: { ...process.env, ...(opts?.env ?? {}) },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 120_000,
+  });
+}
+
+/**
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isExplicitNotFoundError(err) {
+  if (!err || typeof err !== 'object') return false;
+  const status = Number(/** @type {{ status?: unknown }} */ (err).status);
+  if (status === 404) return true;
+  const candidate = /** @type {{ stderr?: unknown; message?: unknown }} */ (err);
+  const stderr = Buffer.isBuffer(candidate.stderr) ? candidate.stderr.toString('utf8') : String(candidate.stderr ?? '');
+  const message = String(candidate.message ?? '');
+  return /(?:\bHTTP\s*)?404\b/i.test(`${stderr}\n${message}`);
 }
 
 /**
@@ -159,7 +168,14 @@ function main() {
 
   const targetRef = encodeURIComponent(targetBranch);
   const targetApi = repo ? `repos/${repo}/git/ref/heads/${targetRef}` : `repos/OWNER/REPO/git/ref/heads/${targetRef}`;
-  const oldSha = run('gh', ['api', targetApi, '--jq', '.object.sha'], { env: ghEnv, dryRun, allowFailure: true }).trim();
+  let oldSha = '';
+  let targetMissing = false;
+  try {
+    oldSha = run('gh', ['api', targetApi, '--jq', '.object.sha'], { env: ghEnv, dryRun }).trim();
+  } catch (err) {
+    if (!isExplicitNotFoundError(err)) throw err;
+    targetMissing = true;
+  }
 
   appendSummary(
     summaryFile,
@@ -167,20 +183,17 @@ function main() {
   );
 
   const updateApi = repo ? `repos/${repo}/git/refs/heads/${targetRef}` : `repos/OWNER/REPO/git/refs/heads/${targetRef}`;
-  run('gh', ['api', '-X', 'PATCH', updateApi, '-f', `sha=${sourceSha}`, '-F', 'force=true'], { env: ghEnv, dryRun });
-
-  if (dryRun) return;
-  if (!repo) fail('Missing repo for update operation.');
-
-  try {
-    run('gh', ['api', '-X', 'PATCH', updateApi, '-f', `sha=${sourceSha}`, '-F', 'force=true'], { env: ghEnv });
-  } catch {
+  if (!repo && !dryRun) fail('Missing repo for update operation.');
+  if (targetMissing) {
     run(
       'gh',
       ['api', '-X', 'POST', `repos/${repo}/git/refs`, '-f', `ref=refs/heads/${targetBranch}`, '-f', `sha=${sourceSha}`],
       { env: ghEnv },
     );
+  } else {
+    run('gh', ['api', '-X', 'PATCH', updateApi, '-f', `sha=${sourceSha}`, '-F', 'force=true'], { env: ghEnv, dryRun });
   }
+  if (dryRun) return;
 }
 
 main();
