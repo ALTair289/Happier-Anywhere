@@ -284,6 +284,58 @@ describe('createLiveRemoteSshBootstrapTaskKind', () => {
     );
   });
 
+  it('uses an explicit ssh.port consistently for keyscan, SSH, and SCP without an SSH config', async () => {
+    const kind = createLiveRemoteSshBootstrapTaskKind();
+
+    await kind.run({
+      params: {
+        ssh: {
+          target: 'dev@example.test:2200',
+          port: 2222,
+          auth: 'agent',
+        },
+        relay: {
+          relayUrl: 'https://relay.example.test',
+        },
+        channel: 'preview',
+        serviceMode: 'none',
+      },
+      emit: () => undefined,
+      prompt: async (request) => {
+        if (request.kind === 'auth.approveRemoteProvisioning') {
+          return { approved: true };
+        }
+        if (request.kind === 'ssh.trustHost' || request.kind === 'ssh.replaceHostKey') {
+          return { trusted: true };
+        }
+        throw new Error(`Unexpected prompt: ${request.kind}`);
+      },
+    });
+
+    expect(spawnSync).toHaveBeenCalledWith(
+      'ssh-keyscan',
+      ['-T', '5', '-p', '2222', '-t', 'ed25519', 'example.test'],
+      expect.any(Object),
+    );
+
+    const sshInvocations = spawnSync.mock.calls
+      .filter(([command]) => command === 'ssh')
+      .map(([, args]) => args as readonly string[]);
+    expect(sshInvocations).not.toHaveLength(0);
+    expect(sshInvocations.every((args) => args.includes('-p') && args.includes('2222'))).toBe(true);
+
+    const installDeps = installRemoteFirstPartyComponentMock.mock.calls.at(-1)?.[1] as Readonly<{
+      copyLocalDirectoryToRemote: (params: Readonly<{ localPath: string; remotePath: string }>) => Promise<void>;
+    }>;
+    await installDeps.copyLocalDirectoryToRemote({
+      localPath: '/tmp/local-payload',
+      remotePath: '.happier/bootstrap-staging/payload',
+    });
+
+    const scpInvocation = spawnSync.mock.calls.find(([command]) => command === 'scp');
+    expect(scpInvocation?.[1]).toEqual(expect.arrayContaining(['-P', '2222']));
+  });
+
   it('installs the remote CLI from the verified payload path instead of curl-bash', async () => {
     const kind = createLiveRemoteSshBootstrapTaskKind();
 

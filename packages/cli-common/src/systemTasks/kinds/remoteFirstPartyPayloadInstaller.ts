@@ -56,7 +56,21 @@ export interface RemoteFirstPartyInstallDeps {
     arch: 'x64' | 'arm64';
     userAgent?: string;
   }>) => Promise<PreparedFirstPartyComponentPayload>;
+  createScpReadyPayloadArchive?: typeof createScpReadyPayloadArchive;
   now?: () => number;
+}
+
+async function runCleanupWithoutMaskingPrimary(
+  cleanup: () => Promise<void>,
+  hasPrimaryError: boolean,
+): Promise<void> {
+  try {
+    await cleanup();
+  } catch (cleanupError) {
+    if (!hasPrimaryError) {
+      throw cleanupError;
+    }
+  }
 }
 
 function sanitizeRemotePathSegment(value: string): string {
@@ -160,6 +174,7 @@ export async function installRemoteFirstPartyComponent(params: Readonly<{
 }>, deps: RemoteFirstPartyInstallDeps): Promise<Readonly<{ binaryPath: string; versionId: string; source: string | null }>> {
   const resolvedDeps = {
     preparePayload: async (payloadParams: Parameters<NonNullable<RemoteFirstPartyInstallDeps['preparePayload']>>[0]) => await prepareFirstPartyComponentPayloadFromGitHubRelease(payloadParams),
+    createScpReadyPayloadArchive,
     now: () => Date.now(),
     ...deps,
   } satisfies Required<RemoteFirstPartyInstallDeps>;
@@ -177,9 +192,11 @@ export async function installRemoteFirstPartyComponent(params: Readonly<{
     userAgent: 'happier-bootstrap',
   });
 
+  let hasPreparedPrimaryError = false;
   try {
-    const scpReadyPayload = await createScpReadyPayloadArchive(prepared.payloadRoot);
+    const scpReadyPayload = await resolvedDeps.createScpReadyPayloadArchive(prepared.payloadRoot);
     const component = getFirstPartyComponentCatalogEntry(params.componentId);
+    let hasScpReadyPrimaryError = false;
     try {
       if (prepared.contentSha256) {
         const approvedSha256 = normalizeFirstPartyPayloadSha256(
@@ -363,8 +380,11 @@ export async function installRemoteFirstPartyComponent(params: Readonly<{
         }).catch(() => null);
         throw error;
       }
+    } catch (error) {
+      hasScpReadyPrimaryError = true;
+      throw error;
     } finally {
-      await scpReadyPayload.cleanup();
+      await runCleanupWithoutMaskingPrimary(scpReadyPayload.cleanup, hasScpReadyPrimaryError);
     }
 
     return {
@@ -372,7 +392,10 @@ export async function installRemoteFirstPartyComponent(params: Readonly<{
       versionId: prepared.versionId,
       source: prepared.source,
     };
+  } catch (error) {
+    hasPreparedPrimaryError = true;
+    throw error;
   } finally {
-    await prepared.cleanup();
+    await runCleanupWithoutMaskingPrimary(prepared.cleanup, hasPreparedPrimaryError);
   }
 }

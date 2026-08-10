@@ -213,6 +213,60 @@ describe('installRemoteFirstPartyComponent', () => {
     }
   });
 
+  it('preserves a primary install error when both archive and prepared payload cleanup fail', async () => {
+    const fixture = await createPayloadRootFixture();
+    const primaryError = new Error('injected primary install failure');
+    let archiveCleanupCount = 0;
+    let preparedCleanupCount = 0;
+    try {
+      await expect(installRemoteFirstPartyComponent(
+        {
+          componentId: 'happier-cli',
+          channel: 'preview',
+          ssh: { target: 'dev@example.test', auth: 'agent' },
+        },
+        {
+          resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+          runRemoteText: async ({ remoteCommand }) => {
+            if (remoteCommand.includes('tar -xf')) {
+              throw primaryError;
+            }
+            return { status: 0, stdout: '', stderr: '' };
+          },
+          copyLocalDirectoryToRemote: async () => undefined,
+          preparePayload: async () => ({
+            componentId: 'happier-cli',
+            channel: 'preview',
+            versionId: 'cleanup-failure',
+            payloadRoot: fixture.payloadRoot,
+            source: null,
+            cleanup: async () => {
+              preparedCleanupCount += 1;
+              throw new Error('injected prepared cleanup failure');
+            },
+          }),
+          createScpReadyPayloadArchive: async () => ({
+            archiveStageRoot: '/tmp/injected-scp-ready',
+            archiveFileName: 'payload-root.tar',
+            extractedPayloadDirName: 'payload-root',
+            manifestFileName: FIRST_PARTY_PAYLOAD_MANIFEST_FILE_NAME,
+            manifestSha256: 'a'.repeat(64),
+            cleanup: async () => {
+              archiveCleanupCount += 1;
+              throw new Error('injected archive cleanup failure');
+            },
+          }),
+          now: () => 123,
+        },
+      )).rejects.toBe(primaryError);
+
+      expect(archiveCleanupCount).toBe(1);
+      expect(preparedCleanupCount).toBe(1);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it('rejects a prepared payload whose immutable content does not match its approved SHA-256 before staging', async () => {
     const fixture = await createPayloadRootFixture();
     let remoteCallCount = 0;

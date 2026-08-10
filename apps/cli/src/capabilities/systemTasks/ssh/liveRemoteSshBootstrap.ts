@@ -91,7 +91,12 @@ function resolveSshEndpoint(params: Readonly<{
   const parsedTarget = parseSshTarget(params.ssh.target);
   const sshConfigFile = String(params.ssh.sshConfigFile ?? '').trim();
   if (!sshConfigFile) {
-    return parsedTarget;
+    return {
+      host: parsedTarget.host,
+      ...(typeof params.ssh.port === 'number'
+        ? { port: params.ssh.port }
+        : (typeof parsedTarget.port === 'number' ? { port: parsedTarget.port } : {})),
+    };
   }
 
   const result = spawnSync('ssh', ['-G', '-F', sshConfigFile, params.ssh.target], {
