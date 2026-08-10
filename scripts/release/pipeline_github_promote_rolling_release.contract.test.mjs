@@ -166,6 +166,11 @@ if [ "$1" = "api" ]; then
         echo "injected upload failure" >&2
         exit 1
       fi
+      if [ "\${HAPPIER_TEST_TRANSIENT_UPLOAD_NUMBER:-0}" = "$count" ]; then
+        echo "error connecting to api.uploads.github.com" >&2
+        echo "check your internet connection or https://githubstatus.com" >&2
+        exit 1
+      fi
       endpoint=""
       input=""
       while [ "$#" -gt 0 ]; do
@@ -452,6 +457,30 @@ test('existing rolling replacement stages privately, restores after publish fail
     const idempotentLog = readFileSync(testFixture.log, 'utf8');
     assert.match(idempotentLog, /release download cli-preview/);
     assert.doesNotMatch(idempotentLog, /-X PATCH repos\/test\/test\/releases|releases\/assets/);
+  } finally {
+    rmSync(testFixture.root, { recursive: true, force: true });
+  }
+});
+
+test('rolling promotion retries a transient GitHub asset upload connectivity failure', () => {
+  const testFixture = fixture();
+  try {
+    const result = spawnSync(process.execPath, args(), {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${testFixture.bin}:${process.env.PATH ?? ''}`,
+        HAPPIER_TEST_TRANSIENT_UPLOAD_NUMBER: '1',
+      },
+      encoding: 'utf8',
+    });
+
+    assert.equal(result.status, 0, String(result.stderr));
+    assert.equal(Number(readFileSync(testFixture.uploadCounter, 'utf8')) > 3, true);
+    const uploadCalls = readFileSync(testFixture.log, 'utf8')
+      .split('\n')
+      .filter((line) => line.includes('uploads.github.com'));
+    assert.equal(uploadCalls.length, 4, 'the first asset upload should retry exactly once');
   } finally {
     rmSync(testFixture.root, { recursive: true, force: true });
   }
