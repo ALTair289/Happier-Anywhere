@@ -85,7 +85,7 @@ on:
           - reset main from dev
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 concurrency:
@@ -197,6 +197,9 @@ jobs:
     name: CI Checks (tests.yml)
     needs: [resolve_validation_profile]
     if: ${{ needs.resolve_validation_profile.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/tests.yml
     with:
       run_ui: true
@@ -593,6 +596,8 @@ jobs:
   promote_main:
     if: always() && needs.plan.result == 'success' && inputs.dry_run != true && inputs.environment == 'production'
     needs: [plan]
+    permissions:
+      contents: write
     uses: ./.github/workflows/promote-branch.yml
     secrets: inherit
     with:
@@ -612,6 +617,8 @@ jobs:
   promote_preview:
     if: always() && needs.plan.result == 'success' && inputs.dry_run != true && inputs.environment == 'preview'
     needs: [plan]
+    permissions:
+      contents: write
     uses: ./.github/workflows/promote-branch.yml
     secrets: inherit
     with:
@@ -627,6 +634,8 @@ jobs:
     if: always() && needs.plan.result == 'success' && inputs.dry_run != true && ((inputs.environment == 'production' && needs.promote_main.result == 'success') || (inputs.environment == 'preview' && needs.promote_preview.result == 'success'))
     needs: [plan, promote_preview, promote_main]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       authorized_sha: ${{ steps.source.outputs.authorized_sha }}
       release_notes_github_markdown: ${{ steps.release_notes.outputs.github_markdown }}
@@ -792,6 +801,9 @@ jobs:
     name: Verify bound candidate against supported old relay
     if: ${{ always() && needs.plan.result == 'success' && needs.bind_server_source.result == 'success' && needs.plan.outputs.validation_profile == 'stable' }}
     needs: [plan, bind_server_source]
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/tests.yml
     with:
       checkout_sha: ${{ needs.bind_server_source.outputs.authorized_sha }}
@@ -811,6 +823,9 @@ jobs:
     name: Verify exact immutable release candidates
     if: ${{ always() && needs.plan.result == 'success' && needs.bind_server_source.result == 'success' && (needs.plan.outputs.validation_profile != 'stable' || needs.supported_old_relay_compatibility.result == 'success') && (needs.publish_cli_binaries.result == 'success' || needs.publish_cli_binaries.result == 'skipped') && (needs.publish_hstack_binaries.result == 'success' || needs.publish_hstack_binaries.result == 'skipped') && (needs.publish_server_runtime.result == 'success' || needs.publish_server_runtime.result == 'skipped') && (needs.publish_ui_web.result == 'success' || needs.publish_ui_web.result == 'skipped') }}
     needs: [plan, bind_server_source, supported_old_relay_compatibility, publish_cli_binaries, publish_hstack_binaries, publish_server_runtime, publish_ui_web]
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/release-verify.yml
     with:
       channel: ${{ inputs.environment == 'production' && 'production' || 'preview' }}
@@ -948,6 +963,9 @@ jobs:
     name: Release Verification (release-verify.yml)
     needs: [plan, bind_server_source, publish_hstack_binaries, promote_hstack_binaries, promote_cli_binaries, promote_server_runtime, promote_ui_web, publish_docker, publish_npm]
     if: ${{ always() && needs.plan.outputs.checks_profile == 'full' && inputs.dry_run != true && needs.plan.result == 'success' && (needs.promote_hstack_binaries.result == 'success' || needs.promote_hstack_binaries.result == 'skipped') && (needs.promote_cli_binaries.result == 'success' || needs.promote_cli_binaries.result == 'skipped') && (needs.promote_server_runtime.result == 'success' || needs.promote_server_runtime.result == 'skipped') && (needs.promote_ui_web.result == 'success' || needs.promote_ui_web.result == 'skipped') && (needs.publish_docker.result == 'success' || needs.publish_docker.result == 'skipped') && (needs.publish_npm.result == 'success' || needs.publish_npm.result == 'skipped') }}
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/release-verify.yml
     with:
       channel: ${{ inputs.environment == 'production' && 'production' || 'preview' }}
@@ -1078,6 +1096,8 @@ jobs:
   sync_dev:
     if: ${{ inputs.dry_run != true && inputs.environment == 'production' && (vars.RELEASE_SYNC_DEV_FROM_MAIN == '' || vars.RELEASE_SYNC_DEV_FROM_MAIN == 'true') && needs.release_verify.result == 'success' }}
     needs: [plan, promote_main, bind_server_source, release_verify]
+    permissions:
+      contents: write
     uses: ./.github/workflows/promote-branch.yml
     secrets: inherit
     with:

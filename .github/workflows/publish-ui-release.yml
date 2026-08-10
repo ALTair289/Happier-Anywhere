@@ -47,7 +47,7 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: publish-ui-release-${{ inputs.tag }}
@@ -55,6 +55,8 @@ concurrency:
 
 jobs:
   publish:
+    permissions:
+      contents: write
     uses: ./.github/workflows/publish-github-release.yml
     secrets: inherit
     with:

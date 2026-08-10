@@ -58,7 +58,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-tauri-${{ github.ref }}-${{ inputs.environment }}
@@ -719,6 +719,8 @@ jobs:
   publish_preview:
     if: ${{ inputs.publish_release == true && inputs.environment == 'preview' }}
     needs: [prepare_assets, resolve_source]
+    permissions:
+      contents: write
     uses: ./.github/workflows/publish-ui-release.yml
     secrets: inherit
     with:
@@ -737,6 +739,8 @@ jobs:
   publish_dev:
     if: ${{ inputs.publish_release == true && inputs.environment == 'dev' }}
     needs: [prepare_assets, resolve_source]
+    permissions:
+      contents: write
     uses: ./.github/workflows/publish-ui-release.yml
     secrets: inherit
     with:
@@ -755,6 +759,8 @@ jobs:
   publish_stable_release:
     if: ${{ inputs.publish_release == true && inputs.environment == 'production' && needs.resolve_source.outputs.retry_version == '' }}
     needs: [prepare_assets, resolve_source]
+    permissions:
+      contents: write
     uses: ./.github/workflows/publish-ui-release.yml
     secrets: inherit
     with:

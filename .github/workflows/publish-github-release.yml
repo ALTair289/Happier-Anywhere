@@ -55,7 +55,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: publish-github-release-${{ inputs.tag }}
@@ -108,6 +108,8 @@ jobs:
     needs: [release_actor_guard]
     runs-on: ubuntu-latest
     environment: release-shared
+    permissions:
+      contents: write
     env:
       RELEASE_BOT_APP_ID: ${{ secrets.RELEASE_BOT_APP_ID }}
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}

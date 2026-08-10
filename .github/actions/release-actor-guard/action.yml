@@ -70,7 +70,7 @@ runs:
 
     - name: Create GitHub App token for guard checks
       id: app_token
-      uses: actions/create-github-app-token@v1
+      uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
       if: ${{ steps.params.outputs.trusted_actor != 'true' && inputs.app_id != '' && inputs.private_key != '' }}
       with:
         app-id: ${{ inputs.app_id }}

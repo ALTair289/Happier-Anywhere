@@ -9,6 +9,9 @@ on:
         description: "Issue number to resync"
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   add-to-project:
     name: Sync roadmap fields

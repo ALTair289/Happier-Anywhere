@@ -154,6 +154,9 @@ on:
         default: '{"repeat":"5","seed":""}'
         type: string
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -187,7 +190,7 @@ jobs:
       - name: Detect UI E2E-relevant changes
         id: changes
         if: github.event_name != 'workflow_call'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         with:
           filters: |
             ui_e2e:

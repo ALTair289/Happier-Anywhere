@@ -64,7 +64,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: publish-ui-mobile-dev-${{ github.ref }}-${{ inputs.source_ref }}
@@ -254,6 +254,8 @@ jobs:
     needs: [release_actor_guard]
     runs-on: ubuntu-latest
     environment: release-shared
+    permissions:
+      contents: write
     steps:
       - name: Create GitHub App token
         id: app_token

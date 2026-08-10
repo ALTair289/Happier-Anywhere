@@ -1,5 +1,19 @@
 # Contributing to Happier
 
+## Happier Anywhere downstream
+
+This repository is the full-history Happier Anywhere downstream fork. Preserve
+the upstream authorship and MIT license, develop downstream changes on
+`codex/*` branches, and submit them through reviewed pull requests. See
+`UPSTREAM.md` for the source relationship and synchronization procedure and
+`SUPPLY_CHAIN.md` for source, dependency, workflow, and scan requirements.
+
+Do not commit credentials, private keys, unredacted logs, local state, build
+outputs, caches, or copied dirty worktrees. Run the source policy and redacted
+repository scans before requesting review. Changes intended for the official
+Happier project should follow the upstream contribution process below and be
+submitted to https://github.com/happier-dev/happier.
+
 Thanks for taking the time to improve Happier. Contributions are welcome, and we really appreciate the help.
 
 Happier is currently **pre-release** and in a phase of **rapid iteration** (deep changes, new features, lots of WIP). Expect churn: APIs, flows, structure, code, and preferred patterns may shift as the foundations stabilize.

@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 1,
+  "filenameAllowlist": [
+    {
+      "path": "apps/cli/.env.dev",
+      "ruleId": "ENV_FILENAME",
+      "reason": "Tracked upstream development configuration template; content remains subject to redacted scanning."
+    },
+    {
+      "path": "apps/cli/.env.dev-local-server",
+      "ruleId": "ENV_FILENAME",
+      "reason": "Tracked upstream local-server development template; content remains subject to redacted scanning."
+    },
+    {
+      "path": "apps/cli/.env.integration-test",
+      "ruleId": "ENV_FILENAME",
+      "reason": "Tracked upstream integration-test configuration; content remains subject to redacted scanning."
+    },
+    {
+      "path": "apps/server/.env.dev",
+      "ruleId": "ENV_FILENAME",
+      "reason": "Tracked upstream server development template; content remains subject to redacted scanning."
+    },
+    {
+      "path": "apps/server/.env.example",
+      "ruleId": "ENV_FILENAME",
+      "reason": "Tracked upstream server example configuration; content remains subject to redacted scanning."
+    },
+    {
+      "path": "apps/stack/.env.example",
+      "ruleId": "ENV_FILENAME",
+      "reason": "Tracked upstream stack example configuration; content remains subject to redacted scanning."
+    },
+    {
+      "path": "apps/stack/.claude/settings.json.bak",
+      "ruleId": "BACKUP_FILENAME",
+      "reason": "Tracked upstream tool settings backup; content remains subject to redacted scanning."
+    },
+    {
+      "path": "apps/ui/.env.local.example",
+      "ruleId": "ENV_FILENAME",
+      "reason": "Tracked upstream UI local-environment example; content remains subject to redacted scanning."
+    }
+  ],
+  "contentAllowlist": [
+    {
+      "path": "apps/ui/google-services.json",
+      "ruleId": "GOOGLE_API_KEY",
+      "fingerprint": "033b47865d885779",
+      "reason": "Android client identifier stored in the standard google-services current_key field; API restrictions remain an external Firebase control."
+    },
+    {
+      "path": "packages/protocol/src/bugReports.submit.test.ts",
+      "ruleId": "GITHUB_CLASSIC_TOKEN",
+      "fingerprint": "893ea72714e42e8b",
+      "reason": "Synthetic value exercised only as redaction-test input in two assertions."
+    },
+    {
+      "path": "scripts/pipeline/expo/ensure-asc-api-key-file.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "9e3a04a1cb1c7b05",
+      "reason": "Structurally invalid synthetic PEM block used by a test fixture."
+    },
+    {
+      "path": "scripts/pipeline/release/notarize-standalone-binary.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "39fe12b64fb3414e",
+      "reason": "Structurally invalid synthetic PEM block used by a test fixture."
+    },
+    {
+      "path": "scripts/release/ensure_asc_api_key_file.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "8704c539352d7c46",
+      "reason": "Structurally invalid synthetic PEM block used by a test fixture."
+    },
+    {
+      "path": "scripts/release/pipeline_env_parse_dotenv_multiline.contract.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "a5822f63f469c205",
+      "reason": "Structurally invalid synthetic PEM block used by a dotenv parsing contract test."
+    },
+    {
+      "path": "scripts/release/pipeline_env_parse_dotenv_multiline.contract.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "faac32d30e440303",
+      "reason": "Second structurally invalid synthetic PEM block used by the same dotenv parsing contract test."
+    },
+    {
+      "path": "scripts/release/pipeline_expo_submit_cli.contract.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "463fe0927621b35a",
+      "reason": "Structurally invalid shared synthetic PEM fixture."
+    },
+    {
+      "path": "scripts/release/pipeline_expo_submit_ios_asc_key.contract.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "463fe0927621b35a",
+      "reason": "Structurally invalid shared synthetic PEM fixture."
+    },
+    {
+      "path": "scripts/release/pipeline_expo_submit_path_cli.contract.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "463fe0927621b35a",
+      "reason": "Structurally invalid shared synthetic PEM fixture."
+    },
+    {
+      "path": "scripts/release/pipeline_expo_submit_profile_cli.contract.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "463fe0927621b35a",
+      "reason": "Structurally invalid shared synthetic PEM fixture."
+    },
+    {
+      "path": "scripts/release/pipeline_expo_testflight_distribute_build_json.contract.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "463fe0927621b35a",
+      "reason": "Structurally invalid shared synthetic PEM fixture."
+    },
+    {
+      "path": "scripts/release/pipeline_expo_testflight_distribute_cli.contract.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "463fe0927621b35a",
+      "reason": "Structurally invalid shared synthetic PEM fixture."
+    },
+    {
+      "path": "scripts/release/pipeline_ui_mobile_release_local_build_mode.contract.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "463fe0927621b35a",
+      "reason": "Structurally invalid shared synthetic PEM fixture."
+    },
+    {
+      "path": "scripts/release/pipeline_ui_mobile_release_testflight_distribution.contract.test.mjs",
+      "ruleId": "PRIVATE_KEY_BLOCK",
+      "fingerprint": "463fe0927621b35a",
+      "reason": "Structurally invalid shared synthetic PEM fixture."
+    }
+  ]
+}

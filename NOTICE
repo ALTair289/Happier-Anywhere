@@ -1,0 +1,18 @@
+Happier Anywhere Source
+
+This repository is a downstream fork of Happier:
+https://github.com/happier-dev/happier
+
+The upstream project is distributed under the MIT License. The canonical
+license text is preserved in the root LICENCE file, including the copyright
+notice for Happy Coder Contributors.
+
+Downstream modifications for Happier Anywhere are maintained at:
+https://github.com/ALTair289/Happier-Anywhere-Source
+
+The lightweight installer and distribution project is maintained separately:
+https://github.com/ALTair289/Happier-Anywhere
+
+Happier Anywhere is not represented as an official upstream release. Files or
+dependencies that carry their own notices or licenses remain subject to those
+terms.
