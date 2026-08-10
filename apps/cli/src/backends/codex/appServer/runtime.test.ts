@@ -157,6 +157,7 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
     rejectClientUserMessageIdWithGenericInvalidParams?: boolean;
     rejectClientUserMessageIdWithFormatError?: boolean;
     rejectClientUserMessageIdWithUnsupportedValueError?: boolean;
+    rejectFirstLegacyClientUserMessageIdFallback?: boolean;
     emitResumeContinuationUserInputRequest?: boolean;
     emitHistoricalResumeUserInputRequestBeforeResponse?: boolean;
     emitResumeTurnStartedBeforeResponse?: boolean;
@@ -183,6 +184,7 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         'let loginStartCount = 0;',
         'let accountReadCount = 0;',
         'let interruptCount = 0;',
+        'let rejectedLegacyClientIdFallbackCount = 0;',
         'const resumedThreadIds = new Set();',
         'for await (const line of rl) {',
         '    if (!line.trim()) continue;',
@@ -512,6 +514,7 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        continue;',
         '    }',
         '    if (msg.method === "turn/start") {',
+        '        const requestText = Array.isArray(msg.params?.input) ? String(msg.params.input[0]?.text ?? "unknown") : "unknown";',
         `        if (${JSON.stringify(params.rejectClientUserMessageId === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: unknown field clientUserMessageId" } }) + "\\n");',
         '            continue;',
@@ -532,6 +535,11 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: clientUserMessageId value foo is not supported" } }) + "\\n");',
         '            continue;',
         '        }',
+        `        if (${JSON.stringify(params.rejectFirstLegacyClientUserMessageIdFallback === true)} && typeof msg.params?.clientUserMessageId !== "string" && requestText === "legacy-lifecycle-same-prompt" && rejectedLegacyClientIdFallbackCount === 0) {`,
+        '            rejectedLegacyClientIdFallbackCount += 1;',
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: legacy fallback rejected" } }) + "\\n");',
+        '            continue;',
+        '        }',
         `        if (${JSON.stringify(params.rejectPermissionsProfile === true)} && msg.params?.permissions) {`,
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: permissions unsupported" } }) + "\\n");',
         '            continue;',
@@ -540,7 +548,7 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: structured turn input unsupported" } }) + "\\n");',
         '            continue;',
         '        }',
-        '        const text = Array.isArray(msg.params?.input) ? String(msg.params.input[0]?.text ?? "unknown") : "unknown";',
+        '        const text = requestText;',
         '        const matchingTurnStartCount = (await readFile(requestLogPath, "utf8").catch(() => "")).split("\\n").filter((line) => { try { const entry = JSON.parse(line); return entry.method === "turn/start" && Array.isArray(entry.params?.input) && String(entry.params.input[0]?.text ?? "") === text; } catch { return false; } }).length;',
         '        const turnId = matchingTurnStartCount > 1 ? `turn-${text}-${matchingTurnStartCount}` : `turn-${text}`;',
         '        const completionDelayMs = text === "connected-service-invalidation-active-turn" && matchingTurnStartCount === 1 ? 120000 : text === "overlap-start" ? 180 : text === "cancel-me" ? 50 : 15;',
@@ -1625,6 +1633,7 @@ describe('createCodexAppServerRuntime', () => {
             rejectClientUserMessageIdWithGenericInvalidParams?: boolean;
             rejectClientUserMessageIdWithFormatError?: boolean;
             rejectClientUserMessageIdWithUnsupportedValueError?: boolean;
+            rejectFirstLegacyClientUserMessageIdFallback?: boolean;
             emitResumeContinuationUserInputRequest?: boolean;
             emitHistoricalResumeUserInputRequestBeforeResponse?: boolean;
             emitResumeTurnStartedBeforeResponse?: boolean;
@@ -1684,6 +1693,7 @@ describe('createCodexAppServerRuntime', () => {
             rejectClientUserMessageIdWithGenericInvalidParams: options.rejectClientUserMessageIdWithGenericInvalidParams,
             rejectClientUserMessageIdWithFormatError: options.rejectClientUserMessageIdWithFormatError,
             rejectClientUserMessageIdWithUnsupportedValueError: options.rejectClientUserMessageIdWithUnsupportedValueError,
+            rejectFirstLegacyClientUserMessageIdFallback: options.rejectFirstLegacyClientUserMessageIdFallback,
             emitResumeContinuationUserInputRequest: options.emitResumeContinuationUserInputRequest,
             emitHistoricalResumeUserInputRequestBeforeResponse: options.emitHistoricalResumeUserInputRequestBeforeResponse,
             emitResumeTurnStartedBeforeResponse: options.emitResumeTurnStartedBeforeResponse,
@@ -3852,6 +3862,69 @@ describe('createCodexAppServerRuntime', () => {
                         content: { type: 'text', text: 'cached legacy committed prompt' },
                     },
                 }),
+            ]);
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('does not let a failed same-prompt fallback claim the later successful rollout row', async () => {
+        const { root } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-client-id-legacy-failed-attempt-',
+            {
+                rejectClientUserMessageId: true,
+                rejectFirstLegacyClientUserMessageIdFallback: true,
+            },
+        );
+        const codexHome = join(root, 'codex-home');
+        const sessionsDir = join(codexHome, 'sessions');
+        const activeServerDir = join(root, 'server');
+        const threadId = 'thread-started';
+        const rolloutPath = join(sessionsDir, `rollout-2026-08-11T00-00-00-${threadId}.jsonl`);
+        await mkdir(sessionsDir, { recursive: true });
+        await writeFile(rolloutPath, `${JSON.stringify({ type: 'session_meta', payload: { id: threadId } })}\n`, 'utf8');
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            activeServerDir,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await expect(runtime.sendPrompt('legacy-lifecycle-same-prompt', {
+                localId: 'failed-pending-local-id',
+            })).rejects.toThrow(/legacy fallback rejected/i);
+            await runtime.sendPrompt('legacy-lifecycle-same-prompt', {
+                localId: 'successful-pending-local-id',
+            });
+            await appendFile(
+                rolloutPath,
+                `${JSON.stringify({
+                    type: 'response_item',
+                    payload: {
+                        type: 'message',
+                        role: 'user',
+                        content: [{ type: 'text', text: 'legacy-lifecycle-same-prompt' }],
+                    },
+                })}\n${JSON.stringify({
+                    type: 'event_msg',
+                    payload: { type: 'user_message', message: 'legacy-lifecycle-same-prompt' },
+                })}\n`,
+                'utf8',
+            );
+
+            const page = await pageCodexTranscript({
+                source: { kind: 'codexHome', home: 'user' },
+                activeServerDir,
+                env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+                remoteSessionId: threadId,
+                direction: 'older',
+                maxBytes: 1024 * 1024,
+                maxItems: 10,
+            });
+            expect(page.items).toEqual([
+                expect.objectContaining({ localId: 'successful-pending-local-id' }),
             ]);
         } finally {
             await runtime.reset();

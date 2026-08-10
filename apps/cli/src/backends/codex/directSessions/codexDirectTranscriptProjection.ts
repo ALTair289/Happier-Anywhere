@@ -11,6 +11,7 @@ export type CodexDirectTranscriptRolloutStream = CodexRolloutFile & Readonly<{
   userMessageEvidence: Readonly<{
     userResponseOffsets: ReadonlySet<number>;
     responseOffsetsWithMatchingEvent: ReadonlySet<number>;
+    responseOffsetsWithAuthoritativeBoundary: ReadonlySet<number>;
     localIdByOffset: ReadonlyMap<number, string>;
   }>;
 }>;

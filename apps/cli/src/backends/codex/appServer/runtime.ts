@@ -163,7 +163,7 @@ import {
 import { resolveCodexUsageLimitProbeFailureWait } from './recovery/resolveCodexUsageLimitProbeFailureWait';
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 import { resolveConfiguredCodexHome } from '../utils/resolveConfiguredCodexHome';
-import { recordCodexLegacyUserMessageIdentity } from '../directSessions/codexLegacyUserMessageIdentityLedger';
+import { beginCodexLegacyUserMessageIdentityAttempt } from '../directSessions/codexLegacyUserMessageIdentityLedger';
 import { deriveUsageLimitRecoveryTiming } from '@/session/usageLimitRecoveryControls/deriveUsageLimitRecoveryTiming';
 import { computeConnectedServiceAccessTokenFingerprint } from '@/daemon/connectedServices/refresh/credentialFreshness/tokenFingerprint';
 import type { ConnectedServiceRuntimeAuthFailureDaemonReport } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
@@ -1308,19 +1308,30 @@ export function createCodexAppServerRuntime(params: Readonly<{
     rollbackConversation: (request: SessionRollbackRpcParams) => Promise<SessionRollbackRpcResult>;
 }> {
     const runtimeEnv = params.processEnv ?? process.env;
-    const recordLegacyUserMessageIdentity = async (input: Readonly<{
+    const legacyIdentityOwnerId = randomUUID();
+    const requestWithLegacyUserMessageIdentity = async <T>(input: Readonly<{
         threadId: string;
         prompt: string;
         pendingLocalId: string | null;
-    }>): Promise<void> => {
-        if (!params.activeServerDir || !input.pendingLocalId) return;
-        await recordCodexLegacyUserMessageIdentity({
+        request: () => Promise<T>;
+    }>): Promise<T> => {
+        if (!params.activeServerDir || !input.pendingLocalId) return await input.request();
+        const attempt = await beginCodexLegacyUserMessageIdentityAttempt({
             activeServerDir: params.activeServerDir,
             codexHome: resolveConfiguredCodexHome(runtimeEnv),
             threadId: input.threadId,
+            ownerId: legacyIdentityOwnerId,
             prompt: input.prompt,
             pendingLocalId: input.pendingLocalId,
         });
+        try {
+            const result = await input.request();
+            await attempt.commit();
+            return result;
+        } catch (error) {
+            await attempt.cancel().catch(() => {});
+            throw error;
+        }
     };
     const contextWindowRecoveryConfig = resolveCodexContextWindowRecoveryConfig({
         configured: params.contextWindowRecovery,
@@ -4564,7 +4575,6 @@ export function createCodexAppServerRuntime(params: Readonly<{
             const textOnlyInput: CodexAppServerTurnInputItem[] = [{ type: 'text', text: prompt }];
             const pendingProviderPrompt = trackPendingProviderPrompt(prompt, options);
             const clientUserMessageId = readCodexAppServerClientUserMessageId(options);
-            let legacyIdentityRecorded = false;
             const payload = {
                 threadId: activeTurn.threadId,
             };
@@ -4583,33 +4593,26 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 const paramsWithClientId = clientUserMessageId && turnSteerClientUserMessageIdSupport !== 'legacy'
                     ? { ...requestParams, clientUserMessageId }
                     : requestParams;
-                if (clientUserMessageId && !Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId') && !legacyIdentityRecorded) {
-                    await recordLegacyUserMessageIdentity({
-                        threadId: activeTurn.threadId,
-                        prompt,
-                        pendingLocalId: clientUserMessageId,
-                    });
-                    legacyIdentityRecorded = true;
+                const requestWithoutClientId = async () => await requestWithLegacyUserMessageIdentity({
+                    threadId: activeTurn.threadId,
+                    prompt,
+                    pendingLocalId: clientUserMessageId,
+                    request: async () => await client.request('turn/steer', requestParams),
+                });
+                if (!Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId')) {
+                    await requestWithoutClientId();
+                    return;
                 }
                 try {
                     await client.request('turn/steer', paramsWithClientId);
-                    if (clientUserMessageId && Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId')) {
-                        turnSteerClientUserMessageIdSupport = 'supported';
-                    }
+                    if (clientUserMessageId) turnSteerClientUserMessageIdSupport = 'supported';
                 } catch (error) {
                     if (
                         clientUserMessageId
-                        && Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId')
                         && isUnsupportedClientUserMessageIdFieldError(error)
                     ) {
-                        await recordLegacyUserMessageIdentity({
-                            threadId: activeTurn.threadId,
-                            prompt,
-                            pendingLocalId: clientUserMessageId,
-                        });
-                        legacyIdentityRecorded = true;
                         turnSteerClientUserMessageIdSupport = 'legacy';
-                        await client.request('turn/steer', requestParams);
+                        await requestWithoutClientId();
                         return;
                     }
                     throw error;
@@ -4734,7 +4737,6 @@ export function createCodexAppServerRuntime(params: Readonly<{
                     const input = await buildCodexTurnInputForPrompt(promptForAttempt, params.directory, optionsForAttempt);
                     const textOnlyInput = [{ type: 'text', text: promptForAttempt }] satisfies CodexAppServerTurnInputItem[];
                     const clientUserMessageId = readCodexAppServerClientUserMessageId(optionsForAttempt);
-                    let legacyIdentityRecorded = false;
                     const baseTurnStartParams = {
                         threadId: activeThreadId,
                         input,
@@ -4751,34 +4753,26 @@ export function createCodexAppServerRuntime(params: Readonly<{
                         const paramsWithClientId = clientUserMessageId && turnStartClientUserMessageIdSupport !== 'legacy'
                             ? { ...requestParams, clientUserMessageId }
                             : requestParams;
-                        if (clientUserMessageId && !Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId') && !legacyIdentityRecorded) {
-                            await recordLegacyUserMessageIdentity({
-                                threadId: activeThreadId,
-                                prompt: promptForAttempt,
-                                pendingLocalId: clientUserMessageId,
-                            });
-                            legacyIdentityRecorded = true;
+                        const requestWithoutClientId = async () => await requestWithLegacyUserMessageIdentity({
+                            threadId: activeThreadId,
+                            prompt: promptForAttempt,
+                            pendingLocalId: clientUserMessageId,
+                            request: async () => await client.request('turn/start', requestParams),
+                        });
+                        if (!Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId')) {
+                            return await requestWithoutClientId();
                         }
                         try {
                             const result = await client.request('turn/start', paramsWithClientId);
-                            if (clientUserMessageId && Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId')) {
-                                turnStartClientUserMessageIdSupport = 'supported';
-                            }
+                            if (clientUserMessageId) turnStartClientUserMessageIdSupport = 'supported';
                             return result;
                         } catch (error) {
                             if (
                                 clientUserMessageId
-                                && Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId')
                                 && isUnsupportedClientUserMessageIdFieldError(error)
                             ) {
-                                await recordLegacyUserMessageIdentity({
-                                    threadId: activeThreadId,
-                                    prompt: promptForAttempt,
-                                    pendingLocalId: clientUserMessageId,
-                                });
-                                legacyIdentityRecorded = true;
                                 turnStartClientUserMessageIdSupport = 'legacy';
-                                return await client.request('turn/start', requestParams);
+                                return await requestWithoutClientId();
                             }
                             throw error;
                         }

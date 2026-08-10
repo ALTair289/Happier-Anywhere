@@ -9,6 +9,7 @@ import {
 type UserMessageEvidence = Readonly<{
   userResponseOffsets: ReadonlySet<number>;
   responseOffsetsWithMatchingEvent: ReadonlySet<number>;
+  responseOffsetsWithAuthoritativeBoundary: ReadonlySet<number>;
   localIdByOffset: ReadonlyMap<number, string>;
 }>;
 
@@ -43,6 +44,16 @@ function readResponseTextCandidates(value: unknown): readonly string[] {
   return [...new Set([...textParts, textParts.join('')].filter((text) => text.length > 0))];
 }
 
+function isAuthoritativeUserResponseBoundary(value: unknown): boolean {
+  const envelope = asRecord(value);
+  if (envelope?.type === 'turn_context') return true;
+  if (envelope?.type !== 'event_msg') return false;
+  const payload = asRecord(envelope.payload);
+  return payload?.type === 'task_complete'
+    || payload?.type === 'turn_complete'
+    || payload?.type === 'turn_aborted';
+}
+
 /**
  * Index real rollout evidence before projecting a page. A response_item is suppressed only
  * when this same file contains an adjacent user_message event with canonical text evidence.
@@ -58,6 +69,7 @@ export async function collectCodexDirectUserMessageEvidence(params: Readonly<{
   const fileSize = await stat(filePath).then((value) => Math.max(0, Math.trunc(value.size))).catch(() => 0);
   const events: Array<{ offset: number; text: string }> = [];
   const responses: Array<{ offset: number; textCandidates: readonly string[] }> = [];
+  const authoritativeBoundaryOffsets: number[] = [];
   let offsetBytes = 0;
 
   while (offsetBytes < fileSize) {
@@ -78,12 +90,16 @@ export async function collectCodexDirectUserMessageEvidence(params: Readonly<{
       if (responseTextCandidates.length > 0) {
         responses.push({ offset: line.startOffsetBytes, textCandidates: responseTextCandidates });
       }
+      if (isAuthoritativeUserResponseBoundary(line.value)) {
+        authoritativeBoundaryOffsets.push(line.startOffsetBytes);
+      }
     }
     if (page.reachedEnd || page.nextOffsetBytes <= offsetBytes) break;
     offsetBytes = page.nextOffsetBytes;
   }
 
   const responseOffsetsWithMatchingEvent = new Set<number>();
+  const responseOffsetsWithAuthoritativeBoundary = new Set<number>();
   const userResponseOffsets = new Set(responses.map((response) => response.offset));
   const canonicalObservationsByPromptHash = new Map<string, number[]>();
   const matchedResponseIndexes = new Set<number>();
@@ -123,6 +139,17 @@ export async function collectCodexDirectUserMessageEvidence(params: Readonly<{
   events.forEach((event, index) => {
     if (!matchedEventIndexes.has(index)) addCanonicalObservation([event.text], event.offset);
   });
+  const userObservationOffsets = [
+    ...events.map((event) => event.offset),
+    ...responses.map((response) => response.offset),
+  ].sort((left, right) => left - right);
+  responses.forEach((response, index) => {
+    if (matchedResponseIndexes.has(index)) return;
+    const nextUserObservationOffset = userObservationOffsets.find((offset) => offset > response.offset) ?? Number.POSITIVE_INFINITY;
+    if (authoritativeBoundaryOffsets.some((offset) => offset > response.offset && offset < nextUserObservationOffset)) {
+      responseOffsetsWithAuthoritativeBoundary.add(response.offset);
+    }
+  });
   for (const offsets of canonicalObservationsByPromptHash.values()) offsets.sort((left, right) => left - right);
 
   const localIdByOffset = new Map<number, string>();
@@ -135,5 +162,10 @@ export async function collectCodexDirectUserMessageEvidence(params: Readonly<{
     usedOffsets.add(offset);
     localIdByOffset.set(offset, record.pendingLocalId);
   }
-  return { userResponseOffsets, responseOffsetsWithMatchingEvent, localIdByOffset };
+  return {
+    userResponseOffsets,
+    responseOffsetsWithMatchingEvent,
+    responseOffsetsWithAuthoritativeBoundary,
+    localIdByOffset,
+  };
 }

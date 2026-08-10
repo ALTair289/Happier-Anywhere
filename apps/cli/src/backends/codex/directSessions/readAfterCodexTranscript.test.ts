@@ -128,6 +128,29 @@ describe('readAfterCodexTranscript', () => {
       deferredCursor.streams[0]?.nextOffsetBytes,
     );
 
+    const secondEmptyPoll = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' },
+      env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir,
+      remoteSessionId: sessionId,
+      cursor: deferred.nextCursor!,
+      maxBytes: 1024 * 1024,
+      maxItems: 100,
+    });
+    expect(secondEmptyPoll.items).toEqual([]);
+    expect(secondEmptyPoll.nextCursor).toBe(deferred.nextCursor);
+    const thirdEmptyPoll = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' },
+      env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir,
+      remoteSessionId: sessionId,
+      cursor: secondEmptyPoll.nextCursor!,
+      maxBytes: 1024 * 1024,
+      maxItems: 100,
+    });
+    expect(thirdEmptyPoll.items).toEqual([]);
+    expect(thirdEmptyPoll.nextCursor).toBe(secondEmptyPoll.nextCursor);
+
     await appendFile(filePath, eventMsgLine({
       timestamp: '2026-01-02T00:00:01.001Z',
       payload: { type: 'user_message', client_id: 'split-client-id', message: 'split append prompt' },
@@ -137,7 +160,7 @@ describe('readAfterCodexTranscript', () => {
       env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
       activeServerDir,
       remoteSessionId: sessionId,
-      cursor: deferred.nextCursor!,
+      cursor: thirdEmptyPoll.nextCursor!,
       maxBytes: 1024 * 1024,
       maxItems: 100,
     });
@@ -158,6 +181,52 @@ describe('readAfterCodexTranscript', () => {
       maxItems: 100,
     });
     expect(idle.items).toEqual([]);
+  });
+
+  it('commits a truly eventless user response only after an authoritative turn terminal boundary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'happier-codex-direct-tail-eventless-terminal-'));
+    const codexHome = join(root, 'codex-home');
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const sessionId = '17171717-1717-1717-1717-171717171717';
+    const filePath = join(sessionsDir, `rollout-2026-01-02T00-00-00-${sessionId}.jsonl`);
+    await writeFile(filePath, sessionMetaLine({ id: sessionId }), 'utf8');
+    const activeServerDir = join(root, 'servers', 'cloud');
+    const init = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: 'tail', maxBytes: 1024 * 1024, maxItems: 100,
+    });
+    await appendFile(filePath, responseItemLine({
+      timestamp: '2026-01-02T00:00:01.000Z',
+      payload: { type: 'message', role: 'user', content: [{ type: 'text', text: 'eventless terminal prompt' }] },
+    }), 'utf8');
+
+    const held = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: init.nextCursor!, maxBytes: 1024 * 1024, maxItems: 100,
+    });
+    const heldAgain = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: held.nextCursor!, maxBytes: 1024 * 1024, maxItems: 100,
+    });
+    expect(held.items).toEqual([]);
+    expect(heldAgain.items).toEqual([]);
+    expect(heldAgain.nextCursor).toBe(held.nextCursor);
+
+    await appendFile(filePath, eventMsgLine({
+      timestamp: '2026-01-02T00:00:02.000Z',
+      payload: { type: 'task_complete', turn_id: 'turn-eventless' },
+    }), 'utf8');
+    const committed = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: heldAgain.nextCursor!, maxBytes: 1024 * 1024, maxItems: 100,
+    });
+    expect(committed.items).toEqual([
+      expect.objectContaining({
+        localId: expect.stringMatching(/^codex:/),
+        raw: { role: 'user', content: { type: 'text', text: 'eventless terminal prompt' } },
+      }),
+    ]);
   });
 
   it('keeps user event dedupe stable across a maxItems read-after boundary', async () => {

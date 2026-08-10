@@ -211,13 +211,10 @@ async function collectReadAfterRecords(params: Readonly<{
       // Keeping the cursor before it avoids both early projection and loss when the writer appends.
       if (line.endOffsetBytes >= fileSize) continue;
       const lineNextOffsetBytes = Math.min(fileSize, line.endOffsetBytes + 1);
-      const isUnmatchedTailUserResponse = lineNextOffsetBytes === fileSize
-        && stream.userMessageEvidence.userResponseOffsets.has(line.startOffsetBytes)
-        && !stream.userMessageEvidence.responseOffsetsWithMatchingEvent.has(line.startOffsetBytes);
-      if (
-        isUnmatchedTailUserResponse
-        && progress.deferredUserResponseOffsetBytes !== line.startOffsetBytes
-      ) {
+      const isUnresolvedUserResponse = stream.userMessageEvidence.userResponseOffsets.has(line.startOffsetBytes)
+        && !stream.userMessageEvidence.responseOffsetsWithMatchingEvent.has(line.startOffsetBytes)
+        && !stream.userMessageEvidence.responseOffsetsWithAuthoritativeBoundary.has(line.startOffsetBytes);
+      if (isUnresolvedUserResponse) {
         baseProgressByStreamId.set(stream.fileRelPath, {
           nextOffsetBytes: line.startOffsetBytes,
           subIndex: 0,
