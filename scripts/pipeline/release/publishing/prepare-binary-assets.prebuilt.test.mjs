@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -78,6 +78,57 @@ test('finalizePreparedBinaryArtifacts signs one complete native CLI artifact mat
     assert.equal(result.signaturePath, join(artifactsDir, `checksums-happier-v${version}.txt.minisig`));
   } finally {
     await rm(artifactsDir, { recursive: true, force: true });
+  }
+});
+
+test('finalizePreparedBinaryArtifacts covers the five-platform SBOM/provenance catalog with its canonical Minisign envelope', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'happier-prebuilt-cli-attested-'));
+  const artifactsDir = join(root, 'artifacts');
+  const version = '1.2.3-preview.4';
+  try {
+    await mkdir(artifactsDir);
+    await writeCliArchives(artifactsDir, version);
+    await writeCliEvidence(artifactsDir);
+    const lockfilePath = join(root, 'yarn.lock');
+    await writeFile(lockfilePath, 'locked\n');
+    const builds = Object.fromEntries(CLI_TARGETS.map(([os, arch]) => [
+      `${os}-${arch}`,
+      { runner: { os, arch, image: `${os}-${arch}` }, toolchain: { node: '24.14.0' } },
+    ]));
+    const writes = [];
+    const signs = [];
+
+    const result = await finalizePreparedBinaryArtifacts({
+      artifactsDir,
+      productSpec: getBinaryPublishProductSpec('cli'),
+      channel: 'preview',
+      version,
+      targets: CLI_TARGETS.map(([os, arch]) => ({ os, arch })),
+      attestation: {
+        sourceRepository: 'https://github.com/ALTair289/Happier-Anywhere-Source',
+        sourceCommitSha: '1'.repeat(40),
+        sourceWorkspaceDirty: false,
+        lockfilePath,
+        builds,
+      },
+      writeChecksums: async (input) => {
+        writes.push(input);
+        return join(artifactsDir, `checksums-happier-v${version}.txt`);
+      },
+      signFile: async (input) => {
+        signs.push(input);
+        return `${input.path}.minisig`;
+      },
+    });
+
+    const signedNames = writes[0].artifacts.map((artifact) => artifact.name);
+    assert.equal(signedNames.filter((name) => name.endsWith('.cdx.json')).length, 5);
+    assert.equal(signedNames.filter((name) => name.endsWith('.intoto.jsonl')).length, 5);
+    assert.ok(signedNames.includes(`release-evidence-happier-v${version}.json`));
+    assert.equal(result.evidenceFiles.length, 11);
+    assert.equal(signs.length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -375,7 +426,7 @@ test('prepare-binary-assets exposes the existing complete-matrix finalizer witho
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].artifactsDir, '/workspace/happier/dist/candidate-native-matrix');
+  assert.equal(calls[0].artifactsDir, resolve('/workspace/happier/dist/candidate-native-matrix'));
   assert.equal(calls[0].productSpec.id, 'cli');
   assert.equal(calls[0].channel, 'dev');
   assert.equal(calls[0].version, '1.2.3-dev.4');

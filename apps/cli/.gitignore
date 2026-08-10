@@ -6,8 +6,11 @@
 /node_modules
 oclif.manifest.json
 
-# Unpacked binaries (keep archives)
+# Downloaded and unpacked third-party binaries
+/tools/downloads/
 /tools/unpacked/
+/tools/.archive-staging-*
+/tools/.unpacked-staging-*
 
 
 

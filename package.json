@@ -162,6 +162,7 @@
     "docs": "yarn workspace docs dev",
     "docs:build": "yarn workspace docs build",
     "docs:types": "yarn workspace docs types:check",
+    "deployment:assemble:github": "node scripts/pipeline/deployment-kit/assemble-github-project.mjs",
     "release:build:binaries:cli": "node scripts/pipeline/release/build-cli-binaries.mjs",
     "release:build:binaries:hstack": "node scripts/pipeline/release/build-hstack-binaries.mjs",
     "release:build:binaries:server": "node scripts/pipeline/release/build-server-binaries.mjs",

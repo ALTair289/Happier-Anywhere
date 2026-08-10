@@ -13,6 +13,7 @@ import { resolveArtifactVerifyExecution, resolveArtifactVerifyTarget } from './a
 import { getBinaryPublishProductSpec } from './product-specs.mjs';
 import { finalizeServerRuntimeCandidate } from './server-runtime-candidate.mjs';
 import { maybeSignFile } from '../lib/minisign-signing.mjs';
+import { createReleaseEvidence } from '../lib/release-evidence.mjs';
 
 const MANIFEST_PUBLISH_SCRIPT_RELATIVE_PATH = 'scripts/pipeline/release/publish-manifests.mjs';
 
@@ -170,20 +171,70 @@ export async function finalizePreparedBinaryArtifacts(params) {
     }
   }
 
-  const checksumsPath = await writeChecksums({
-    product: params.productSpec.manifestProduct,
-    version,
-    artifacts,
-    outDir: artifactsDir,
-  });
-  const signaturePath = await signFile({
-    path: checksumsPath,
-    trustedComment: `${params.productSpec.manifestProduct} ${version} ${channel}`,
-  });
-  if (!signaturePath) {
-    throw new Error(`prepared ${params.productSpec.id} artifacts require a minisign signature`);
+  let evidenceFiles = [];
+  let checksumsPath = '';
+  let signaturePath = '';
+  try {
+    if (params.attestation) {
+      const builds = params.attestation.builds;
+      if (!builds || typeof builds !== 'object' || Array.isArray(builds)) {
+        throw new Error('prepared binary artifact attestation requires per-target build metadata');
+      }
+      const evidence = await (params.createEvidence ?? createReleaseEvidence)({
+        artifacts: expectedArtifacts.map((artifact) => {
+          const key = `${artifact.os}-${artifact.arch}`;
+          return {
+            name: artifact.name,
+            path: path.join(artifactsDir, artifact.name),
+            os: artifact.os,
+            arch: artifact.arch,
+            build: builds[key],
+          };
+        }),
+        outDir: artifactsDir,
+        product: params.productSpec.manifestProduct,
+        version,
+        channel,
+        sourceRepository: params.attestation.sourceRepository,
+        sourceCommitSha: params.attestation.sourceCommitSha,
+        sourceWorkspaceDirty: params.attestation.sourceWorkspaceDirty,
+        lockfilePath: params.attestation.lockfilePath,
+      });
+      evidenceFiles = evidence.evidenceFiles;
+      for (const evidenceFile of evidenceFiles) {
+        const metadata = await lstat(evidenceFile.path);
+        if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1) {
+          throw new Error(`prepared release evidence must be a regular non-empty file: ${evidenceFile.name}`);
+        }
+      }
+    }
+
+    checksumsPath = await writeChecksums({
+      product: params.productSpec.manifestProduct,
+      version,
+      artifacts: [
+        ...artifacts,
+        ...evidenceFiles.map((file) => ({ ...file, os: 'evidence', arch: 'evidence' })),
+      ],
+      outDir: artifactsDir,
+    });
+    signaturePath = await signFile({
+      path: checksumsPath,
+      trustedComment: `${params.productSpec.manifestProduct} ${version} ${channel}`,
+    });
+    if (!signaturePath) {
+      throw new Error(`prepared ${params.productSpec.id} artifacts require a minisign signature`);
+    }
+    return { artifacts, evidenceFiles, checksumsPath, signaturePath };
+  } catch (error) {
+    if (params.attestation) {
+      await Promise.all([
+        ...evidenceFiles.map((file) => rm(file.path, { force: true })),
+        ...(checksumsPath ? [rm(checksumsPath, { force: true }), rm(`${checksumsPath}.minisig`, { force: true })] : []),
+      ]);
+    }
+    throw error;
   }
-  return { artifacts, checksumsPath, signaturePath };
 }
 
 /**
