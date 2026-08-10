@@ -35,6 +35,7 @@ export type CodexDurableStreamForwardProgress = Readonly<{
   subIndex: number;
   fingerprintOffsetBytes: number;
   deferredUserResponseOffsetBytes?: number;
+  deliveredUserResponseOffsetBytes?: number;
   fileIdentity: string;
   contentFingerprint: string;
 }>;
@@ -133,6 +134,10 @@ export function decodeCodexDirectForwardCursor(raw: string): CodexDirectForwardC
             && Number.isFinite(streamRecord.deferredUserResponseOffsetBytes)
             ? Math.trunc(streamRecord.deferredUserResponseOffsetBytes)
             : undefined;
+          const deliveredUserResponseOffsetBytes = typeof streamRecord.deliveredUserResponseOffsetBytes === 'number'
+            && Number.isFinite(streamRecord.deliveredUserResponseOffsetBytes)
+            ? Math.trunc(streamRecord.deliveredUserResponseOffsetBytes)
+            : undefined;
           if (
             !fileRelPath
             || !Number.isSafeInteger(nextOffsetBytes)
@@ -144,6 +149,10 @@ export function decodeCodexDirectForwardCursor(raw: string): CodexDirectForwardC
             || (deferredUserResponseOffsetBytes !== undefined
               && (!Number.isSafeInteger(deferredUserResponseOffsetBytes)
                 || deferredUserResponseOffsetBytes !== nextOffsetBytes))
+            || (deliveredUserResponseOffsetBytes !== undefined
+              && (!Number.isSafeInteger(deliveredUserResponseOffsetBytes)
+                || deliveredUserResponseOffsetBytes < 0
+                || deliveredUserResponseOffsetBytes >= nextOffsetBytes))
             || !/^[a-f0-9]{64}$/.test(fileIdentity)
             || !/^[a-f0-9]{64}$/.test(contentFingerprint)
           ) return null;
@@ -155,6 +164,7 @@ export function decodeCodexDirectForwardCursor(raw: string): CodexDirectForwardC
             fileIdentity,
             contentFingerprint,
             ...(deferredUserResponseOffsetBytes === undefined ? {} : { deferredUserResponseOffsetBytes }),
+            ...(deliveredUserResponseOffsetBytes === undefined ? {} : { deliveredUserResponseOffsetBytes }),
           };
         })
         .filter((entry): entry is CodexDurableStreamForwardProgress => entry !== null);

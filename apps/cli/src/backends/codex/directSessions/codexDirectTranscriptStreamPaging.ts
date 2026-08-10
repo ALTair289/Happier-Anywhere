@@ -47,6 +47,7 @@ function normalizeOffsetBytes(value: unknown): number {
 type CodexBoundaryProgress = CodexStreamProgress & Readonly<{
   fingerprintOffsetBytes: number;
   deferredUserResponseOffsetBytes?: number;
+  deliveredUserResponseOffsetBytes?: number;
 }>;
 
 type CodexExpectedBoundary = CodexRolloutFileBoundary;
@@ -59,6 +60,9 @@ function toBoundaryProgress(entry: CodexDurableStreamForwardProgress): CodexBoun
     ...(entry.deferredUserResponseOffsetBytes === undefined
       ? {}
       : { deferredUserResponseOffsetBytes: entry.deferredUserResponseOffsetBytes }),
+    ...(entry.deliveredUserResponseOffsetBytes === undefined
+      ? {}
+      : { deliveredUserResponseOffsetBytes: entry.deliveredUserResponseOffsetBytes }),
   };
 }
 
@@ -78,6 +82,9 @@ async function captureDurableStreamProgress(
     ...(progress.deferredUserResponseOffsetBytes === undefined
       ? {}
       : { deferredUserResponseOffsetBytes: progress.deferredUserResponseOffsetBytes }),
+    ...(progress.deliveredUserResponseOffsetBytes === undefined
+      ? {}
+      : { deliveredUserResponseOffsetBytes: progress.deliveredUserResponseOffsetBytes }),
   };
 }
 
@@ -189,6 +196,8 @@ async function collectReadAfterRecords(params: Readonly<{
 
     const semanticTracker = semanticTrackerByStreamId.get(stream.fileRelPath) ?? createCodexRolloutSemanticTracker();
     semanticTrackerByStreamId.set(stream.fileRelPath, semanticTracker);
+    let scanProgress = progress;
+    let hasProjectedRecords = false;
     const page = await readJsonlFileForward({
       filePath: stream.filePath,
       offsetBytes,
@@ -215,12 +224,16 @@ async function collectReadAfterRecords(params: Readonly<{
         && !stream.userMessageEvidence.responseOffsetsWithMatchingEvent.has(line.startOffsetBytes)
         && !stream.userMessageEvidence.responseOffsetsWithAuthoritativeBoundary.has(line.startOffsetBytes);
       if (isUnresolvedUserResponse) {
-        baseProgressByStreamId.set(stream.fileRelPath, {
+        const deferredProgress: CodexBoundaryProgress = {
           nextOffsetBytes: line.startOffsetBytes,
           subIndex: 0,
           fingerprintOffsetBytes: lineNextOffsetBytes,
           deferredUserResponseOffsetBytes: line.startOffsetBytes,
-        });
+          ...(scanProgress.deliveredUserResponseOffsetBytes === undefined
+            ? {}
+            : { deliveredUserResponseOffsetBytes: scanProgress.deliveredUserResponseOffsetBytes }),
+        };
+        if (!hasProjectedRecords) baseProgressByStreamId.set(stream.fileRelPath, deferredProgress);
         break;
       }
       const projected = projectCodexRolloutLineToTranscriptRecords({
@@ -230,14 +243,24 @@ async function collectReadAfterRecords(params: Readonly<{
         lineValue: line.value,
         semanticTracker,
       });
-      if (projected.records.length === 0) {
-        baseProgressByStreamId.set(stream.fileRelPath, {
-          nextOffsetBytes: Math.min(fileSize, line.endOffsetBytes + 1),
-          subIndex: 0,
-          fingerprintOffsetBytes: Math.min(fileSize, line.endOffsetBytes + 1),
-        });
+      const isDeliveredLateUserEvent = scanProgress.deliveredUserResponseOffsetBytes !== undefined
+        && stream.userMessageEvidence.matchingEventOffsetByResponseOffset.get(
+          scanProgress.deliveredUserResponseOffsetBytes,
+        ) === line.startOffsetBytes;
+      const projectedRecords = isDeliveredLateUserEvent ? [] : projected.records;
+      scanProgress = {
+        nextOffsetBytes: lineNextOffsetBytes,
+        subIndex: 0,
+        fingerprintOffsetBytes: lineNextOffsetBytes,
+        ...(isDeliveredLateUserEvent || scanProgress.deliveredUserResponseOffsetBytes === undefined
+          ? {}
+          : { deliveredUserResponseOffsetBytes: scanProgress.deliveredUserResponseOffsetBytes }),
+      };
+      if (projectedRecords.length === 0 && !hasProjectedRecords) {
+        baseProgressByStreamId.set(stream.fileRelPath, scanProgress);
       }
-      for (const record of projected.records) {
+      if (projectedRecords.length > 0) hasProjectedRecords = true;
+      for (const record of projectedRecords) {
         if (record.lineStartOffsetBytes === offsetBytes && record.subIndex < progress.subIndex) continue;
         records.push(record);
       }
@@ -383,16 +406,22 @@ export async function readAfterCodexRolloutStreams(params: Readonly<{
     }
     items.push(record.item);
     usedBytes += itemBytes;
+    const currentProgress = progressByStreamId.get(record.streamId);
+    const deliveredUserResponseOffsetBytes = record.isAuthoritativeFallbackUserResponse
+      ? record.lineStartOffsetBytes
+      : currentProgress?.deliveredUserResponseOffsetBytes;
     progressByStreamId.set(record.streamId, record.subIndex + 1 >= record.lineRecordCount
       ? {
         nextOffsetBytes: record.lineNextOffsetBytes,
         subIndex: 0,
         fingerprintOffsetBytes: record.lineNextOffsetBytes,
+        ...(deliveredUserResponseOffsetBytes === undefined ? {} : { deliveredUserResponseOffsetBytes }),
       }
       : {
         nextOffsetBytes: record.lineStartOffsetBytes,
         subIndex: record.subIndex + 1,
         fingerprintOffsetBytes: record.lineNextOffsetBytes,
+        ...(deliveredUserResponseOffsetBytes === undefined ? {} : { deliveredUserResponseOffsetBytes }),
       });
     if (items.length >= maxItems || usedBytes >= maxBytes) {
       truncated = truncated || index + 1 < collected.records.length;

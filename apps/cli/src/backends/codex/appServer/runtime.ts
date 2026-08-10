@@ -163,7 +163,7 @@ import {
 import { resolveCodexUsageLimitProbeFailureWait } from './recovery/resolveCodexUsageLimitProbeFailureWait';
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 import { resolveConfiguredCodexHome } from '../utils/resolveConfiguredCodexHome';
-import { beginCodexLegacyUserMessageIdentityAttempt } from '../directSessions/codexLegacyUserMessageIdentityLedger';
+import { runCodexLegacyUserMessageIdentityAttempt } from '../directSessions/codexLegacyUserMessageIdentityLedger';
 import { deriveUsageLimitRecoveryTiming } from '@/session/usageLimitRecoveryControls/deriveUsageLimitRecoveryTiming';
 import { computeConnectedServiceAccessTokenFingerprint } from '@/daemon/connectedServices/refresh/credentialFreshness/tokenFingerprint';
 import type { ConnectedServiceRuntimeAuthFailureDaemonReport } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
@@ -1316,22 +1316,15 @@ export function createCodexAppServerRuntime(params: Readonly<{
         request: () => Promise<T>;
     }>): Promise<T> => {
         if (!params.activeServerDir || !input.pendingLocalId) return await input.request();
-        const attempt = await beginCodexLegacyUserMessageIdentityAttempt({
+        return await runCodexLegacyUserMessageIdentityAttempt({
             activeServerDir: params.activeServerDir,
             codexHome: resolveConfiguredCodexHome(runtimeEnv),
             threadId: input.threadId,
             ownerId: legacyIdentityOwnerId,
             prompt: input.prompt,
             pendingLocalId: input.pendingLocalId,
+            request: input.request,
         });
-        try {
-            const result = await input.request();
-            await attempt.commit();
-            return result;
-        } catch (error) {
-            await attempt.cancel().catch(() => {});
-            throw error;
-        }
     };
     const contextWindowRecoveryConfig = resolveCodexContextWindowRecoveryConfig({
         configured: params.contextWindowRecovery,

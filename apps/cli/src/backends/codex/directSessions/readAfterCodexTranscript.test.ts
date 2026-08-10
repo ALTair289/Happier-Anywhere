@@ -227,6 +227,86 @@ describe('readAfterCodexTranscript', () => {
         raw: { role: 'user', content: { type: 'text', text: 'eventless terminal prompt' } },
       }),
     ]);
+    const committedCursor = decodeCodexDirectForwardCursor(committed.nextCursor!);
+    if (committedCursor?.kind !== 'codexForwardStreamVector' || committedCursor.v !== 5) {
+      throw new Error('Expected durable stream-vector cursor after terminal fallback delivery');
+    }
+    expect(committedCursor.streams[0]?.deliveredUserResponseOffsetBytes).toBeTypeOf('number');
+
+    await appendFile(filePath, eventMsgLine({
+      timestamp: '2026-01-02T00:00:03.000Z',
+      payload: { type: 'user_message', client_id: 'late-terminal-client-id', message: 'eventless terminal prompt' },
+    }), 'utf8');
+    const reconciled = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: committed.nextCursor!, maxBytes: 1024 * 1024, maxItems: 100,
+    });
+    expect(reconciled.items).toEqual([]);
+    const reconciledCursor = decodeCodexDirectForwardCursor(reconciled.nextCursor!);
+    if (reconciledCursor?.kind !== 'codexForwardStreamVector' || reconciledCursor.v !== 5) {
+      throw new Error('Expected durable stream-vector cursor after late-event reconciliation');
+    }
+    expect(reconciledCursor.streams[0]?.deliveredUserResponseOffsetBytes).toBeUndefined();
+    const repeated = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: reconciled.nextCursor!, maxBytes: 1024 * 1024, maxItems: 100,
+    });
+    expect(repeated.items).toEqual([]);
+    expect(repeated.nextCursor).toBe(reconciled.nextCursor);
+  });
+
+  it('does not advance an unselected stream past a terminal-backed response at the global maxItems boundary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'happier-codex-direct-tail-multi-stream-progress-'));
+    const codexHome = join(root, 'codex-home');
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const sessionId = '18181818-1818-1818-1818-181818181818';
+    const firstFilePath = join(sessionsDir, `rollout-2026-01-02T00-00-00-${sessionId}.jsonl`);
+    const secondFilePath = join(sessionsDir, `rollout-2026-01-02T00-00-01-${sessionId}.jsonl`);
+    await writeFile(firstFilePath, sessionMetaLine({ id: sessionId }), 'utf8');
+    await writeFile(secondFilePath, sessionMetaLine({ id: sessionId }), 'utf8');
+    const activeServerDir = join(root, 'servers', 'cloud');
+    const init = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: 'tail', maxBytes: 1024 * 1024, maxItems: 1,
+    });
+    await appendFile(firstFilePath, responseItemLine({
+      timestamp: '2026-01-02T00:00:01.000Z',
+      payload: { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'stream A fills page' }] },
+    }), 'utf8');
+    await appendFile(
+      secondFilePath,
+      responseItemLine({
+        timestamp: '2026-01-02T00:00:02.000Z',
+        payload: { type: 'message', role: 'user', content: [{ type: 'text', text: 'stream B fallback response' }] },
+      }) + eventMsgLine({
+        timestamp: '2026-01-02T00:00:03.000Z',
+        payload: { type: 'task_complete', turn_id: 'turn-stream-b' },
+      }),
+      'utf8',
+    );
+
+    const first = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: init.nextCursor!, maxBytes: 1024 * 1024, maxItems: 1,
+    });
+    expect(first.items).toHaveLength(1);
+    expect(JSON.stringify(first.items)).toContain('stream A fills page');
+    expect(JSON.stringify(first.items)).not.toContain('stream B fallback response');
+
+    const second = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: first.nextCursor!, maxBytes: 1024 * 1024, maxItems: 1,
+    });
+    expect(second.items).toHaveLength(1);
+    expect(JSON.stringify(second.items)).toContain('stream B fallback response');
+    expect(JSON.stringify(second.items)).not.toContain('stream A fills page');
+
+    const third = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: second.nextCursor!, maxBytes: 1024 * 1024, maxItems: 1,
+    });
+    expect(third.items).toEqual([]);
   });
 
   it('keeps user event dedupe stable across a maxItems read-after boundary', async () => {

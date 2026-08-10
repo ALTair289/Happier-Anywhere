@@ -12,6 +12,7 @@ export type CodexDirectTranscriptRolloutStream = CodexRolloutFile & Readonly<{
     userResponseOffsets: ReadonlySet<number>;
     responseOffsetsWithMatchingEvent: ReadonlySet<number>;
     responseOffsetsWithAuthoritativeBoundary: ReadonlySet<number>;
+    matchingEventOffsetByResponseOffset: ReadonlyMap<number, number>;
     localIdByOffset: ReadonlyMap<number, string>;
   }>;
 }>;
@@ -28,6 +29,7 @@ export type CodexProjectedTranscriptRecord = Readonly<{
   lineNextOffsetBytes: number;
   subIndex: number;
   lineRecordCount: number;
+  isAuthoritativeFallbackUserResponse: boolean;
 }>;
 
 export function measureDirectTranscriptItemBytes(item: DirectTranscriptRawMessageV1): number {
@@ -73,6 +75,9 @@ export function projectCodexRolloutLineToTranscriptRecords(params: Readonly<{
     ),
     localIdOverride: params.stream.userMessageEvidence.localIdByOffset.get(params.lineStartOffsetBytes) ?? null,
   });
+  const isAuthoritativeFallbackUserResponse = params.stream.userMessageEvidence.responseOffsetsWithAuthoritativeBoundary.has(
+    params.lineStartOffsetBytes,
+  ) && !params.stream.userMessageEvidence.responseOffsetsWithMatchingEvent.has(params.lineStartOffsetBytes);
   return {
     discoveredChildThreadIds: [...discoveredChildThreadIds],
     records: items.map((item, subIndex) => ({
@@ -82,6 +87,7 @@ export function projectCodexRolloutLineToTranscriptRecords(params: Readonly<{
       lineNextOffsetBytes: params.lineNextOffsetBytes,
       subIndex,
       lineRecordCount: items.length,
+      isAuthoritativeFallbackUserResponse,
     })),
   };
 }

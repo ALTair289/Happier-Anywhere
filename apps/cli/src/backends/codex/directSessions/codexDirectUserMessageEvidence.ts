@@ -10,6 +10,7 @@ type UserMessageEvidence = Readonly<{
   userResponseOffsets: ReadonlySet<number>;
   responseOffsetsWithMatchingEvent: ReadonlySet<number>;
   responseOffsetsWithAuthoritativeBoundary: ReadonlySet<number>;
+  matchingEventOffsetByResponseOffset: ReadonlyMap<number, number>;
   localIdByOffset: ReadonlyMap<number, string>;
 }>;
 
@@ -100,6 +101,7 @@ export async function collectCodexDirectUserMessageEvidence(params: Readonly<{
 
   const responseOffsetsWithMatchingEvent = new Set<number>();
   const responseOffsetsWithAuthoritativeBoundary = new Set<number>();
+  const matchingEventOffsetByResponseOffset = new Map<number, number>();
   const userResponseOffsets = new Set(responses.map((response) => response.offset));
   const canonicalObservationsByPromptHash = new Map<string, number[]>();
   const matchedResponseIndexes = new Set<number>();
@@ -131,6 +133,7 @@ export async function collectCodexDirectUserMessageEvidence(params: Readonly<{
     matchedResponseIndexes.add(responseIndex);
     matchedEventIndexes.add(eventIndex);
     responseOffsetsWithMatchingEvent.add(response.offset);
+    matchingEventOffsetByResponseOffset.set(response.offset, event.offset);
     addCanonicalObservation([...response.textCandidates, event.text], event.offset);
   }
   responses.forEach((response, index) => {
@@ -166,6 +169,7 @@ export async function collectCodexDirectUserMessageEvidence(params: Readonly<{
     userResponseOffsets,
     responseOffsetsWithMatchingEvent,
     responseOffsetsWithAuthoritativeBoundary,
+    matchingEventOffsetByResponseOffset,
     localIdByOffset,
   };
 }

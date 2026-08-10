@@ -8,6 +8,7 @@ import { collectCodexDirectUserMessageEvidence } from './codexDirectUserMessageE
 import {
   beginCodexLegacyUserMessageIdentityAttempt,
   readCodexLegacyUserMessageIdentityRecords,
+  runCodexLegacyUserMessageIdentityAttempt,
 } from './codexLegacyUserMessageIdentityLedger';
 
 async function createFixture(label: string) {
@@ -48,6 +49,65 @@ async function readMappedLocalIds(fixture: Awaited<ReturnType<typeof createFixtu
 }
 
 describe('codex legacy user-message identity lifecycle', () => {
+  it('serializes committed same-prompt sends so provider write order cannot exchange local ids', async () => {
+    const fixture = await createFixture('happier-codex-legacy-ledger-committed-concurrent-');
+    const requestOrder: string[] = [];
+    const send = async (pendingLocalId: string, delayMs: number) => await runCodexLegacyUserMessageIdentityAttempt({
+      ...fixture,
+      ownerId: 'owner-concurrent-committed',
+      prompt: 'committed concurrent prompt',
+      pendingLocalId,
+      request: async () => {
+        requestOrder.push(`${pendingLocalId}:entered`);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await appendCanonicalUserObservation(fixture.filePath, 'committed concurrent prompt');
+        requestOrder.push(`${pendingLocalId}:written`);
+      },
+    });
+
+    await Promise.all([
+      send('first-committed-local-id', 30),
+      send('second-committed-local-id', 0),
+    ]);
+
+    expect(requestOrder).toEqual([
+      'first-committed-local-id:entered',
+      'first-committed-local-id:written',
+      'second-committed-local-id:entered',
+      'second-committed-local-id:written',
+    ]);
+    const result = await readMappedLocalIds(fixture);
+    expect(result.localIds).toEqual(['first-committed-local-id', 'second-committed-local-id']);
+  });
+
+  it('releases the backend-session queue when a legacy request fails', async () => {
+    const fixture = await createFixture('happier-codex-legacy-ledger-queue-error-');
+    const failed = runCodexLegacyUserMessageIdentityAttempt({
+      ...fixture,
+      ownerId: 'owner-error-release',
+      prompt: 'queue release prompt',
+      pendingLocalId: 'failed-queue-local-id',
+      request: async () => {
+        throw new Error('provider rejected queued request');
+      },
+    });
+    const committed = runCodexLegacyUserMessageIdentityAttempt({
+      ...fixture,
+      ownerId: 'owner-error-release',
+      prompt: 'queue release prompt',
+      pendingLocalId: 'committed-after-error-local-id',
+      request: async () => {
+        await appendCanonicalUserObservation(fixture.filePath, 'queue release prompt');
+      },
+    });
+
+    const results = await Promise.allSettled([failed, committed]);
+    expect(results.map((result) => result.status)).toEqual(['rejected', 'fulfilled']);
+    const mapped = await readMappedLocalIds(fixture);
+    expect(mapped.records.map((record) => record.pendingLocalId)).toEqual(['committed-after-error-local-id']);
+    expect(mapped.localIds).toEqual(['committed-after-error-local-id']);
+  });
+
   it('ignores a first failed same-prompt attempt and maps the second committed attempt', async () => {
     const fixture = await createFixture('happier-codex-legacy-ledger-retry-');
     const first = await beginCodexLegacyUserMessageIdentityAttempt({

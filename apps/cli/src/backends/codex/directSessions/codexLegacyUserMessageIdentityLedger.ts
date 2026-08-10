@@ -38,6 +38,31 @@ export type CodexLegacyUserMessageIdentityAttempt = Readonly<{
   cancel: () => Promise<void>;
 }>;
 
+const legacyIdentityQueueTailByBackendSession = new Map<string, Promise<void>>();
+
+async function runInLegacyIdentityBackendSessionQueue<T>(
+  key: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = legacyIdentityQueueTailByBackendSession.get(key) ?? Promise.resolve();
+  const acquired = previous.catch(() => {});
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = acquired.then(() => held);
+  legacyIdentityQueueTailByBackendSession.set(key, tail);
+  await acquired;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (legacyIdentityQueueTailByBackendSession.get(key) === tail) {
+      legacyIdentityQueueTailByBackendSession.delete(key);
+    }
+  }
+}
+
 function ledgerFilePath(activeServerDir: string, codexHome: string, threadId: string): string {
   const key = createHash('sha256').update(codexHome).update('\0').update(threadId).digest('hex');
   return join(activeServerDir, 'daemon', 'direct-sessions', 'codex-legacy-user-message-identities-v2', `${key}.jsonl`);
@@ -107,6 +132,29 @@ export async function beginCodexLegacyUserMessageIdentityAttempt(params: Readonl
     commit: async () => await finish('committed'),
     cancel: async () => await finish('cancelled'),
   };
+}
+
+export async function runCodexLegacyUserMessageIdentityAttempt<T>(params: Readonly<{
+  activeServerDir: string;
+  codexHome: string;
+  threadId: string;
+  ownerId: string;
+  prompt: string;
+  pendingLocalId: string;
+  request: () => Promise<T>;
+}>): Promise<T> {
+  const queueKey = JSON.stringify([params.activeServerDir, params.codexHome, params.threadId]);
+  return await runInLegacyIdentityBackendSessionQueue(queueKey, async () => {
+    const attempt = await beginCodexLegacyUserMessageIdentityAttempt(params);
+    try {
+      const result = await params.request();
+      await attempt.commit();
+      return result;
+    } catch (error) {
+      await attempt.cancel().catch(() => {});
+      throw error;
+    }
+  });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
