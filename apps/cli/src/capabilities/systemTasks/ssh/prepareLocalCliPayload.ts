@@ -9,6 +9,10 @@ import {
   type FirstPartyComponentId,
   type PreparedFirstPartyComponentPayload,
 } from '@happier-dev/cli-common/firstPartyRuntime';
+import {
+  createFirstPartyPayloadContentManifest,
+  normalizeFirstPartyPayloadSha256,
+} from '@happier-dev/cli-common/componentArtifacts';
 import type { PublicReleaseRingId } from '@happier-dev/release-runtime/releaseRings';
 
 import { expandHomeDirPath } from '@/utils/path/expandHomeDirPath';
@@ -202,6 +206,7 @@ export async function prepareLocalCliPayload(params: Readonly<{
   channel: PublicReleaseRingId;
   os: RemotePayloadTarget['os'];
   arch: RemotePayloadTarget['arch'];
+  approvedSha256: string;
 }>): Promise<PreparedFirstPartyComponentPayload> {
   if (params.componentId !== 'happier-cli') {
     throw new Error('[local-cli-payload] Local payload override is only supported for happier-cli.');
@@ -265,17 +270,26 @@ export async function prepareLocalCliPayload(params: Readonly<{
       label: 'Snapshotted runtime entrypoint',
       expectedType: 'file',
     });
+    const approvedSha256 = normalizeFirstPartyPayloadSha256(
+      params.approvedSha256,
+      'approved local CLI payload SHA-256',
+    );
+    const manifest = await createFirstPartyPayloadContentManifest(snapshot.payloadRoot);
+    if (manifest.sha256 !== approvedSha256) {
+      throw new Error('[local-cli-payload] Snapshotted payload does not match the explicitly approved SHA-256.');
+    }
+
+    return {
+      componentId: params.componentId,
+      channel: params.channel,
+      versionId: metadata.versionId,
+      payloadRoot: snapshot.payloadRoot,
+      source: `local-cli-payload:sha256:${approvedSha256}`,
+      contentSha256: approvedSha256,
+      cleanup: snapshot.cleanup,
+    };
   } catch (error) {
     await snapshot.cleanup();
     throw error;
   }
-
-  return {
-    componentId: params.componentId,
-    channel: params.channel,
-    versionId: metadata.versionId,
-    payloadRoot: snapshot.payloadRoot,
-    source: null,
-    cleanup: snapshot.cleanup,
-  };
 }

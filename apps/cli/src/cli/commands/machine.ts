@@ -160,6 +160,8 @@ function buildMachineSetupSpec(params: Readonly<{
   args = trustedHostKey.rest;
   const cliPayload = takeFlagValue(args, '--cli-payload');
   args = cliPayload.rest;
+  const cliPayloadSha256 = takeFlagValue(args, '--cli-payload-sha256');
+  args = cliPayloadSha256.rest;
   const serviceMode = takeFlagValue(args, '--service-mode');
   args = serviceMode.rest;
   const relayRuntimeMode = takeFlagValue(args, '--relay-runtime-mode');
@@ -171,6 +173,14 @@ function buildMachineSetupSpec(params: Readonly<{
   }
 
   const usesKeyfileAuth = Boolean(identityFile.value && identityFile.value.trim());
+  const localPayloadRoot = cliPayload.value?.trim() ?? '';
+  const localPayloadSha256 = cliPayloadSha256.value?.trim() ?? '';
+  if (Boolean(localPayloadRoot) !== Boolean(localPayloadSha256)) {
+    throw new Error('Local CLI payload requires both --cli-payload and --cli-payload-sha256.');
+  }
+  if (localPayloadSha256 && !/^[a-f0-9]{64}$/iu.test(localPayloadSha256)) {
+    throw new Error('--cli-payload-sha256 must be exactly 64 hexadecimal characters.');
+  }
 
   return {
     protocolVersion: 1,
@@ -196,10 +206,11 @@ function buildMachineSetupSpec(params: Readonly<{
       ]),
       serviceMode: normalizeServiceMode(serviceMode.value),
       knownHostsMode: 'app',
-      ...(cliPayload.value?.trim()
+      ...(localPayloadRoot
         ? {
             cliPayload: {
-              rootPath: cliPayload.value.trim(),
+              rootPath: localPayloadRoot,
+              sha256: localPayloadSha256.toLowerCase(),
             },
           }
         : {}),

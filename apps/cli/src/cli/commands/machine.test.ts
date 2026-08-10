@@ -82,6 +82,8 @@ describe('handleMachineCommand', () => {
         'example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA',
         '--cli-payload',
         '/opt/happier-v0.2.10-linux-x64',
+        '--cli-payload-sha256',
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
         '--install-relay-runtime',
         '--relay-runtime-mode',
         'system',
@@ -133,6 +135,7 @@ describe('handleMachineCommand', () => {
           knownHostsMode: 'app',
           cliPayload: {
             rootPath: '/opt/happier-v0.2.10-linux-x64',
+            sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
           },
           relayRuntime: {
             enabled: true,
@@ -145,6 +148,50 @@ describe('handleMachineCommand', () => {
       JSON.stringify(event),
       JSON.stringify(result),
     ]);
+  });
+
+  it.each([
+    {
+      label: 'payload path without approved digest',
+      args: ['--cli-payload', '/opt/happier-v0.2.10-linux-x64'],
+    },
+    {
+      label: 'approved digest without payload path',
+      args: ['--cli-payload-sha256', 'a'.repeat(64)],
+    },
+    {
+      label: 'malformed approved digest',
+      args: [
+        '--cli-payload',
+        '/opt/happier-v0.2.10-linux-x64',
+        '--cli-payload-sha256',
+        'not-a-sha256',
+      ],
+    },
+  ])('fails closed for $label', async ({ args }) => {
+    const start = vi.fn(async () => ({ taskId: 'must-not-start' }));
+
+    await handleMachineCommand(
+      ['setup', '--ssh', 'dev@example.test', ...args],
+      {
+        applyServerSelectionFromArgs: async (input) => input,
+        createRunner: () => ({
+          start,
+          poll: vi.fn(),
+          respond: vi.fn(),
+        }),
+        readRelaySelection: () => ({
+          relayUrl: 'https://relay.example.test',
+          webappUrl: 'https://app.example.test',
+        }),
+        promptInput: async () => '',
+        isInteractiveTerminal: () => false,
+        sleep: async () => undefined,
+      },
+    );
+
+    expect(start).not.toHaveBeenCalled();
+    expect(errorSpy.mock.calls.flat().join('\n')).toMatch(/cli[- ]payload.*sha-?256/i);
   });
 
   it('uses the current hdev invoker channel when setup omits explicit channel flags', async () => {

@@ -21,11 +21,13 @@ describe('parseRemoteBootstrapMachineParams local CLI payload', () => {
       ...BASE_PARAMS,
       cliPayload: {
         rootPath: '/verified/happier-v0.2.10-linux-x64',
+        sha256: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       },
     });
 
     expect(parsed.cliPayload).toEqual({
       rootPath: '/verified/happier-v0.2.10-linux-x64',
+      sha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     });
   });
 
@@ -44,12 +46,32 @@ describe('parseRemoteBootstrapMachineParams local CLI payload', () => {
     })).toThrow(/cliPayload\.rootPath/i);
   });
 
+  it('rejects a local payload without an explicit approved SHA-256', () => {
+    expect(() => parseRemoteBootstrapMachineParams({
+      ...BASE_PARAMS,
+      cliPayload: {
+        rootPath: '/verified/happier-v0.2.10-linux-x64',
+      },
+    })).toThrow(/cliPayload\.sha256/i);
+  });
+
+  it.each(['', 'abc', 'g'.repeat(64)])('rejects an invalid approved SHA-256: %j', (sha256) => {
+    expect(() => parseRemoteBootstrapMachineParams({
+      ...BASE_PARAMS,
+      cliPayload: {
+        rootPath: '/verified/happier-v0.2.10-linux-x64',
+        sha256,
+      },
+    })).toThrow(/cliPayload\.sha256/i);
+  });
+
   it('redacts the operator-local payload path from task output', () => {
     const sensitivePath = 'C:\\Users\\operator\\private\\happier-v0.2.10-linux-x64';
     const redacted = redactRemoteBootstrapPayload({
       ...BASE_PARAMS,
       cliPayload: {
         rootPath: sensitivePath,
+        sha256: 'a'.repeat(64),
       },
     });
 

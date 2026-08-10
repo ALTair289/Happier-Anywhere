@@ -241,6 +241,47 @@ describe('createLiveRemoteSshBootstrapTaskKind', () => {
       .map(([, args]) => args as readonly string[]);
 
     expect(sshInvocations.some((args) => args.includes('-F') && args.includes('/tmp/lima-ssh.config'))).toBe(true);
+    expect(spawnSync).toHaveBeenCalledWith(
+      'ssh-keyscan',
+      ['-T', '5', '-p', '50977', '-t', 'ed25519', '127.0.0.1'],
+      expect.any(Object),
+    );
+  });
+
+  it('uses an explicit ssh.port for keyscan even when the SSH config resolves a different port', async () => {
+    const kind = createLiveRemoteSshBootstrapTaskKind();
+
+    await kind.run({
+      params: {
+        ssh: {
+          target: 'lima-happier-wsrepl-qa-local',
+          port: 2222,
+          auth: 'agent',
+          sshConfigFile: '/tmp/lima-ssh.config',
+        },
+        relay: {
+          relayUrl: 'https://relay.example.test',
+        },
+        channel: 'preview',
+        serviceMode: 'none',
+      },
+      emit: () => undefined,
+      prompt: async (request) => {
+        if (request.kind === 'auth.approveRemoteProvisioning') {
+          return { approved: true };
+        }
+        if (request.kind === 'ssh.trustHost' || request.kind === 'ssh.replaceHostKey') {
+          return { trusted: true };
+        }
+        throw new Error(`Unexpected prompt: ${request.kind}`);
+      },
+    });
+
+    expect(spawnSync).toHaveBeenCalledWith(
+      'ssh-keyscan',
+      ['-T', '5', '-p', '2222', '-t', 'ed25519', '127.0.0.1'],
+      expect.any(Object),
+    );
   });
 
   it('installs the remote CLI from the verified payload path instead of curl-bash', async () => {
@@ -306,6 +347,7 @@ describe('createLiveRemoteSshBootstrapTaskKind', () => {
         serviceMode: 'none',
         cliPayload: {
           rootPath: '/verified/happier-v0.2.10-linux-x64',
+          sha256: 'a'.repeat(64),
         },
       },
       emit: () => undefined,

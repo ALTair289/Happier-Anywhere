@@ -66,13 +66,15 @@ describe('installRemoteFirstPartyComponent', () => {
 
             expect(copiedPaths).toEqual([
                 {
-                    localPath: expect.stringContaining('/happier-first-party-scp-'),
+                    localPath: expect.stringMatching(/happier-first-party-scp-archive-/u),
                     remotePath: '.happier/bootstrap-staging/happier-cli-1.2.3-1700000000000',
                 },
             ]);
             expect(remoteCommands.join('\n')).not.toContain('curl -fsSL https://happier.dev/install');
             expect(remoteCommands.join('\n')).toContain('tar -xf');
-            expect(remoteCommands.join('\n')).toContain('ln -sfn');
+            expect(remoteCommands.join('\n')).toContain('.happier-payload-manifest-v1');
+            expect(remoteCommands.join('\n')).toContain('verify_payload_tree');
+            expect(remoteCommands.join('\n')).toContain('mv -fT');
             expect(result).toEqual({
                 binaryPath: '$HOME/.happier/cli-preview/current/happier',
                 versionId: '1.2.3',

@@ -5,11 +5,25 @@ import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { createFirstPartyPayloadContentManifest } from '@happier-dev/cli-common/componentArtifacts';
 
-import { prepareLocalCliPayload } from './prepareLocalCliPayload';
+import { prepareLocalCliPayload as prepareLocalCliPayloadUnderTest } from './prepareLocalCliPayload';
 
 const cleanupRoots: string[] = [];
 const execFileAsync = promisify(execFile);
+const PLACEHOLDER_APPROVED_SHA256 = '0'.repeat(64);
+
+type PrepareLocalCliPayloadParams = Parameters<typeof prepareLocalCliPayloadUnderTest>[0];
+
+async function prepareLocalCliPayload(
+  params: Omit<PrepareLocalCliPayloadParams, 'approvedSha256'>
+    & Partial<Pick<PrepareLocalCliPayloadParams, 'approvedSha256'>>,
+) {
+  return await prepareLocalCliPayloadUnderTest({
+    ...params,
+    approvedSha256: params.approvedSha256 ?? PLACEHOLDER_APPROVED_SHA256,
+  });
+}
 
 async function createPayloadFixture(params: Readonly<{
   version?: string;
@@ -48,6 +62,7 @@ describe('prepareLocalCliPayload', () => {
 
   it('returns a private snapshot so later source mutations cannot change the canonical installer input', async () => {
     const payloadRoot = await createPayloadFixture();
+    const approvedSha256 = (await createFirstPartyPayloadContentManifest(payloadRoot)).sha256;
 
     const prepared = await prepareLocalCliPayload({
       localPayloadRoot: payloadRoot,
@@ -55,13 +70,15 @@ describe('prepareLocalCliPayload', () => {
       channel: 'stable',
       os: 'linux',
       arch: 'x64',
+      approvedSha256,
     });
 
     expect(prepared).toMatchObject({
       componentId: 'happier-cli',
       channel: 'stable',
       versionId: '0.2.10',
-      source: null,
+      source: `local-cli-payload:sha256:${approvedSha256}`,
+      contentSha256: approvedSha256,
     });
     expect(prepared.payloadRoot).not.toBe(payloadRoot);
     expect(basename(prepared.payloadRoot)).toBe(basename(payloadRoot));
@@ -73,6 +90,19 @@ describe('prepareLocalCliPayload', () => {
     const snapshotParent = dirname(prepared.payloadRoot);
     await expect(prepared.cleanup()).resolves.toBeUndefined();
     await expect(lstat(snapshotParent)).rejects.toThrow();
+  });
+
+  it('fails closed when the snapshotted payload does not match the explicitly approved SHA-256', async () => {
+    const payloadRoot = await createPayloadFixture();
+
+    await expect(prepareLocalCliPayload({
+      localPayloadRoot: payloadRoot,
+      componentId: 'happier-cli',
+      channel: 'stable',
+      os: 'linux',
+      arch: 'x64',
+      approvedSha256: '0'.repeat(64),
+    })).rejects.toThrow(/approved SHA-256/i);
   });
 
   it('rejects payload metadata that does not match the detected remote target', async () => {

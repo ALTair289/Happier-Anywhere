@@ -144,7 +144,11 @@ async function inspectRegularFile(params: Readonly<{
 }>): Promise<boolean> {
   if (!await pathDoesNotTraverseLinks(params.path, params.platform)) return false;
   const info = await lstatOrNull(params.path);
-  return Boolean(info?.isFile() && (params.nonEmpty !== true || info.size > 0));
+  return Boolean(
+    info?.isFile()
+    && info.nlink === 1
+    && (params.nonEmpty !== true || info.size > 0),
+  );
 }
 
 async function inspectOptionalRegularFile(params: Readonly<{
@@ -158,7 +162,7 @@ async function inspectOptionalRegularFile(params: Readonly<{
   if (info === null) return 'absent';
   if (info === false) return 'unsafe';
   if (!await pathDoesNotTraverseLinks(params.path, params.platform)) return 'unsafe';
-  return info.isFile() ? 'present' : 'unsafe';
+  return info.isFile() && info.nlink === 1 ? 'present' : 'unsafe';
 }
 
 async function inspectRegularTree(params: Readonly<{
@@ -180,7 +184,7 @@ async function inspectRegularTree(params: Readonly<{
       if (!info || info.isSymbolicLink()) return false;
       if (info.isDirectory()) {
         pending.push(entryPath);
-      } else if (!info.isFile()) {
+      } else if (!info.isFile() || info.nlink !== 1) {
         return false;
       }
     }

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -202,5 +202,28 @@ describe('inspectLocalRelaySnapshotReadiness', () => {
     expect(result.coverage.files).toBe(false);
     expect(result.blockers).toContain('files_missing_or_unsafe');
     expect(result.blockers).toContain('acl_snapshot_backend_unverified');
+  });
+
+  it('fails closed when snapshot material contains a hard-linked regular file', async () => {
+    const fixture = await createCompleteFixture();
+    const filesDir = join(fixture.root, 'external-files');
+    await link(join(filesDir, 'upload.bin'), join(filesDir, 'upload-hardlink.bin'));
+
+    const result = await inspectLocalRelaySnapshotReadiness({
+      platform: process.platform,
+      channel: 'stable',
+      mode: 'user',
+      relayInstalled: true,
+      serviceActive: false,
+      matchingWriterProcessCount: 0,
+      configDir: fixture.configDir,
+      defaultDataDir: fixture.defaultDataDir,
+      installRoot: fixture.installRoot,
+      serviceDefinitionPath: fixture.serviceDefinitionPath,
+    });
+
+    expect(result.sourceStateReady).toBe(false);
+    expect(result.coverage.files).toBe(false);
+    expect(result.blockers).toContain('files_missing_or_unsafe');
   });
 });

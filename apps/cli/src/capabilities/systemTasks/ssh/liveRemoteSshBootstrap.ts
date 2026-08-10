@@ -122,9 +122,11 @@ function resolveSshEndpoint(params: Readonly<{
   const resolvedPort = Number(values.get('port') ?? '');
   return {
     host: values.get('hostname')?.trim() || parsedTarget.host,
-    ...(Number.isFinite(resolvedPort) && resolvedPort > 0
-      ? { port: Math.floor(resolvedPort) }
-      : (typeof parsedTarget.port === 'number' ? { port: parsedTarget.port } : {})),
+    ...(typeof params.ssh.port === 'number'
+      ? { port: params.ssh.port }
+      : Number.isFinite(resolvedPort) && resolvedPort > 0
+        ? { port: Math.floor(resolvedPort) }
+        : (typeof parsedTarget.port === 'number' ? { port: parsedTarget.port } : {})),
   };
 }
 
@@ -531,6 +533,7 @@ export function createLiveRemoteSshBootstrapTaskKind() {
     installRemoteCli: async ({ parsed, auth, knownHostsMode }) => {
       const knownHostsPath = resolveKnownHostsPath(parsed.ssh, knownHostsMode);
       const localPayloadRoot = parsed.cliPayload?.rootPath ?? null;
+      const localPayloadSha256 = parsed.cliPayload?.sha256 ?? null;
       await installRemoteFirstPartyComponent({
         componentId: 'happier-cli',
         channel: parsed.channel,
@@ -571,7 +574,7 @@ export function createLiveRemoteSshBootstrapTaskKind() {
             remotePath,
           });
         },
-        ...(localPayloadRoot
+        ...(localPayloadRoot && localPayloadSha256
           ? {
               preparePayload: async (payloadParams) => await prepareLocalCliPayload({
                 localPayloadRoot,
@@ -579,6 +582,7 @@ export function createLiveRemoteSshBootstrapTaskKind() {
                 channel: payloadParams.channel,
                 os: payloadParams.os,
                 arch: payloadParams.arch,
+                approvedSha256: localPayloadSha256,
               }),
             }
           : {}),

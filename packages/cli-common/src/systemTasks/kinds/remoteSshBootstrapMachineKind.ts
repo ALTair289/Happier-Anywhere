@@ -1,6 +1,7 @@
 import type { SystemTaskJsonObject, SystemTaskJsonValue } from '@happier-dev/protocol';
 
 import { SystemTaskExecutionError } from '../runSystemTask.js';
+import { normalizeFirstPartyPayloadSha256 } from '../../componentArtifacts/firstPartyPayloadManifest.js';
 import { redactSensitiveSystemTaskJsonValue, type InteractiveSystemTaskKind } from '../interactiveTaskKinds.js';
 import {
   parseSystemTaskSshConfig,
@@ -32,6 +33,7 @@ export interface RemoteBootstrapMachineParams {
   knownHostsMode?: 'app' | 'system';
   cliPayload?: Readonly<{
     rootPath: string;
+    sha256: string;
   }>;
   relayRuntime?: Readonly<{
     enabled: boolean;
@@ -352,11 +354,20 @@ function parseRemoteCliPayload(value: unknown): NonNullable<RemoteBootstrapMachi
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new SystemTaskExecutionError('invalid_params', 'Invalid local CLI payload config.');
   }
+  const record = value as Record<string, unknown>;
+  const rootPath = ensureNonEmptyString(record.rootPath, 'cliPayload.rootPath');
+  let sha256: string;
+  try {
+    sha256 = normalizeFirstPartyPayloadSha256(record.sha256, 'cliPayload.sha256');
+  } catch {
+    throw new SystemTaskExecutionError(
+      'invalid_params',
+      'Invalid cliPayload.sha256: expected 64 hexadecimal characters.',
+    );
+  }
   return {
-    rootPath: ensureNonEmptyString(
-      (value as Record<string, unknown>).rootPath,
-      'cliPayload.rootPath',
-    ),
+    rootPath,
+    sha256,
   };
 }
 

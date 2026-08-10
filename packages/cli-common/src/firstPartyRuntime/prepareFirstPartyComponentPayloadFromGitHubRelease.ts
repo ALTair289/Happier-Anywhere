@@ -21,6 +21,7 @@ export interface PreparedFirstPartyComponentPayload {
   versionId: string;
   payloadRoot: string;
   source: string | null;
+  contentSha256?: string;
   cleanup: () => Promise<void>;
 }
 

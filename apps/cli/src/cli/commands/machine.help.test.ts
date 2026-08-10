@@ -22,6 +22,7 @@ describe('happier machine --help', () => {
       expect(output).toContain('happier machine');
       expect(output).toContain('happier machine setup');
       expect(output).toContain('--cli-payload <extracted-root>');
+      expect(output).toContain('--cli-payload-sha256 <sha256>');
       expect(output).toContain('local path on the Controller');
     } finally {
       logSpy.mockRestore();
