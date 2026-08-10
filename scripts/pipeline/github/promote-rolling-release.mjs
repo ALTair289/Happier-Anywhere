@@ -427,8 +427,9 @@ async function main() {
     let draftReleaseId = findDraftReleaseId({ repo, tag: stagingTag, env: ghEnv, dryRun });
     if (!draftReleaseId && !dryRun) {
       let createError = null;
+      let createOutput = '';
       try {
-        run('gh', [
+        createOutput = run('gh', [
           'api', '-X', 'POST', `repos/${repo}/releases`,
           '-f', `tag_name=${stagingTag}`,
           '-f', `target_commitish=${targetSha}`,
@@ -440,7 +441,16 @@ async function main() {
       } catch (error) {
         createError = error;
       }
-      draftReleaseId = findDraftReleaseId({ repo, tag: stagingTag, env: ghEnv, dryRun: false });
+      if (createOutput.trim()) {
+        const createdDraft = parseRelease(createOutput, `new staging release ${stagingTag}`);
+        if (!createdDraft?.id || createdDraft.tagName !== stagingTag || createdDraft.draft !== true) {
+          fail(`GitHub returned an invalid staging draft release for ${stagingTag}.`);
+        }
+        draftReleaseId = createdDraft.id;
+      }
+      if (!draftReleaseId) {
+        draftReleaseId = findDraftReleaseId({ repo, tag: stagingTag, env: ghEnv, dryRun: false });
+      }
       if (!draftReleaseId) {
         if (createError) throw createError;
         fail(`GitHub did not create staging draft release ${stagingTag}.`);

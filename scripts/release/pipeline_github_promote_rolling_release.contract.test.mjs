@@ -202,7 +202,9 @@ if [ "$1" = "api" ]; then
       fi
       ;;
     *"releases?per_page=100"*)
-      if [ -f ${JSON.stringify(draftState)} ] && echo "$*" | grep -q "cli-preview"; then
+      if [ "\${HAPPIER_TEST_DELAY_DRAFT_VISIBILITY:-0}" != "1" ] \
+        && [ -f ${JSON.stringify(draftState)} ] \
+        && echo "$*" | grep -q "cli-preview"; then
         printf '%s\\n' "77"
       fi
       ;;
@@ -218,6 +220,7 @@ if [ "$1" = "api" ]; then
       done
       : > ${JSON.stringify(draftState)}
       printf '%s' "$tag_name" > ${JSON.stringify(release77Tag)}
+      printf '{"id":77,"tag_name":"%s","name":"staging","body":"","prerelease":true,"draft":true}\\n' "$tag_name"
       ;;
     *"-X DELETE repos/test/test/releases/assets/"*)
       asset="\${4##*/}"
@@ -604,6 +607,27 @@ test('an initially missing rolling release retries one private draft before publ
     assert.ok(stagedAssetDownload > findExistingDraft);
     assert.ok(publishDraft > stagedAssetDownload, 'native draft publication must follow exact asset audit');
     assert.match(successLog, /happier-rolling-staging/);
+    assert.equal(existsSync(testFixture.channelRef), true);
+    assert.equal(existsSync(testFixture.draftState), false);
+    assert.equal(existsSync(testFixture.publishedState), true);
+  } finally {
+    rmSync(testFixture.root, { recursive: true, force: true });
+  }
+});
+
+test('draft creation uses the mutation response while GitHub release listings are stale', () => {
+  const testFixture = fixture({ missingRolling: true });
+  try {
+    execFileSync(process.execPath, args(), {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${testFixture.bin}:${process.env.PATH ?? ''}`,
+        HAPPIER_TEST_DELAY_DRAFT_VISIBILITY: '1',
+      },
+      encoding: 'utf8',
+    });
+
     assert.equal(existsSync(testFixture.channelRef), true);
     assert.equal(existsSync(testFixture.draftState), false);
     assert.equal(existsSync(testFixture.publishedState), true);
