@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -37,6 +37,7 @@ import { logger } from '@/ui/logger';
 
 import { createCodexAppServerRuntime, writeUsageLimitRecoveryIntentToMetadata } from './runtime';
 import { createCodexAppServerProcessEnv, createCodexAppServerTestEnvScope } from './testkit/fakeCodexAppServer';
+import { pageCodexTranscript } from '../directSessions/pageCodexTranscript';
 
 type CommittedSnapshotBody = Readonly<{
     type?: string;
@@ -3751,6 +3752,107 @@ describe('createCodexAppServerRuntime', () => {
                 null,
             ]);
             expect(second.map((entry) => entry.clientUserMessageId ?? null)).toEqual([null]);
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('reconciles a rejected clientUserMessageId through fallback rollout commit without a second row', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-client-id-legacy-commit-',
+            { rejectClientUserMessageId: true },
+        );
+        const codexHome = join(root, 'codex-home');
+        const sessionsDir = join(codexHome, 'sessions');
+        const activeServerDir = join(root, 'server');
+        const threadId = 'thread-started';
+        const rolloutPath = join(sessionsDir, `rollout-2026-08-10T00-00-00-${threadId}.jsonl`);
+        await mkdir(sessionsDir, { recursive: true });
+        await writeFile(
+            rolloutPath,
+            `${JSON.stringify({ type: 'session_meta', payload: { id: threadId, cli_version: '0.100.0' } })}\n`,
+            'utf8',
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            activeServerDir,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await runtime.sendPrompt('legacy committed prompt', { localId: 'pending-local-id' });
+            await appendFile(
+                rolloutPath,
+                `${JSON.stringify({
+                    type: 'response_item',
+                    timestamp: '2026-08-10T00:00:01.000Z',
+                    payload: {
+                        type: 'message',
+                        role: 'user',
+                        content: [{ type: 'text', text: 'legacy committed prompt' }],
+                    },
+                })}\n${JSON.stringify({
+                    type: 'event_msg',
+                    timestamp: '2026-08-10T00:00:01.001Z',
+                    payload: { type: 'user_message', message: 'legacy committed prompt' },
+                })}\n`,
+                'utf8',
+            );
+            await runtime.sendPrompt('cached legacy committed prompt', { localId: 'pending-local-id-2' });
+            await appendFile(
+                rolloutPath,
+                `${JSON.stringify({
+                    type: 'response_item',
+                    timestamp: '2026-08-10T00:00:02.000Z',
+                    payload: {
+                        type: 'message',
+                        role: 'user',
+                        content: [{ type: 'text', text: 'cached legacy committed prompt' }],
+                    },
+                })}\n${JSON.stringify({
+                    type: 'event_msg',
+                    timestamp: '2026-08-10T00:00:02.001Z',
+                    payload: { type: 'user_message', message: 'cached legacy committed prompt' },
+                })}\n`,
+                'utf8',
+            );
+
+            const turnStarts = (await readRequestLog(requestLogPath))
+                .filter((entry) => entry.method === 'turn/start')
+                .map((entry) => entry.params as Record<string, unknown>);
+            expect(turnStarts.map((entry) => entry.clientUserMessageId ?? null)).toEqual([
+                'pending-local-id',
+                null,
+                null,
+            ]);
+
+            const page = await pageCodexTranscript({
+                source: { kind: 'codexHome', home: 'user' },
+                activeServerDir,
+                env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+                remoteSessionId: threadId,
+                direction: 'older',
+                maxBytes: 1024 * 1024,
+                maxItems: 10,
+            });
+            expect(page.items).toEqual([
+                expect.objectContaining({
+                    localId: 'pending-local-id',
+                    raw: {
+                        role: 'user',
+                        content: { type: 'text', text: 'legacy committed prompt' },
+                    },
+                }),
+                expect.objectContaining({
+                    localId: 'pending-local-id-2',
+                    raw: {
+                        role: 'user',
+                        content: { type: 'text', text: 'cached legacy committed prompt' },
+                    },
+                }),
+            ]);
         } finally {
             await runtime.reset();
         }

@@ -46,6 +46,7 @@ function normalizeOffsetBytes(value: unknown): number {
 
 type CodexBoundaryProgress = CodexStreamProgress & Readonly<{
   fingerprintOffsetBytes: number;
+  deferredUserResponseOffsetBytes?: number;
 }>;
 
 type CodexExpectedBoundary = CodexRolloutFileBoundary;
@@ -55,6 +56,9 @@ function toBoundaryProgress(entry: CodexDurableStreamForwardProgress): CodexBoun
     nextOffsetBytes: entry.nextOffsetBytes,
     subIndex: entry.subIndex,
     fingerprintOffsetBytes: entry.fingerprintOffsetBytes,
+    ...(entry.deferredUserResponseOffsetBytes === undefined
+      ? {}
+      : { deferredUserResponseOffsetBytes: entry.deferredUserResponseOffsetBytes }),
   };
 }
 
@@ -71,6 +75,9 @@ async function captureDurableStreamProgress(
     fingerprintOffsetBytes: progress.fingerprintOffsetBytes,
     fileIdentity: captured.boundary.fileIdentity,
     contentFingerprint: captured.boundary.contentFingerprint,
+    ...(progress.deferredUserResponseOffsetBytes === undefined
+      ? {}
+      : { deferredUserResponseOffsetBytes: progress.deferredUserResponseOffsetBytes }),
   };
 }
 
@@ -148,6 +155,7 @@ async function collectReadAfterRecords(params: Readonly<{
   records: readonly CodexProjectedTranscriptRecord[];
   baseProgressByStreamId: ReadonlyMap<string, CodexBoundaryProgress>;
   boundaryChanged: boolean;
+  scanWindowTruncated: boolean;
   remainingHistoricalUnknownStreamIds: ReadonlySet<string>;
 }>> {
   const streamsById = new Map(params.initialStreams.map((stream) => [stream.fileRelPath, stream] as const));
@@ -165,6 +173,7 @@ async function collectReadAfterRecords(params: Readonly<{
   const remainingHistoricalUnknownStreamIds = new Set(params.historicalUnknownStreamIds);
   const semanticTrackerByStreamId = new Map<string, ReturnType<typeof createCodexRolloutSemanticTracker>>();
   let boundaryChanged = false;
+  let scanWindowTruncated = false;
 
   for (let queueIndex = 0; queueIndex < streamQueue.length; queueIndex += 1) {
     const stream = streamQueue[queueIndex]!;
@@ -186,6 +195,7 @@ async function collectReadAfterRecords(params: Readonly<{
       maxBytes: Math.max(params.maxBytes, 1),
       maxItems: Math.max(params.maxItems * 2, 1),
     });
+    if (!page.reachedEnd && page.nextOffsetBytes < fileSize) scanWindowTruncated = true;
     if (page.truncated || !(await codexRolloutFileBoundaryMatches(stream.filePath, expectedBoundary))) {
       const tail = await captureCodexRolloutTailProgress(stream.filePath);
       if (tail) {
@@ -200,10 +210,26 @@ async function collectReadAfterRecords(params: Readonly<{
       // A valid JSON prefix is still not a committed JSONL record until its newline arrives.
       // Keeping the cursor before it avoids both early projection and loss when the writer appends.
       if (line.endOffsetBytes >= fileSize) continue;
+      const lineNextOffsetBytes = Math.min(fileSize, line.endOffsetBytes + 1);
+      const isUnmatchedTailUserResponse = lineNextOffsetBytes === fileSize
+        && stream.userMessageEvidence.userResponseOffsets.has(line.startOffsetBytes)
+        && !stream.userMessageEvidence.responseOffsetsWithMatchingEvent.has(line.startOffsetBytes);
+      if (
+        isUnmatchedTailUserResponse
+        && progress.deferredUserResponseOffsetBytes !== line.startOffsetBytes
+      ) {
+        baseProgressByStreamId.set(stream.fileRelPath, {
+          nextOffsetBytes: line.startOffsetBytes,
+          subIndex: 0,
+          fingerprintOffsetBytes: lineNextOffsetBytes,
+          deferredUserResponseOffsetBytes: line.startOffsetBytes,
+        });
+        break;
+      }
       const projected = projectCodexRolloutLineToTranscriptRecords({
         stream,
         lineStartOffsetBytes: line.startOffsetBytes,
-        lineNextOffsetBytes: Math.min(fileSize, line.endOffsetBytes + 1),
+        lineNextOffsetBytes,
         lineValue: line.value,
         semanticTracker,
       });
@@ -263,6 +289,7 @@ async function collectReadAfterRecords(params: Readonly<{
     records,
     baseProgressByStreamId,
     boundaryChanged,
+    scanWindowTruncated,
     remainingHistoricalUnknownStreamIds,
   };
 }
@@ -270,6 +297,7 @@ async function collectReadAfterRecords(params: Readonly<{
 export async function readAfterCodexRolloutStreams(params: Readonly<{
   codexHome: string;
   remoteSessionId: string;
+  activeServerDir?: string | null;
   cursor: string;
   maxBytes: number;
   maxItems: number;
@@ -278,6 +306,7 @@ export async function readAfterCodexRolloutStreams(params: Readonly<{
   const streams = await collectCodexDirectTranscriptRolloutStreams({
     codexHome: params.codexHome,
     remoteSessionId: params.remoteSessionId,
+    activeServerDir: params.activeServerDir,
     initialRolloutFiles: params.initialRolloutFiles,
   });
 
@@ -344,6 +373,7 @@ export async function readAfterCodexRolloutStreams(params: Readonly<{
   let usedBytes = 0;
   let truncated = boundaryChanged
     || collected.boundaryChanged
+    || collected.scanWindowTruncated
     || collected.remainingHistoricalUnknownStreamIds.size > 0;
   const progressByStreamId = new Map(collected.baseProgressByStreamId);
 
@@ -384,6 +414,7 @@ export async function readAfterCodexRolloutStreams(params: Readonly<{
 export async function pageCodexRolloutStreams(params: Readonly<{
   codexHome: string;
   remoteSessionId: string;
+  activeServerDir?: string | null;
   direction: 'older' | 'newer';
   cursor?: string;
   maxBytes: number;
@@ -399,6 +430,7 @@ export async function pageCodexRolloutStreams(params: Readonly<{
   const streams = await collectCodexDirectTranscriptRolloutStreams({
     codexHome: params.codexHome,
     remoteSessionId: params.remoteSessionId,
+    activeServerDir: params.activeServerDir,
     initialRolloutFiles: params.initialRolloutFiles,
   });
   const tailCursor = await buildCodexStreamVectorTailCursor(streams);

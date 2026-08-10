@@ -34,6 +34,7 @@ export type CodexDurableStreamForwardProgress = Readonly<{
   nextOffsetBytes: number;
   subIndex: number;
   fingerprintOffsetBytes: number;
+  deferredUserResponseOffsetBytes?: number;
   fileIdentity: string;
   contentFingerprint: string;
 }>;
@@ -128,6 +129,10 @@ export function decodeCodexDirectForwardCursor(raw: string): CodexDirectForwardC
           const contentFingerprint = typeof streamRecord.contentFingerprint === 'string'
             ? streamRecord.contentFingerprint.trim()
             : '';
+          const deferredUserResponseOffsetBytes = typeof streamRecord.deferredUserResponseOffsetBytes === 'number'
+            && Number.isFinite(streamRecord.deferredUserResponseOffsetBytes)
+            ? Math.trunc(streamRecord.deferredUserResponseOffsetBytes)
+            : undefined;
           if (
             !fileRelPath
             || !Number.isSafeInteger(nextOffsetBytes)
@@ -136,6 +141,9 @@ export function decodeCodexDirectForwardCursor(raw: string): CodexDirectForwardC
             || subIndex < 0
             || !Number.isSafeInteger(fingerprintOffsetBytes)
             || fingerprintOffsetBytes < nextOffsetBytes
+            || (deferredUserResponseOffsetBytes !== undefined
+              && (!Number.isSafeInteger(deferredUserResponseOffsetBytes)
+                || deferredUserResponseOffsetBytes !== nextOffsetBytes))
             || !/^[a-f0-9]{64}$/.test(fileIdentity)
             || !/^[a-f0-9]{64}$/.test(contentFingerprint)
           ) return null;
@@ -146,6 +154,7 @@ export function decodeCodexDirectForwardCursor(raw: string): CodexDirectForwardC
             fingerprintOffsetBytes,
             fileIdentity,
             contentFingerprint,
+            ...(deferredUserResponseOffsetBytes === undefined ? {} : { deferredUserResponseOffsetBytes }),
           };
         })
         .filter((entry): entry is CodexDurableStreamForwardProgress => entry !== null);

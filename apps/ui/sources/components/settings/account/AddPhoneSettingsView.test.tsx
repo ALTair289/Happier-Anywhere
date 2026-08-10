@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { act } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 import { flushHookEffects, renderScreen } from '@/dev/testkit';
 import { installAccountCommonModuleMocks } from '../../account/accountTestHelpers';
@@ -129,10 +130,11 @@ describe('AddPhoneSettingsView', () => {
         const qrContainer = screen.findByTestId('add-phone-qr');
         if (!qrContainer) throw new Error('Expected QR container');
         const qr = qrContainer.findByType('QRCode');
-        expect(String(qr.props.data)).toContain('happier:///pair?v=claim-v1');
-        expect(String(qr.props.data)).toContain(`claimId=${CLAIM_ID}`);
-        expect(String(qr.props.data)).toContain('origin=https%3A%2F%2Fstack.example.test');
-        expect(String(qr.props.data)).not.toContain('secret=');
+        expect(String(qr.props.data)).toContain('happier:///pair?v=1');
+        expect(String(qr.props.data)).toContain('pairId=pair_123');
+        expect(String(qr.props.data)).toContain('secret=');
+        expect(screen.getTextContent()).toContain('connect.pairingCompatibleModeTitle');
+        expect(screen.getTextContent()).toContain('connect.pairingSecureModeBody');
     });
 
     it('copies the pairing deep link with inline feedback', async () => {
@@ -151,10 +153,33 @@ describe('AddPhoneSettingsView', () => {
         const screen = await renderScreen(<AddPhoneSettingsView />);
         await screen.pressByTestIdAsync('add-phone-pairing-link');
 
-        expect(clipboardMocks.setStringAsync).toHaveBeenCalledWith(expect.stringContaining('happier:///pair?v=claim-v1'));
-        expect(clipboardMocks.setStringAsync.mock.calls.at(-1)?.[0]).not.toContain('secret=');
+        expect(clipboardMocks.setStringAsync).toHaveBeenCalledWith(expect.stringContaining('happier:///pair?v=1'));
+        expect(clipboardMocks.setStringAsync.mock.calls.at(-1)?.[0]).toContain('secret=');
         expect(modalMocks.alertAsync).not.toHaveBeenCalledWith('common.success', 'common.copied');
         expect(screen.findByTestId('add-phone-pairing-link-copied')).toBeTruthy();
+    });
+
+    it('generates claim-v1 only after the explicit secure action', async () => {
+        featureState = 'enabled';
+        activeServerUrl = 'https://stack.example.test';
+        pairingStatusResponse = {
+            ok: true,
+            status: 200,
+            json: async () => ({ state: 'pending', pairId: CLAIM_ID, expiresAt: futureExpiresAt() }),
+        } as any;
+        const { AddPhoneSettingsView } = await import('./AddPhoneSettingsView');
+
+        const screen = await renderScreen(<AddPhoneSettingsView />);
+        await act(async () => {
+            await screen.findByTestId('add-phone-generate-secure-qr')?.props.action();
+        });
+
+        const qr = screen.findByTestId('add-phone-qr')?.findByType('QRCode');
+        expect(String(qr?.props.data)).toContain('happier:///pair?v=claim-v1');
+        expect(String(qr?.props.data)).toContain(`claimId=${CLAIM_ID}`);
+        expect(String(qr?.props.data)).not.toContain('secret=');
+        expect(screen.getTextContent()).toContain('connect.pairingSecureModeTitle');
+        expect(screen.getTextContent()).toContain('connect.pairingSecureModeBody');
     });
 
     it('clears the QR code when the pairing session expires', async () => {

@@ -65,22 +65,21 @@ export function mapCodexRolloutLineToDirectMessages(params: Readonly<{
   lineValue: unknown;
   actions: ReadonlyArray<CodexRolloutAction>;
   sidechainId?: string | null;
-  useEventUserMessageProjection: boolean;
+  hasMatchingEventUserMessage?: boolean;
+  localIdOverride?: string | null;
 }>): DirectTranscriptRawMessageV1[] {
   const createdAtMs = extractEnvelopeTimestampMs(params.lineValue);
   const idPrefix = `codex:${params.fileRelPath}`;
   const directUserMessage = readDirectUserMessageEvent(params.lineValue);
-  const useEventUserMessageProjection = params.useEventUserMessageProjection;
   if (
-    useEventUserMessageProjection
-    && directUserMessage
+    directUserMessage
     && !params.sidechainId
     && !shouldFilterHarnessBlob(directUserMessage.text)
   ) {
     const stableId = stableOffsetId(idPrefix, params.lineStartOffsetBytes, 0);
     return [{
       id: stableId,
-      localId: directUserMessage.clientId ?? stableId,
+      localId: params.localIdOverride ?? directUserMessage.clientId ?? stableId,
       createdAtMs,
       raw: {
         role: 'user',
@@ -101,11 +100,11 @@ export function mapCodexRolloutLineToDirectMessages(params: Readonly<{
     const stableId = stableOffsetId(idPrefix, params.lineStartOffsetBytes, i);
 
     if (action.type === 'user-text') {
-      if (useEventUserMessageProjection && isModelInputResponseItem(params.lineValue)) continue;
+      if (params.hasMatchingEventUserMessage && isModelInputResponseItem(params.lineValue)) continue;
       if (shouldFilterHarnessBlob(action.text)) continue;
       out.push({
         id: stableId,
-        localId: stableId,
+        localId: params.localIdOverride ?? stableId,
         createdAtMs,
         raw: {
           role: 'user',

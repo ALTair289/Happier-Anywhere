@@ -5,6 +5,28 @@ import { renderScreen } from '@/dev/testkit';
 
 const appState = vi.hoisted(() => ({ currentState: 'active' as string }));
 
+// Contract pinned to the legacy phone parser at 4b76fc8c60fffeb1c08a26ef05d0ffe22684168e.
+function parseWithFixedLegacyPhoneParser(deepLink: string) {
+    const url = new URL(deepLink);
+    const normalizedPathname = url.pathname === 'pair' ? '/pair' : url.pathname;
+    if (normalizedPathname !== '/pair' && !(url.hostname === 'pair' && (normalizedPathname === '' || normalizedPathname === '/'))) {
+        return null;
+    }
+    const version = url.searchParams.get('v');
+    if (version !== null && version !== '1') return null;
+    const pairId = url.searchParams.get('pairId');
+    const secret = url.searchParams.get('secret');
+    if (!pairId || !secret) return null;
+    const server = url.searchParams.get('server');
+    let serverUrl: string | null = null;
+    if (server) {
+        const parsedServer = new URL(server);
+        if (!['http:', 'https:'].includes(parsedServer.protocol) || parsedServer.username || parsedServer.password) return null;
+        serverUrl = `${parsedServer.origin}${parsedServer.pathname === '/' ? '' : parsedServer.pathname}${parsedServer.search}`;
+    }
+    return { pairId, secret, serverUrl };
+}
+
 vi.mock('react-native', async () => {
     const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');
     return createReactNativeWebMock(
@@ -113,7 +135,7 @@ describe('usePairingSession (pairing deep link server URL)', () => {
         }
     });
 
-    it('prefers a canonical server URL when available', async () => {
+    it('keeps the default issuer output consumable by the fixed legacy phone parser', async () => {
         cachedCanonicalServerUrl = 'https://api.example.test';
 
         const { usePairingSession } = await import('./usePairingSession');
@@ -134,14 +156,13 @@ describe('usePairingSession (pairing deep link server URL)', () => {
 
             const deepLink = hookApi!.deepLink;
             expect(deepLink).toBeTruthy();
-            const url = new URL(deepLink!);
-            expect(url.searchParams.get('v')).toBe('claim-v1');
-            expect(url.searchParams.get('origin')).toBe('https://api.example.test');
-            expect(url.searchParams.get('claimId')).toMatch(/^claim_/);
-            expect(url.searchParams.has('secret')).toBe(false);
-            expect(url.searchParams.has('pairId')).toBe(false);
-            expect(pairingStartMock).not.toHaveBeenCalled();
-            expect(createPairingSecretMock).not.toHaveBeenCalled();
+            expect(parseWithFixedLegacyPhoneParser(deepLink!)).toEqual({
+                pairId: 'pair_123',
+                secret: 'sec_test',
+                serverUrl: 'https://api.example.test',
+            });
+            expect(pairingClaimStartMock).not.toHaveBeenCalled();
+            expect(pairingStartMock).toHaveBeenCalledTimes(1);
 
             await act(async () => {
                 hookApi!.clearSession();
@@ -169,7 +190,7 @@ describe('usePairingSession (pairing deep link server URL)', () => {
         tree = (await renderScreen(<Probe />)).tree;
         try {
             await act(async () => {
-                const res = await hookApi!.startPairing();
+                const res = await hookApi!.startPairing({ protocol: 'claim-v1' });
                 expect(res.ok).toBe(true);
             });
 
@@ -201,7 +222,7 @@ describe('usePairingSession (pairing deep link server URL)', () => {
         tree = (await renderScreen(<Probe />)).tree;
         try {
             await act(async () => {
-                const res = await hookApi!.startPairing();
+                const res = await hookApi!.startPairing({ protocol: 'claim-v1' });
                 expect(res.ok).toBe(true);
             });
 
@@ -216,7 +237,32 @@ describe('usePairingSession (pairing deep link server URL)', () => {
         }
     });
 
-    it('falls back to the legacy secret link only when claim-v1 is explicitly unsupported', async () => {
+    it('issues claim-v1 only when explicitly requested', async () => {
+        cachedCanonicalServerUrl = 'https://api.example.test';
+        const { usePairingSession } = await import('./usePairingSession');
+        let hookApi: ReturnType<typeof usePairingSession> | null = null;
+        function Probe() {
+            hookApi = usePairingSession({ enabled: true, isAuthenticated: true });
+            return null;
+        }
+
+        const tree = (await renderScreen(<Probe />)).tree;
+        try {
+            await act(async () => {
+                expect((await hookApi!.startPairing({ protocol: 'claim-v1' })).ok).toBe(true);
+            });
+            const url = new URL(hookApi!.deepLink!);
+            expect(url.searchParams.get('v')).toBe('claim-v1');
+            expect(url.searchParams.get('origin')).toBe('https://api.example.test');
+            expect(hookApi!.protocol).toBe('claim-v1');
+            expect(pairingStartMock).not.toHaveBeenCalled();
+            expect(createPairingSecretMock).not.toHaveBeenCalled();
+        } finally {
+            act(() => tree.unmount());
+        }
+    });
+
+    it('does not silently downgrade an explicit claim-v1 request', async () => {
         cachedCanonicalServerUrl = 'https://api.example.test';
         pairingClaimStartMock.mockResolvedValueOnce({ ok: false, reason: 'unsupported', status: 404 } as any);
 
@@ -231,15 +277,13 @@ describe('usePairingSession (pairing deep link server URL)', () => {
         const tree = (await renderScreen(<Probe />)).tree;
         try {
             await act(async () => {
-                expect((await hookApi!.startPairing()).ok).toBe(true);
+                expect(await hookApi!.startPairing({ protocol: 'claim-v1' })).toEqual({ ok: false, status: 404 });
             });
 
-            const url = new URL(hookApi!.deepLink!);
-            expect(url.searchParams.get('v')).toBe('1');
-            expect(url.searchParams.get('secret')).toBe('sec_test');
-            expect(url.searchParams.get('server')).toBe('https://api.example.test');
+            expect(hookApi!.deepLink).toBeNull();
             expect(pairingClaimStartMock).toHaveBeenCalledTimes(1);
-            expect(pairingStartMock).toHaveBeenCalledTimes(1);
+            expect(pairingStartMock).not.toHaveBeenCalled();
+            expect(createPairingSecretMock).not.toHaveBeenCalled();
         } finally {
             act(() => tree.unmount());
         }
@@ -308,7 +352,7 @@ describe('usePairingSession (pairing deep link server URL)', () => {
         try {
             let startPromise!: Promise<{ ok: boolean; status?: number }>;
             await act(async () => {
-                startPromise = hookApi!.startPairing();
+                startPromise = hookApi!.startPairing({ protocol: 'claim-v1' });
                 await Promise.resolve();
             });
             expect(hookApi!.isStarting).toBe(true);

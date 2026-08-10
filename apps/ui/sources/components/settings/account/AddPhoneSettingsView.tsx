@@ -6,7 +6,7 @@ import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 import { useAuth } from '@/auth/context/AuthContext';
 import { authAccountApprove } from '@/auth/flows/accountApprove';
 import { buildAccountLinkResponse } from '@/auth/flows/buildAccountLinkResponse';
-import { usePairingSession } from '@/hooks/auth/usePairingSession';
+import { usePairingSession, type PairingProtocol } from '@/hooks/auth/usePairingSession';
 import { pairingConsume } from '@/sync/api/account/apiPairingAuth';
 import { decodeBase64 } from '@/encryption/base64';
 import { parsePairingDeepLink } from '@/auth/pairing/pairingUrl';
@@ -124,15 +124,15 @@ export const AddPhoneSettingsView = React.memo(function AddPhoneSettingsView() {
     const pairingState = pairingDecision?.state ?? 'unknown';
     const pairingEnabled = pairingState === 'enabled';
 
-    const { deepLink, status, isExpired, isStarting: starting, startPairing } = usePairingSession({
+    const { deepLink, status, isExpired, isStarting: starting, protocol, startPairing } = usePairingSession({
         enabled: pairingEnabled,
         isAuthenticated: auth.isAuthenticated,
     });
 
     const [approving, setApproving] = React.useState(false);
 
-    const startPairingWithAlert = React.useCallback(async () => {
-        const res = await startPairing();
+    const startPairingWithAlert = React.useCallback(async (requestedProtocol: PairingProtocol = 'legacy') => {
+        const res = await startPairing({ protocol: requestedProtocol });
         if (!res.ok && auth.isAuthenticated && pairingEnabled) {
             await Modal.alertAsync(t('common.error'), t('errors.operationFailed'));
         }
@@ -141,7 +141,7 @@ export const AddPhoneSettingsView = React.memo(function AddPhoneSettingsView() {
     React.useEffect(() => {
         if (!auth.isAuthenticated) return;
         if (!pairingEnabled) return;
-        void startPairingWithAlert();
+        void startPairingWithAlert('legacy');
     }, [auth.isAuthenticated, pairingEnabled, startPairingWithAlert]);
 
     const approve = React.useCallback(async () => {
@@ -158,7 +158,7 @@ export const AddPhoneSettingsView = React.memo(function AddPhoneSettingsView() {
             await pairingConsume({ pairId: status.pairId }).catch(() => {});
 
             await Modal.alertAsync(t('common.success'), t('common.done'));
-            void startPairingWithAlert();
+            void startPairingWithAlert('legacy');
         } catch (e) {
             await Modal.alertAsync(t('common.error'), t('errors.operationFailed'));
         } finally {
@@ -256,13 +256,43 @@ export const AddPhoneSettingsView = React.memo(function AddPhoneSettingsView() {
                                 </View>
                             ) : null}
 
+                            <View testID="add-phone-pairing-mode" style={styles.requestCard}>
+                                <Text style={styles.requestTitle}>
+                                    {protocol === 'claim-v1'
+                                        ? t('connect.pairingSecureModeTitle')
+                                        : t('connect.pairingCompatibleModeTitle')}
+                                </Text>
+                                <Text style={styles.requestBody}>
+                                    {protocol === 'claim-v1'
+                                        ? t('connect.pairingSecureModeBody')
+                                        : t('connect.pairingCompatibleModeBody')}
+                                </Text>
+                                {protocol !== 'claim-v1' ? (
+                                    <>
+                                        <Text style={[styles.requestTitle, { marginTop: 14 }]}>
+                                            {t('connect.pairingSecureModeTitle')}
+                                        </Text>
+                                        <Text style={styles.requestBody}>{t('connect.pairingSecureModeBody')}</Text>
+                                    </>
+                                ) : null}
+                            </View>
+
                             <View style={styles.linkActionsRow}>
                                 <View style={styles.actionButton}>
                                     <RoundButton
                                         size="small"
                                         title={t('connect.generateNewQrCode')}
-                                        action={startPairingWithAlert}
+                                        action={() => startPairingWithAlert('legacy')}
                                         display="inverted"
+                                        disabled={starting}
+                                    />
+                                </View>
+                                <View style={styles.actionButton}>
+                                    <RoundButton
+                                        testID="add-phone-generate-secure-qr"
+                                        size="small"
+                                        title={t('connect.generateSecureQrCode')}
+                                        action={() => startPairingWithAlert('claim-v1')}
                                         disabled={starting}
                                     />
                                 </View>

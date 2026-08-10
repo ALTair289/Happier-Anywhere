@@ -20,6 +20,10 @@ function responseItemLine(params: { timestamp: string; payload: Record<string, u
   return `${JSON.stringify({ type: 'response_item', timestamp: params.timestamp, payload: params.payload })}\n`;
 }
 
+function eventMsgLine(params: { timestamp: string; payload: Record<string, unknown> }): string {
+  return `${JSON.stringify({ type: 'event_msg', timestamp: params.timestamp, payload: params.payload })}\n`;
+}
+
 describe('readAfterCodexTranscript', () => {
   it('returns appended messages when following from a tail cursor', async () => {
     const root = await mkdtemp(join(tmpdir(), 'happier-codex-direct-tail-'));
@@ -79,6 +83,127 @@ describe('readAfterCodexTranscript', () => {
     );
     expect(next.truncated).toBe(false);
     expect(next.nextCursor).toBeTruthy();
+  });
+
+  it('deduplicates a user response and its event when they append across read-after calls', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'happier-codex-direct-tail-user-evidence-'));
+    const codexHome = join(root, 'codex-home');
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const sessionId = '14141414-1414-1414-1414-141414141414';
+    const filePath = join(sessionsDir, `rollout-2026-01-02T00-00-00-${sessionId}.jsonl`);
+    await writeFile(filePath, sessionMetaLine({ id: sessionId, cli_version: '99.0.0' }), 'utf8');
+    const activeServerDir = join(root, 'servers', 'cloud');
+
+    const init = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' },
+      env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir,
+      remoteSessionId: sessionId,
+      cursor: 'tail',
+      maxBytes: 1024 * 1024,
+      maxItems: 100,
+    });
+    await appendFile(filePath, responseItemLine({
+      timestamp: '2026-01-02T00:00:01.000Z',
+      payload: { type: 'message', role: 'user', content: [{ type: 'text', text: 'split append prompt' }] },
+    }), 'utf8');
+
+    const deferred = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' },
+      env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir,
+      remoteSessionId: sessionId,
+      cursor: init.nextCursor!,
+      maxBytes: 1024 * 1024,
+      maxItems: 100,
+    });
+    expect(deferred.items).toEqual([]);
+    const deferredCursor = decodeCodexDirectForwardCursor(deferred.nextCursor!);
+    expect(deferredCursor?.kind).toBe('codexForwardStreamVector');
+    if (deferredCursor?.kind !== 'codexForwardStreamVector' || deferredCursor.v !== 5) {
+      throw new Error('Expected durable stream-vector cursor');
+    }
+    expect(deferredCursor.streams[0]?.deferredUserResponseOffsetBytes).toBe(
+      deferredCursor.streams[0]?.nextOffsetBytes,
+    );
+
+    await appendFile(filePath, eventMsgLine({
+      timestamp: '2026-01-02T00:00:01.001Z',
+      payload: { type: 'user_message', client_id: 'split-client-id', message: 'split append prompt' },
+    }), 'utf8');
+    const committed = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' },
+      env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir,
+      remoteSessionId: sessionId,
+      cursor: deferred.nextCursor!,
+      maxBytes: 1024 * 1024,
+      maxItems: 100,
+    });
+    expect(committed.items).toEqual([
+      expect.objectContaining({
+        localId: 'split-client-id',
+        raw: { role: 'user', content: { type: 'text', text: 'split append prompt' } },
+      }),
+    ]);
+
+    const idle = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' },
+      env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir,
+      remoteSessionId: sessionId,
+      cursor: committed.nextCursor!,
+      maxBytes: 1024 * 1024,
+      maxItems: 100,
+    });
+    expect(idle.items).toEqual([]);
+  });
+
+  it('keeps user event dedupe stable across a maxItems read-after boundary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'happier-codex-direct-tail-user-page-boundary-'));
+    const codexHome = join(root, 'codex-home');
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const sessionId = '16161616-1616-1616-1616-161616161616';
+    const filePath = join(sessionsDir, `rollout-2026-01-02T00-00-00-${sessionId}.jsonl`);
+    await writeFile(filePath, sessionMetaLine({ id: sessionId }), 'utf8');
+    const activeServerDir = join(root, 'servers', 'cloud');
+    const init = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: 'tail', maxBytes: 1024 * 1024, maxItems: 1,
+    });
+    await appendFile(
+      filePath,
+      responseItemLine({
+        timestamp: '2026-01-02T00:00:01.000Z',
+        payload: { type: 'message', role: 'user', content: [{ type: 'text', text: 'boundary prompt' }] },
+      })
+        + eventMsgLine({
+          timestamp: '2026-01-02T00:00:01.001Z',
+          payload: { type: 'user_message', client_id: 'boundary-client-id', message: 'boundary prompt' },
+        })
+        + responseItemLine({
+          timestamp: '2026-01-02T00:00:02.000Z',
+          payload: { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'boundary answer' }] },
+        }),
+      'utf8',
+    );
+
+    const first = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: init.nextCursor!, maxBytes: 1024 * 1024, maxItems: 1,
+    });
+    expect(first.items).toEqual([expect.objectContaining({ localId: 'boundary-client-id' })]);
+    expect(first.truncated).toBe(true);
+
+    const second = await readAfterCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' }, env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir, remoteSessionId: sessionId, cursor: first.nextCursor!, maxBytes: 1024 * 1024, maxItems: 1,
+    });
+    expect(second.items).toHaveLength(1);
+    expect(JSON.stringify(second.items)).toContain('boundary answer');
+    expect(JSON.stringify(second.items)).not.toContain('boundary prompt');
   });
 
   it('keeps the tail cursor at end-of-file when no new lines were appended', async () => {

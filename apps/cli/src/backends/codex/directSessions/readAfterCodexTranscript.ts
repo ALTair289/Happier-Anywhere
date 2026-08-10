@@ -94,6 +94,7 @@ export async function readAfterCodexTranscript(params: Readonly<{
 
   return readAfterCodexRolloutStreams({
     codexHome: bestHome.home,
+    activeServerDir: params.activeServerDir,
     remoteSessionId: params.remoteSessionId,
     cursor: params.cursor,
     maxBytes: params.maxBytes,

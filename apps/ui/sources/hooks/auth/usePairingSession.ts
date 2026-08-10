@@ -18,6 +18,7 @@ import {
 const PAIRING_STATUS_POLL_INTERVAL_MS = 1_000;
 
 type StartPairingResult = { ok: true } | { ok: false; status: number };
+export type PairingProtocol = 'legacy' | 'claim-v1';
 
 type PairingSessionOwner = Readonly<{
     pairId: string;
@@ -44,7 +45,8 @@ function isPairingSessionOwnerActive(owner: PairingSessionOwner): boolean {
 
 /**
  * Desktop/web pairing session lifecycle:
- * - start: prefer an origin-bound one-time claim; fall back to the legacy secret protocol only when unsupported
+ * - start: default to the legacy secret protocol so existing phone apps remain compatible
+ * - claim-v1: an explicit security mode; it never silently falls back to a secret link
  * - poll: GET /v1/auth/pairing/status until phone requests
  * - approve: handled by caller via existing auth account link flow
  */
@@ -53,7 +55,8 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
     status: PairingStatus | null;
     isExpired: boolean;
     isStarting: boolean;
-    startPairing: () => Promise<StartPairingResult>;
+    protocol: PairingProtocol | null;
+    startPairing: (options?: Readonly<{ protocol?: PairingProtocol }>) => Promise<StartPairingResult>;
     clearSession: () => void;
 }> {
     const enabled = params.enabled;
@@ -64,6 +67,7 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
     const [deepLink, setDeepLink] = React.useState<string | null>(null);
     const [isExpired, setIsExpired] = React.useState(false);
     const [isStarting, setIsStarting] = React.useState(false);
+    const [protocol, setProtocol] = React.useState<PairingProtocol | null>(null);
     const operationGenerationRef = React.useRef(0);
     const activeStartGenerationRef = React.useRef<number | null>(null);
     const sessionOwnerRef = React.useRef<PairingSessionOwner | null>(null);
@@ -77,6 +81,7 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
         setDeepLink(null);
         setIsExpired(false);
         setIsStarting(false);
+        setProtocol(null);
     }, []);
 
     React.useEffect(() => {
@@ -90,7 +95,7 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
         sessionOwnerRef.current = null;
     }, []);
 
-    const startPairing = React.useCallback(async () => {
+    const startPairing = React.useCallback(async (options?: Readonly<{ protocol?: PairingProtocol }>) => {
         if (!enabled || !isAuthenticated) {
             return { ok: false, status: 401 } as const;
         }
@@ -107,6 +112,7 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
         setStatus(null);
         setDeepLink(null);
         setPairId(null);
+        setProtocol(null);
         sessionOwnerRef.current = null;
 
         try {
@@ -123,8 +129,10 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
                 activeServerUrl: active.serverUrl,
             });
 
-            const claimOrigin = serverUrl ? normalizePairingClaimOriginV1(serverUrl) : null;
-            if (claimOrigin) {
+            const requestedProtocol = options?.protocol ?? 'legacy';
+            if (requestedProtocol === 'claim-v1') {
+                const claimOrigin = serverUrl ? normalizePairingClaimOriginV1(serverUrl) : null;
+                if (!claimOrigin) return { ok: false, status: 422 } as const;
                 const claimed = await pairingClaimStart({ origin: claimOrigin });
                 if (!isCurrentOperation()) return { ok: false, status: 409 } as const;
                 if (claimed.ok) {
@@ -136,11 +144,10 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
                     setPairId(data.claimId);
                     setDeepLink(buildPairingClaimDeepLink({ claimId: data.claimId, origin: data.origin }));
                     setStatus({ state: 'pending', pairId: data.claimId, expiresAt: data.expiresAt });
+                    setProtocol('claim-v1');
                     return { ok: true } as const;
                 }
-                if (claimed.reason !== 'unsupported') {
-                    return { ok: false, status: claimed.status } as const;
-                }
+                return { ok: false, status: claimed.status } as const;
             }
 
             const { secret, secretHash } = await createPairingSecret();
@@ -163,6 +170,7 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
             setPairId(data.pairId);
             setDeepLink(link);
             setStatus({ state: 'pending', pairId: data.pairId, expiresAt: data.expiresAt });
+            setProtocol('legacy');
             return { ok: true } as const;
         } catch {
             return { ok: false, status: 500 } as const;
@@ -235,5 +243,5 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
         };
     }, [clearSession, enabled, isAuthenticated, pairId]);
 
-    return { deepLink, status, isExpired, isStarting, startPairing, clearSession };
+    return { deepLink, status, isExpired, isStarting, protocol, startPairing, clearSession };
 }

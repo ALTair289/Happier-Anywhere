@@ -1,42 +1,34 @@
 import { readJsonlFileForward } from '@/api/directSessions/filePaging/jsonlForwardReader';
 
 import { mapCodexRolloutEventToActions } from '../localControl/rolloutMapper';
-import { readCodexSessionMetaFromRollout } from '../localControl/rolloutDiscovery';
 import { createCodexRolloutSemanticTracker } from '../rollout/createCodexRolloutSemanticTracker';
 import { collectCodexSessionRolloutFiles, type CodexRolloutFile } from './collectCodexSessionRolloutFiles';
 import type { CodexDirectTranscriptRolloutStream } from './codexDirectTranscriptProjection';
+import { collectCodexDirectUserMessageEvidence } from './codexDirectUserMessageEvidence';
+import {
+  readCodexLegacyUserMessageIdentityRecords,
+  type CodexLegacyUserMessageIdentityRecord,
+} from './codexLegacyUserMessageIdentityLedger';
 
 const CHILD_DISCOVERY_MAX_BYTES = 1024 * 1024;
 const CHILD_DISCOVERY_MAX_ITEMS = 512;
-
-function supportsExactEventUserMessageProjection(cliVersion: unknown): boolean {
-  if (typeof cliVersion !== 'string') return false;
-  const match = /^(\d+)\.(\d+)\.(\d+)([-+][0-9A-Za-z.-]+)?$/.exec(cliVersion.trim());
-  if (!match) return false;
-  const version = match.slice(1, 4).map((part) => Number.parseInt(part, 10));
-  const minimum = [0, 145, 0];
-  for (let index = 0; index < minimum.length; index += 1) {
-    if (version[index]! > minimum[index]!) return true;
-    if (version[index]! < minimum[index]!) return false;
-  }
-  // A prerelease of the exact minimum sorts below the stable minimum.
-  return !match[4]?.startsWith('-');
-}
 
 export async function materializeCodexDirectTranscriptRolloutStreams(params: Readonly<{
   files: readonly CodexRolloutFile[];
   threadId: string;
   sidechainId: string | null;
+  legacyIdentityRecords?: readonly CodexLegacyUserMessageIdentityRecord[];
 }>): Promise<readonly CodexDirectTranscriptRolloutStream[]> {
   return await Promise.all(params.files.map(async (file) => {
-    const sessionMeta = await readCodexSessionMetaFromRollout(file.filePath);
-    const cliVersion = sessionMeta?.cli_version ?? sessionMeta?.cliVersion;
     return {
       ...file,
       threadId: params.threadId,
       sidechainId: params.sidechainId,
-      // Unknown/older transcripts deliberately keep the legacy response_item path.
-      useEventUserMessageProjection: supportsExactEventUserMessageProjection(cliVersion),
+      userMessageEvidence: await collectCodexDirectUserMessageEvidence({
+        filePath: file.filePath,
+        fileRelPath: file.fileRelPath,
+        legacyIdentityRecords: params.legacyIdentityRecords,
+      }),
     };
   }));
 }
@@ -76,6 +68,7 @@ async function discoverSpawnedThreadIdsFromFilesBounded(files: readonly CodexRol
 export async function collectCodexDirectTranscriptRolloutStreams(params: Readonly<{
   codexHome: string;
   remoteSessionId: string;
+  activeServerDir?: string | null;
   initialRolloutFiles?: readonly CodexRolloutFile[];
 }>): Promise<readonly CodexDirectTranscriptRolloutStream[]> {
   const queue = [{ threadId: params.remoteSessionId, sidechainId: null as string | null }];
@@ -95,10 +88,18 @@ export async function collectCodexDirectTranscriptRolloutStreams(params: Readonl
       });
     if (files.length === 0) continue;
 
+    const legacyIdentityRecords = params.activeServerDir
+      ? await readCodexLegacyUserMessageIdentityRecords({
+        activeServerDir: params.activeServerDir,
+        codexHome: params.codexHome,
+        threadId: current.threadId,
+      })
+      : [];
     streams.push(...await materializeCodexDirectTranscriptRolloutStreams({
       files,
       threadId: current.threadId,
       sidechainId: current.sidechainId,
+      legacyIdentityRecords,
     }));
 
     const discoveredChildThreadIds = await discoverSpawnedThreadIdsFromFilesBounded(files);

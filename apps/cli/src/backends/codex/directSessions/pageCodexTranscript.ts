@@ -73,6 +73,7 @@ export async function pageCodexTranscript(params: Readonly<{
 
   return pageCodexRolloutStreams({
     codexHome: bestHome.home,
+    activeServerDir: params.activeServerDir,
     remoteSessionId: params.remoteSessionId,
     direction: params.direction,
     cursor: params.cursor,

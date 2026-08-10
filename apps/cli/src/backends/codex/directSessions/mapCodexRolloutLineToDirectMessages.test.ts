@@ -3,13 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { mapCodexRolloutEventToActions } from '../localControl/rolloutMapper';
 import { mapCodexRolloutLineToDirectMessages } from './mapCodexRolloutLineToDirectMessages';
 
-function mapLine(lineValue: unknown, lineStartOffsetBytes = 42, useEventUserMessageProjection = true) {
+function mapLine(lineValue: unknown, lineStartOffsetBytes = 42, hasMatchingEventUserMessage = false) {
   return mapCodexRolloutLineToDirectMessages({
     fileRelPath: 'sessions/rollout.jsonl',
     lineStartOffsetBytes,
     lineValue,
     actions: mapCodexRolloutEventToActions(lineValue, { debug: false }),
-    useEventUserMessageProjection,
+    hasMatchingEventUserMessage,
   });
 }
 
@@ -89,7 +89,24 @@ describe('mapCodexRolloutLineToDirectMessages', () => {
       },
     };
 
-    expect(mapLine(lineValue)).toEqual([]);
+    expect(mapLine(lineValue, 42, true)).toEqual([]);
+  });
+
+  it('keeps a response item when there is no actual corresponding event evidence', () => {
+    const lineValue = {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'text', text: 'unmatched prompt' }],
+      },
+    };
+
+    expect(mapLine(lineValue)).toEqual([
+      expect.objectContaining({
+        raw: { role: 'user', content: { type: 'text', text: 'unmatched prompt' } },
+      }),
+    ]);
   });
 
   it('uses the canonical event text once for a multi-part model input', () => {
@@ -113,7 +130,7 @@ describe('mapCodexRolloutLineToDirectMessages', () => {
       },
     };
 
-    expect(mapLine(responseItem)).toEqual([]);
+    expect(mapLine(responseItem, 42, true)).toEqual([]);
     expect(mapLine(eventMessage, 84)).toEqual([
       expect.objectContaining({
         localId: 'client-multipart-1',
@@ -149,7 +166,7 @@ describe('mapCodexRolloutLineToDirectMessages', () => {
       },
     };
 
-    expect(mapLine(responseItem)).toEqual([]);
+    expect(mapLine(responseItem, 42, true)).toEqual([]);
     const projected = mapLine(eventMessage, 84);
     expect(projected).toEqual([
       expect.objectContaining({
@@ -163,7 +180,7 @@ describe('mapCodexRolloutLineToDirectMessages', () => {
     expect(JSON.stringify(projected)).not.toContain(privatePath);
   });
 
-  it('keeps the legacy response-item user row when exact event projection is unavailable', () => {
+  it('keeps the response-item user row when exact event evidence is unavailable', () => {
     const lineValue = {
       type: 'response_item',
       payload: {
@@ -173,7 +190,7 @@ describe('mapCodexRolloutLineToDirectMessages', () => {
       },
     };
 
-    expect(mapLine(lineValue, 42, false)).toEqual([
+    expect(mapLine(lineValue)).toEqual([
       expect.objectContaining({
         raw: {
           role: 'user',
@@ -183,7 +200,7 @@ describe('mapCodexRolloutLineToDirectMessages', () => {
     ]);
   });
 
-  it('does not add an event user row in legacy projection mode', () => {
+  it('projects an event user row whenever the actual event exists', () => {
     const lineValue = {
       type: 'event_msg',
       payload: {
@@ -193,7 +210,9 @@ describe('mapCodexRolloutLineToDirectMessages', () => {
       },
     };
 
-    expect(mapLine(lineValue, 84, false)).toEqual([]);
+    expect(mapLine(lineValue, 84)).toEqual([
+      expect.objectContaining({ localId: 'new-field-on-unknown-version' }),
+    ]);
   });
 
   it('does not render an injected subagent notification as a user message', () => {

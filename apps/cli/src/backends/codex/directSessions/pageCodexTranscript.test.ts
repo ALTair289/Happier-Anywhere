@@ -121,7 +121,7 @@ describe('pageCodexTranscript', () => {
     ['older version', '0.144.99'],
     ['minimum prerelease', '0.145.0-alpha.0'],
     ['malformed version', 'not-semver'],
-  ] as const)('keeps exactly one legacy response-item user row for %s metadata', async (_label, cliVersion) => {
+  ] as const)('uses actual corresponding event evidence, not %s metadata', async (_label, cliVersion) => {
     const root = await mkdtemp(join(tmpdir(), 'happier-codex-direct-page-legacy-user-'));
     const codexHome = join(root, 'codex-home');
     const sessionsDir = join(codexHome, 'sessions');
@@ -160,12 +160,93 @@ describe('pageCodexTranscript', () => {
 
     expect(page.items).toHaveLength(1);
     expect(page.items[0]).toEqual(expect.objectContaining({
-      localId: expect.stringMatching(/^codex:/),
+      localId: 'client-id-not-supported-here',
       raw: {
         role: 'user',
         content: { type: 'text', text: 'legacy prompt' },
       },
     }));
+  });
+
+  it('keeps an unmatched user response item even for a newer cli version', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'happier-codex-direct-page-unmatched-user-'));
+    const codexHome = join(root, 'codex-home');
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const sessionId = '13131313-1313-1313-1313-131313131313';
+    const filePath = join(sessionsDir, `rollout-2026-01-02T00-00-00-${sessionId}.jsonl`);
+    await writeFile(
+      filePath,
+      sessionMetaLine({ id: sessionId, cli_version: '99.0.0' })
+        + responseItemLine({
+          timestamp: '2026-01-02T00:00:01.000Z',
+          payload: { type: 'message', role: 'user', content: [{ type: 'text', text: 'response without event' }] },
+        }),
+      'utf8',
+    );
+
+    const page = await pageCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' },
+      env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir: join(root, 'servers', 'cloud'),
+      remoteSessionId: sessionId,
+      direction: 'older',
+      maxBytes: 1024 * 1024,
+      maxItems: 10,
+    });
+
+    expect(page.items).toEqual([
+      expect.objectContaining({
+        raw: { role: 'user', content: { type: 'text', text: 'response without event' } },
+      }),
+    ]);
+  });
+
+  it('uses canonical event evidence when response attachment annotations differ', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'happier-codex-direct-page-attachment-evidence-'));
+    const codexHome = join(root, 'codex-home');
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+    const sessionId = '15151515-1515-1515-1515-151515151515';
+    const filePath = join(sessionsDir, `rollout-2026-01-02T00-00-00-${sessionId}.jsonl`);
+    const privatePath = 'C:\\private\\capture.png';
+    await writeFile(
+      filePath,
+      sessionMetaLine({ id: sessionId, cli_version: '99.0.0' })
+        + responseItemLine({
+          timestamp: '2026-01-02T00:00:01.000Z',
+          payload: {
+            type: 'message',
+            role: 'user',
+            content: [
+              { type: 'input_text', text: 'inspect this image' },
+              { type: 'input_text', text: `attached image: ${privatePath}` },
+            ],
+          },
+        })
+        + eventMsgLine({
+          timestamp: '2026-01-02T00:00:01.001Z',
+          payload: { type: 'user_message', client_id: 'attachment-client-id', message: 'inspect this image' },
+        }),
+      'utf8',
+    );
+
+    const page = await pageCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' },
+      env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir: join(root, 'servers', 'cloud'),
+      remoteSessionId: sessionId,
+      direction: 'older',
+      maxBytes: 1024 * 1024,
+      maxItems: 10,
+    });
+    expect(page.items).toEqual([
+      expect.objectContaining({
+        localId: 'attachment-client-id',
+        raw: { role: 'user', content: { type: 'text', text: 'inspect this image' } },
+      }),
+    ]);
+    expect(JSON.stringify(page.items)).not.toContain(privatePath);
   });
 
   it('maps Codex rollout compaction markers into direct transcript events', async () => {
