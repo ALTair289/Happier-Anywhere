@@ -176,7 +176,7 @@ function writePreparedUpdateMetadata({ inputDir, sourceSha, environment, platfor
   return metadata;
 }
 
-function validatePreparedUpdateMetadata({ inputDir, expectedSourceSha, environment, platform, runtimeVersion, updateLane, easCliVersion }) {
+function validatePreparedUpdateMetadata({ inputDir, expectedSourceSha, environment, platform, requestedRuntimeVersion, updateLane, easCliVersion }) {
   const metadataPath = path.join(inputDir, PREPARED_UPDATE_METADATA);
   const stat = fs.lstatSync(metadataPath);
   if (!stat.isFile() || stat.isSymbolicLink()) fail(`Prepared OTA metadata must be a regular file: ${metadataPath}`);
@@ -185,7 +185,16 @@ function validatePreparedUpdateMetadata({ inputDir, expectedSourceSha, environme
   if (metadata.sourceSha !== expectedSourceSha) fail('Prepared OTA source SHA does not match the authorized candidate.');
   if (metadata.environment !== environment) fail('Prepared OTA environment does not match the requested promotion environment.');
   if (metadata.platform !== platform) fail('Prepared OTA platform does not match the requested promotion platform.');
-  if (metadata.runtimeVersion !== runtimeVersion) fail('Prepared OTA runtime version does not match the requested promotion runtime.');
+  if (typeof metadata.runtimeVersion !== 'string') fail('Prepared OTA runtime version must be a string.');
+  if (requestedRuntimeVersion && metadata.runtimeVersion !== requestedRuntimeVersion) {
+    fail('Prepared OTA runtime version does not match the explicit requested promotion runtime.');
+  }
+  if (!requestedRuntimeVersion && environment === 'publicdev' && !/^[0-9a-f]{40}$/.test(metadata.runtimeVersion)) {
+    fail('Prepared public dev OTA runtime version must be a canonical fingerprint hash.');
+  }
+  if (!requestedRuntimeVersion && environment !== 'publicdev' && metadata.runtimeVersion !== '') {
+    fail('Prepared OTA runtime version does not match trusted release policy.');
+  }
   if (metadata.updateLane !== updateLane) fail('Prepared OTA update channel does not match trusted release policy.');
   if (metadata.easCliVersion !== easCliVersion) fail('Prepared OTA EAS CLI version does not match trusted release policy.');
   if (JSON.stringify(metadata.files) !== JSON.stringify(listPreparedUpdateFiles(inputDir))) {
@@ -373,9 +382,9 @@ function main() {
       envKey: 'HAPPIER_PIPELINE_EXPO_MAX_OLD_SPACE_SIZE_MB',
     }),
   );
-  const runtimeVersion =
+  let runtimeVersion =
     explicitRuntimeVersion ||
-    (normalizedEnvironment === 'publicdev' && platform !== 'all'
+    (phase !== 'publish' && normalizedEnvironment === 'publicdev' && platform !== 'all'
       ? generateCanonicalOtaFingerprintHash({
           opts,
           uiDir,
@@ -413,7 +422,17 @@ function main() {
     ? readFullGitSha(expectedSourceShaInput, '--expected-source-sha')
     : preparedSourceSha;
   if (!dryRun && phase === 'publish') {
-    validatePreparedUpdateMetadata({ inputDir, expectedSourceSha, environment: normalizedEnvironment, platform, runtimeVersion, updateLane, easCliVersion });
+    const prepared = validatePreparedUpdateMetadata({
+      inputDir,
+      expectedSourceSha,
+      environment: normalizedEnvironment,
+      platform,
+      requestedRuntimeVersion: explicitRuntimeVersion,
+      updateLane,
+      easCliVersion,
+    });
+    runtimeVersion = prepared.runtimeVersion;
+    if (runtimeVersion) easCommandEnv.HAPPIER_EXPO_RUNTIME_VERSION = runtimeVersion;
   }
 
   const message = resolvePreviewMessage(normalizedEnvironment, values.message, opts);
