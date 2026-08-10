@@ -199,6 +199,7 @@ function resolveRefreshedDirectSessionMetadata(params: Readonly<{
     runtimeDescriptor?: AgentRuntimeDescriptorV1 | null;
   }>;
   titleHint?: string | null;
+  candidateTitleIsAuthoritative?: boolean;
   directoryHint?: string | null;
   connectedServiceRuntimeSnapshot?: ConnectedServiceRuntimeSnapshot;
 }>): Record<string, unknown> | null {
@@ -253,7 +254,12 @@ function resolveRefreshedDirectSessionMetadata(params: Readonly<{
       : null) ??
     (isMeaningfulSessionTitle(params.currentMetadata.name, params.currentMetadata) ? normalizeNullableString(params.currentMetadata.name) : null);
 
-  if (titleHint && !currentTitle) {
+  if (titleHint && params.candidateTitleIsAuthoritative === true) {
+    if (normalizeNullableString(params.currentMetadata.name) !== titleHint) {
+      nextMetadata.name = titleHint;
+      didChange = true;
+    }
+  } else if (titleHint && !currentTitle) {
     nextMetadata.name = titleHint;
     didChange = true;
   }
@@ -302,6 +308,7 @@ async function refreshExistingDirectSessionMetadataIfNeeded(params: Readonly<{
     runtimeDescriptor?: AgentRuntimeDescriptorV1 | null;
   }>;
   titleHint?: string | null;
+  candidateTitleIsAuthoritative?: boolean;
   directoryHint?: string | null;
   connectedServiceRuntimeSnapshot?: ConnectedServiceRuntimeSnapshot;
 }>): Promise<void> {
@@ -331,6 +338,7 @@ async function refreshExistingDirectSessionMetadataIfNeeded(params: Readonly<{
     currentMetadata: initialMetadataRecord,
     directSessionIdentity: params.directSessionIdentity,
     titleHint: params.titleHint,
+    candidateTitleIsAuthoritative: params.candidateTitleIsAuthoritative,
     directoryHint: params.directoryHint,
     connectedServiceRuntimeSnapshot: params.connectedServiceRuntimeSnapshot,
   });
@@ -346,6 +354,7 @@ async function refreshExistingDirectSessionMetadataIfNeeded(params: Readonly<{
         currentMetadata,
         directSessionIdentity: params.directSessionIdentity,
         titleHint: params.titleHint,
+        candidateTitleIsAuthoritative: params.candidateTitleIsAuthoritative,
         directoryHint: params.directoryHint,
         connectedServiceRuntimeSnapshot: params.connectedServiceRuntimeSnapshot,
       }) ?? currentMetadata,
@@ -711,6 +720,7 @@ export async function ensureDirectSessionLink(params: Readonly<{
   codexBackendMode?: CodexBackendMode | null;
   runtimeDescriptor?: AgentRuntimeDescriptorV1 | null;
   titleHint?: string | null;
+  candidateTitleIsAuthoritative?: boolean;
   directoryHint?: string | null;
   nowMs?: () => number;
 }>): Promise<{ sessionId: string; created: boolean; tag: string }> {
@@ -783,6 +793,7 @@ export async function ensureDirectSessionLink(params: Readonly<{
         runtimeDescriptor,
       },
       titleHint: params.titleHint,
+      candidateTitleIsAuthoritative: params.candidateTitleIsAuthoritative,
       directoryHint: params.directoryHint,
       connectedServiceRuntimeSnapshot,
     });

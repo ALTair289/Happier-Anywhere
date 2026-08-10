@@ -132,6 +132,7 @@ import { coerceStreamingToolResultChunk, mergeExistingStdStreamsIntoFinalResultI
 import type { OrphanToolResultBucket } from "./helpers/orphanToolResults";
 import { isDebugFlagEnabled } from "./helpers/debugFlags";
 import { markRunningToolsUnavailable } from "./helpers/markRunningToolsUnavailable";
+import { reconcileDirectSessionUserMessages } from "./helpers/reconcileDirectSessionUserMessages";
 import { compareIncomingTranscriptRowsOldestFirst, normalizeTranscriptSeq } from "../domains/messages/transcriptOrdering";
 import {
     applyTranscriptObservationMetadata,
@@ -424,8 +425,14 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         return indexed.map((e) => e.msg);
     })();
 
+    const reconciledIncomingMessages = reconcileDirectSessionUserMessages({
+        state,
+        messages: orderedIncomingMessages,
+        changed,
+    });
+
     // First, trace all messages to identify sidechains
-    const tracedMessages = traceMessages(state.tracerState, orderedIncomingMessages);
+    const tracedMessages = traceMessages(state.tracerState, reconciledIncomingMessages);
 
     // Separate sidechain and non-sidechain messages.
     // Important: sidechain messages must never appear in the main transcript, even if sidechainId
@@ -518,10 +525,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
     });
 
     const incomingObservationMetadataById = new Map(
-        orderedIncomingMessages.map((message) => [message.id, message] as const),
+        reconciledIncomingMessages.map((message) => [message.id, message] as const),
     );
     const incomingObservationMetadataByLocalId = new Map(
-        orderedIncomingMessages
+        reconciledIncomingMessages
             .filter((message): message is typeof message & { localId: string } => typeof message.localId === 'string')
             .map((message) => [message.localId, message] as const),
     );

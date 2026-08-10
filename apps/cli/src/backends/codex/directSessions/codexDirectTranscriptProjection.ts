@@ -8,6 +8,7 @@ import { mapCodexRolloutLineToDirectMessages } from './mapCodexRolloutLineToDire
 export type CodexDirectTranscriptRolloutStream = CodexRolloutFile & Readonly<{
   threadId: string;
   sidechainId: string | null;
+  useEventUserMessageProjection: boolean;
 }>;
 
 export type CodexStreamProgress = Readonly<{
@@ -62,6 +63,7 @@ export function projectCodexRolloutLineToTranscriptRecords(params: Readonly<{
     lineValue: params.lineValue,
     actions: normalizedActions,
     sidechainId: params.stream.sidechainId,
+    useEventUserMessageProjection: params.stream.useEventUserMessageProjection,
   });
   return {
     discoveredChildThreadIds: [...discoveredChildThreadIds],

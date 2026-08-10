@@ -26,6 +26,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
         : null;
 }
 
+function resolveCodexDirectSessionNativeTitle(metadata: unknown): string | null {
+    const metadataRecord = asRecord(metadata);
+    const directSession = asRecord(metadataRecord?.directSessionV1);
+    if (directSession?.v !== 1 || directSession.providerId !== 'codex') return null;
+    const name = metadataRecord?.name;
+    if (typeof name !== 'string' || name.trim().length === 0) return null;
+    const normalizedName = name.trim();
+    if (normalizedName.toLowerCase() === 'unknown') return null;
+    const remoteSessionId = typeof directSession.remoteSessionId === 'string'
+        ? directSession.remoteSessionId.trim()
+        : '';
+    return remoteSessionId && normalizedName === remoteSessionId ? null : normalizedName;
+}
+
 function hasCodexGoalWorkState(metadata: unknown): boolean {
     const metadataRecord = asRecord(metadata);
     const snapshot = asRecord(metadataRecord?.sessionWorkStateV1);
@@ -107,6 +121,11 @@ export function getCodexNewSessionRelevantInstallableDepKeys(ctx: NewSessionRele
 export const CODEX_UI_BEHAVIOR_OVERRIDE: AgentUiBehavior = {
     guidance: {
         includeInSessionGettingStartedCliExamples: true,
+    },
+    sessionTitle: {
+        resolvePreferredTitle: ({ agentId, metadata }) => (
+            agentId === 'codex' ? resolveCodexDirectSessionNativeTitle(metadata) : null
+        ),
     },
     sessionUsage: {
         supportsExactContextUsageBadge: false,

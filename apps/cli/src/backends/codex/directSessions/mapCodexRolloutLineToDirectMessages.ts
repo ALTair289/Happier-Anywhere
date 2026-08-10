@@ -1,7 +1,33 @@
-import type { DirectTranscriptRawMessageV1 } from '@happier-dev/protocol';
+import { readPendingLocalId, type DirectTranscriptRawMessageV1 } from '@happier-dev/protocol';
 
 import type { CodexRolloutAction } from '../localControl/rolloutMapper';
 import { projectCodexRolloutActions } from '../rollout/projectCodexRolloutActions';
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function readDirectUserMessageEvent(value: unknown): { text: string; clientId: string | null } | null {
+  const envelope = asRecord(value);
+  if (envelope?.type !== 'event_msg') return null;
+  const payload = asRecord(envelope.payload);
+  if (payload?.type !== 'user_message' || typeof payload.message !== 'string' || !payload.message.trim()) {
+    return null;
+  }
+  return {
+    text: payload.message,
+    // Pending/client identities are opaque. Validate, but never normalize them.
+    clientId: readPendingLocalId(payload.client_id),
+  };
+}
+
+function isModelInputResponseItem(value: unknown): boolean {
+  const envelope = asRecord(value);
+  if (envelope?.type !== 'response_item') return false;
+  const payload = asRecord(envelope.payload);
+  return payload?.type === 'message' && payload.role === 'user';
+}
 
 function shouldFilterHarnessBlob(text: string): boolean {
   const t = text.trim();
@@ -12,6 +38,7 @@ function shouldFilterHarnessBlob(text: string): boolean {
     '<environment_context>',
     '<turn_aborted>',
     '<INSTRUCTIONS>',
+    '<subagent_notification>',
     'You are GPT-',
     'Codex CLI is an open source project',
   ];
@@ -38,8 +65,29 @@ export function mapCodexRolloutLineToDirectMessages(params: Readonly<{
   lineValue: unknown;
   actions: ReadonlyArray<CodexRolloutAction>;
   sidechainId?: string | null;
+  useEventUserMessageProjection: boolean;
 }>): DirectTranscriptRawMessageV1[] {
   const createdAtMs = extractEnvelopeTimestampMs(params.lineValue);
+  const idPrefix = `codex:${params.fileRelPath}`;
+  const directUserMessage = readDirectUserMessageEvent(params.lineValue);
+  const useEventUserMessageProjection = params.useEventUserMessageProjection;
+  if (
+    useEventUserMessageProjection
+    && directUserMessage
+    && !params.sidechainId
+    && !shouldFilterHarnessBlob(directUserMessage.text)
+  ) {
+    const stableId = stableOffsetId(idPrefix, params.lineStartOffsetBytes, 0);
+    return [{
+      id: stableId,
+      localId: directUserMessage.clientId ?? stableId,
+      createdAtMs,
+      raw: {
+        role: 'user',
+        content: { type: 'text', text: directUserMessage.text },
+      },
+    }];
+  }
   // Direct transcript rendering should include "debug-only" tool calls (e.g., Codex-internal read/write tools),
   // but must still filter harness/system blobs that Codex sometimes embeds as user messages.
   const projected = projectCodexRolloutActions(
@@ -50,10 +98,10 @@ export function mapCodexRolloutLineToDirectMessages(params: Readonly<{
   const out: DirectTranscriptRawMessageV1[] = [];
   for (let i = 0; i < projected.length; i++) {
     const action = projected[i]!;
-    const idPrefix = `codex:${params.fileRelPath}`;
     const stableId = stableOffsetId(idPrefix, params.lineStartOffsetBytes, i);
 
     if (action.type === 'user-text') {
+      if (useEventUserMessageProjection && isModelInputResponseItem(params.lineValue)) continue;
       if (shouldFilterHarnessBlob(action.text)) continue;
       out.push({
         id: stableId,

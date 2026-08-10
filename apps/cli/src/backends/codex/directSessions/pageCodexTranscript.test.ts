@@ -36,10 +36,14 @@ describe('pageCodexTranscript', () => {
 
     await writeFile(
       filePath,
-      sessionMetaLine({ id: sessionId, timestamp: '2026-01-02T00:00:00.000Z', cwd: '/repo/one' })
+      sessionMetaLine({ id: sessionId, timestamp: '2026-01-02T00:00:00.000Z', cwd: '/repo/one', cli_version: '0.145.0' })
         + responseItemLine({
           timestamp: '2026-01-02T00:00:01.000Z',
           payload: { type: 'message', role: 'user', content: [{ type: 'text', text: 'hi' }] },
+        })
+        + eventMsgLine({
+          timestamp: '2026-01-02T00:00:01.001Z',
+          payload: { type: 'user_message', client_id: 'client-local-1', message: 'hi' },
         })
         + responseItemLine({
           timestamp: '2026-01-02T00:00:02.000Z',
@@ -107,8 +111,61 @@ describe('pageCodexTranscript', () => {
       return raw?.content?.data?.type;
     });
     expect(secondTypes).toEqual(['text', 'message']);
+    expect(second.items[0]?.localId).toBe('client-local-1');
     expect(second.hasMore).toBe(false);
     expect(second.nextCursor).toBeNull();
+  });
+
+  it.each([
+    ['missing version', undefined],
+    ['older version', '0.144.99'],
+    ['minimum prerelease', '0.145.0-alpha.0'],
+    ['malformed version', 'not-semver'],
+  ] as const)('keeps exactly one legacy response-item user row for %s metadata', async (_label, cliVersion) => {
+    const root = await mkdtemp(join(tmpdir(), 'happier-codex-direct-page-legacy-user-'));
+    const codexHome = join(root, 'codex-home');
+    const sessionsDir = join(codexHome, 'sessions');
+    await mkdir(sessionsDir, { recursive: true });
+
+    const sessionId = '12121212-1212-1212-1212-121212121212';
+    const filePath = join(sessionsDir, `rollout-2026-01-02T00-00-00-${sessionId}.jsonl`);
+    await writeFile(
+      filePath,
+      sessionMetaLine({
+        id: sessionId,
+        timestamp: '2026-01-02T00:00:00.000Z',
+        cwd: '/repo/legacy',
+        ...(cliVersion === undefined ? {} : { cli_version: cliVersion }),
+      })
+        + responseItemLine({
+          timestamp: '2026-01-02T00:00:01.000Z',
+          payload: { type: 'message', role: 'user', content: [{ type: 'text', text: 'legacy prompt' }] },
+        })
+        + eventMsgLine({
+          timestamp: '2026-01-02T00:00:01.001Z',
+          payload: { type: 'user_message', client_id: 'client-id-not-supported-here', message: 'legacy prompt' },
+        }),
+      'utf8',
+    );
+
+    const page = await pageCodexTranscript({
+      source: { kind: 'codexHome', home: 'user' },
+      env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
+      activeServerDir: join(root, 'servers', 'cloud'),
+      remoteSessionId: sessionId,
+      direction: 'older',
+      maxBytes: 1024 * 1024,
+      maxItems: 10,
+    });
+
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]).toEqual(expect.objectContaining({
+      localId: expect.stringMatching(/^codex:/),
+      raw: {
+        role: 'user',
+        content: { type: 'text', text: 'legacy prompt' },
+      },
+    }));
   });
 
   it('maps Codex rollout compaction markers into direct transcript events', async () => {

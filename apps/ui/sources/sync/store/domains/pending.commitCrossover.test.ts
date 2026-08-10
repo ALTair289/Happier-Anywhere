@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { normalizeDirectTranscriptMessages } from '@/sync/runtime/directSessions/normalizeDirectTranscriptMessages';
 import { syncPerformanceTelemetry } from '@/sync/runtime/syncPerformanceTelemetry';
 import { createMessagesDomain } from './messages';
 import { createPendingDomain } from './pending';
@@ -123,6 +124,17 @@ function committedTwin() {
     } as any;
 }
 
+function directTwin() {
+    const [message] = normalizeDirectTranscriptMessages([{
+        id: 'codex-offset-1',
+        localId: LOCAL_ID,
+        createdAtMs: 1_000,
+        raw: { role: 'user', content: { type: 'text', text: 'hello' } },
+    }]);
+    if (!message) throw new Error('expected Direct user message to normalize');
+    return message;
+}
+
 /** How many published states render NEITHER the pending row nor its committed twin. */
 function countVoidFrames(published: PublishedState[]): number {
     let voidFrames = 0;
@@ -182,6 +194,37 @@ describe('pending domain: committed crossover publishes one transition', () => {
         expect(harness.published.slice(beforeCrossover)).toHaveLength(1);
         expect(countVoidFrames(harness.published.slice(beforeCrossover))).toBe(0);
         expect(harness.get().sessionPending[SESSION_ID].messages).toHaveLength(0);
+    });
+
+    it('keeps exactly one visible row through pending → Direct echo → canonical promotion', () => {
+        const harness = createCrossoverHarness();
+        harness.pending.upsertPendingMessage(SESSION_ID, acceptedLocalOutboundProjection());
+        const beforeCrossover = harness.published.length;
+
+        harness.messages.applyMessages(SESSION_ID, [directTwin()]);
+        harness.messages.applyMessages(SESSION_ID, [committedTwin()]);
+
+        const crossoverFrames = harness.published.slice(beforeCrossover);
+        expect(crossoverFrames).toHaveLength(2);
+        for (const frame of crossoverFrames) {
+            const pendingCount = (frame.sessionPending[SESSION_ID]?.messages ?? [])
+                .filter((message) => (message.localId ?? message.id) === LOCAL_ID)
+                .length;
+            const entry = frame.sessionMessages[SESSION_ID] as any;
+            const committedCount = (entry?.messageIdsOldestFirst ?? [])
+                .map((id: string) => entry.messagesById?.[id])
+                .filter((message: any) => message?.localId === LOCAL_ID)
+                .length;
+            expect(pendingCount + committedCount).toBe(1);
+        }
+
+        const finalEntry = harness.get().sessionMessages[SESSION_ID];
+        const finalRows = finalEntry.messageIdsOldestFirst
+            .map((id: string) => finalEntry.messagesById[id])
+            .filter((message: any) => message?.localId === LOCAL_ID);
+        expect(finalRows).toEqual([
+            expect.objectContaining({ realID: 'committed-1', seq: 7 }),
+        ]);
     });
 
     it('still retires a locally owned row that the user cancelled and that will never commit', () => {

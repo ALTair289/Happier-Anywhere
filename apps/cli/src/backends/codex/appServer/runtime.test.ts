@@ -151,6 +151,11 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
     rejectReviewStartMethodUnavailable?: boolean;
     rejectStructuredTurnInput?: boolean;
     rejectStructuredSteerInput?: boolean;
+    rejectClientUserMessageId?: boolean;
+    rejectClientUserMessageIdWithZodUnknownKey?: boolean;
+    rejectClientUserMessageIdWithGenericInvalidParams?: boolean;
+    rejectClientUserMessageIdWithFormatError?: boolean;
+    rejectClientUserMessageIdWithUnsupportedValueError?: boolean;
     emitResumeContinuationUserInputRequest?: boolean;
     emitHistoricalResumeUserInputRequestBeforeResponse?: boolean;
     emitResumeTurnStartedBeforeResponse?: boolean;
@@ -506,6 +511,26 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        continue;',
         '    }',
         '    if (msg.method === "turn/start") {',
+        `        if (${JSON.stringify(params.rejectClientUserMessageId === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: unknown field clientUserMessageId" } }) + "\\n");',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.rejectClientUserMessageIdWithZodUnknownKey === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: Unrecognized key(s) in object: \'clientUserMessageId\'" } }) + "\\n");',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.rejectClientUserMessageIdWithGenericInvalidParams === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: unrelated request mismatch" } }) + "\\n");',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.rejectClientUserMessageIdWithFormatError === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: clientUserMessageId must be UUID" } }) + "\\n");',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.rejectClientUserMessageIdWithUnsupportedValueError === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: clientUserMessageId value foo is not supported" } }) + "\\n");',
+        '            continue;',
+        '        }',
         `        if (${JSON.stringify(params.rejectPermissionsProfile === true)} && msg.params?.permissions) {`,
         '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: permissions unsupported" } }) + "\\n");',
         '            continue;',
@@ -1481,6 +1506,26 @@ async function writeFakeCodexAppServerScript(params: Readonly<{
         '        continue;',
         '    }',
         '    if (msg.method === "turn/steer") {',
+        `        if (${JSON.stringify(params.rejectClientUserMessageId === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: unknown field clientUserMessageId" } }) + "\\n");',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.rejectClientUserMessageIdWithZodUnknownKey === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: Unrecognized key(s) in object: \'clientUserMessageId\'" } }) + "\\n");',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.rejectClientUserMessageIdWithGenericInvalidParams === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: unrelated request mismatch" } }) + "\\n");',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.rejectClientUserMessageIdWithFormatError === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: clientUserMessageId must be UUID" } }) + "\\n");',
+        '            continue;',
+        '        }',
+        `        if (${JSON.stringify(params.rejectClientUserMessageIdWithUnsupportedValueError === true)} && typeof msg.params?.clientUserMessageId === "string") {`,
+        '            process.stdout.write(JSON.stringify({ id: msg.id, error: { code: -32602, message: "invalid params: clientUserMessageId value foo is not supported" } }) + "\\n");',
+        '            continue;',
+        '        }',
         '        const steerText = Array.isArray(msg.params?.input) ? String(msg.params.input[0]?.text ?? "") : "";',
         '        if (steerText === "late-no-active-steer") {',
         '            setTimeout(() => {',
@@ -1574,6 +1619,11 @@ describe('createCodexAppServerRuntime', () => {
             rejectReviewStartMethodUnavailable?: boolean;
             rejectStructuredTurnInput?: boolean;
             rejectStructuredSteerInput?: boolean;
+            rejectClientUserMessageId?: boolean;
+            rejectClientUserMessageIdWithZodUnknownKey?: boolean;
+            rejectClientUserMessageIdWithGenericInvalidParams?: boolean;
+            rejectClientUserMessageIdWithFormatError?: boolean;
+            rejectClientUserMessageIdWithUnsupportedValueError?: boolean;
             emitResumeContinuationUserInputRequest?: boolean;
             emitHistoricalResumeUserInputRequestBeforeResponse?: boolean;
             emitResumeTurnStartedBeforeResponse?: boolean;
@@ -1628,6 +1678,11 @@ describe('createCodexAppServerRuntime', () => {
             rejectReviewStartMethodUnavailable: options.rejectReviewStartMethodUnavailable,
             rejectStructuredTurnInput: options.rejectStructuredTurnInput,
             rejectStructuredSteerInput: options.rejectStructuredSteerInput,
+            rejectClientUserMessageId: options.rejectClientUserMessageId,
+            rejectClientUserMessageIdWithZodUnknownKey: options.rejectClientUserMessageIdWithZodUnknownKey,
+            rejectClientUserMessageIdWithGenericInvalidParams: options.rejectClientUserMessageIdWithGenericInvalidParams,
+            rejectClientUserMessageIdWithFormatError: options.rejectClientUserMessageIdWithFormatError,
+            rejectClientUserMessageIdWithUnsupportedValueError: options.rejectClientUserMessageIdWithUnsupportedValueError,
             emitResumeContinuationUserInputRequest: options.emitResumeContinuationUserInputRequest,
             emitHistoricalResumeUserInputRequestBeforeResponse: options.emitHistoricalResumeUserInputRequestBeforeResponse,
             emitResumeTurnStartedBeforeResponse: options.emitResumeTurnStartedBeforeResponse,
@@ -3625,33 +3680,282 @@ describe('createCodexAppServerRuntime', () => {
             acceptedPrompts.push(prompt);
         });
 
-        await runtime.startOrLoad({});
-        expect(runtime.supportsInFlightSteer()).toBe(true);
-        expect(runtime.supportsInFlightConfigApply()).toBe(true);
+        try {
+            await runtime.startOrLoad({});
+            expect(runtime.supportsInFlightSteer()).toBe(true);
+            expect(runtime.supportsInFlightConfigApply()).toBe(true);
 
-        const sendPromptPromise = runtime.sendPrompt('overlap-start');
-        await new Promise((resolve) => setTimeout(resolve, 30));
+            const sendPromptPromise = runtime.sendPrompt('overlap-start', {
+                localId: 'client-local-1',
+                userMessageSeq: 41,
+            });
+            await new Promise((resolve) => setTimeout(resolve, 30));
 
-        expect(runtime.isTurnInFlight()).toBe(true);
-        await runtime.steerPrompt('nudge', { localId: ' local-steer-42\n', userMessageSeq: 42 });
-        await sendPromptPromise;
+            expect(runtime.isTurnInFlight()).toBe(true);
+            await runtime.steerPrompt('overlap-start', { localId: '  client-local-2  ', userMessageSeq: 42 });
+            await sendPromptPromise;
 
-        const requestLog = (await readFile(requestLogPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-        expect(requestLog.filter((entry: { method: string }) => entry.method === 'turn/steer')).toEqual([
-            expect.objectContaining({
-                params: expect.objectContaining({
-                    threadId: 'thread-started',
-                    expectedTurnId: 'turn-overlap-start',
-                    input: [{ type: 'text', text: 'nudge' }],
+            const requestLog = (await readFile(requestLogPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+            expect(requestLog.filter((entry: { method: string }) => entry.method === 'turn/steer')).toEqual([
+                expect.objectContaining({
+                    params: expect.objectContaining({
+                        threadId: 'thread-started',
+                        expectedTurnId: 'turn-overlap-start',
+                        clientUserMessageId: '  client-local-2  ',
+                        input: [{ type: 'text', text: 'overlap-start' }],
+                    }),
                 }),
-            }),
-        ]);
-        expect(requestLog.filter((entry: { method: string }) => entry.method === 'turn/start')).toHaveLength(1);
-        expect(acceptedPrompts).toContainEqual({
-            localIds: [' local-steer-42\n'],
-            userMessageSeq: 42,
-            providerTurnId: 'turn-overlap-start',
+            ]);
+            expect(requestLog.filter((entry: { method: string }) => entry.method === 'turn/start')).toEqual([
+                expect.objectContaining({
+                    params: expect.objectContaining({
+                        clientUserMessageId: 'client-local-1',
+                        input: [{ type: 'text', text: 'overlap-start' }],
+                    }),
+                }),
+            ]);
+            expect(acceptedPrompts).toContainEqual({
+                localIds: ['  client-local-2  '],
+                userMessageSeq: 42,
+                providerTurnId: 'turn-overlap-start',
+            });
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('falls back once and caches legacy start support only for an explicit clientUserMessageId field rejection', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-client-id-legacy-start-',
+            { rejectClientUserMessageId: true },
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
         });
+
+        try {
+            await runtime.startOrLoad({});
+            await runtime.sendPrompt('legacy-client-id-1', { localId: 'client-local-1' });
+            await runtime.sendPrompt('legacy-client-id-2', { localIds: ['client-local-2'] });
+
+            const turnStarts = (await readRequestLog(requestLogPath))
+                .filter((entry) => entry.method === 'turn/start')
+                .map((entry) => entry.params as Record<string, unknown>);
+            const first = turnStarts.filter((entry: any) => entry.input?.[0]?.text === 'legacy-client-id-1');
+            const second = turnStarts.filter((entry: any) => entry.input?.[0]?.text === 'legacy-client-id-2');
+
+            expect(first.map((entry) => entry.clientUserMessageId ?? null)).toEqual([
+                'client-local-1',
+                null,
+            ]);
+            expect(second.map((entry) => entry.clientUserMessageId ?? null)).toEqual([null]);
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('falls back once for a zod-style unknown clientUserMessageId key on turn start', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-client-id-zod-legacy-start-',
+            { rejectClientUserMessageIdWithZodUnknownKey: true },
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await runtime.sendPrompt('zod-legacy-client-id-1', { localId: 'client-local-1' });
+            await runtime.sendPrompt('zod-legacy-client-id-2', { localId: 'client-local-2' });
+
+            const turnStarts = (await readRequestLog(requestLogPath))
+                .filter((entry) => entry.method === 'turn/start')
+                .map((entry) => entry.params as Record<string, unknown>);
+            const first = turnStarts.filter((entry: any) => entry.input?.[0]?.text === 'zod-legacy-client-id-1');
+            const second = turnStarts.filter((entry: any) => entry.input?.[0]?.text === 'zod-legacy-client-id-2');
+
+            expect(first.map((entry) => entry.clientUserMessageId ?? null)).toEqual([
+                'client-local-1',
+                null,
+            ]);
+            expect(second.map((entry) => entry.clientUserMessageId ?? null)).toEqual([null]);
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('falls back once for an explicit legacy steer clientUserMessageId rejection', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-client-id-legacy-steer-',
+            { rejectClientUserMessageId: true },
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            const sendPromptPromise = runtime.sendPrompt('overlap-start');
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            await runtime.steerPrompt('legacy steer', { localId: 'client-local-steer' });
+            await sendPromptPromise;
+
+            const steerRequests = (await readRequestLog(requestLogPath))
+                .filter((entry) => entry.method === 'turn/steer')
+                .map((entry) => entry.params as Record<string, unknown>);
+            expect(steerRequests.map((entry) => entry.clientUserMessageId ?? null)).toEqual([
+                'client-local-steer',
+                null,
+            ]);
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('falls back once for a zod-style unknown clientUserMessageId key on steer', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-client-id-zod-legacy-steer-',
+            { rejectClientUserMessageIdWithZodUnknownKey: true },
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            const sendPromptPromise = runtime.sendPrompt('overlap-start');
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            await runtime.steerPrompt('zod legacy steer', { localId: 'client-local-steer' });
+            await sendPromptPromise;
+
+            const steerRequests = (await readRequestLog(requestLogPath))
+                .filter((entry) => entry.method === 'turn/steer')
+                .map((entry) => entry.params as Record<string, unknown>);
+            expect(steerRequests.map((entry) => entry.clientUserMessageId ?? null)).toEqual([
+                'client-local-steer',
+                null,
+            ]);
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('does not retry an ambiguous invalid-params failure as a legacy clientUserMessageId request', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-client-id-generic-invalid-',
+            { rejectClientUserMessageIdWithGenericInvalidParams: true },
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await expect(runtime.sendPrompt('ambiguous-client-id-error', {
+                localId: 'client-local-ambiguous',
+            })).rejects.toThrow(/unrelated request mismatch/i);
+
+            const turnStarts = (await readRequestLog(requestLogPath))
+                .filter((entry) => entry.method === 'turn/start')
+                .filter((entry: any) => entry.params?.input?.[0]?.text === 'ambiguous-client-id-error');
+            expect(turnStarts).toHaveLength(1);
+            expect((turnStarts[0]?.params as any)?.clientUserMessageId).toBe('client-local-ambiguous');
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('does not retry a turn start when clientUserMessageId itself is invalid', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-client-id-invalid-format-start-',
+            { rejectClientUserMessageIdWithFormatError: true },
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await expect(runtime.sendPrompt('invalid-client-id-format', {
+                localId: 'not-a-provider-uuid',
+            })).rejects.toThrow(/must be UUID/i);
+
+            const turnStarts = (await readRequestLog(requestLogPath))
+                .filter((entry) => entry.method === 'turn/start')
+                .filter((entry: any) => entry.params?.input?.[0]?.text === 'invalid-client-id-format');
+            expect(turnStarts).toHaveLength(1);
+            expect((turnStarts[0]?.params as any)?.clientUserMessageId).toBe('not-a-provider-uuid');
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('does not treat an unsupported clientUserMessageId value as an unsupported field', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-client-id-unsupported-value-',
+            { rejectClientUserMessageIdWithUnsupportedValueError: true },
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            await expect(runtime.sendPrompt('unsupported-client-id-value', {
+                localId: 'client-local-value',
+            })).rejects.toThrow(/value foo is not supported/i);
+
+            const turnStarts = (await readRequestLog(requestLogPath))
+                .filter((entry) => entry.method === 'turn/start')
+                .filter((entry: any) => entry.params?.input?.[0]?.text === 'unsupported-client-id-value');
+            expect(turnStarts).toHaveLength(1);
+            expect((turnStarts[0]?.params as any)?.clientUserMessageId).toBe('client-local-value');
+        } finally {
+            await runtime.reset();
+        }
+    });
+
+    it('does not retry a steer when clientUserMessageId itself is invalid', async () => {
+        const { root, requestLogPath } = await createRuntimeFixture(
+            'happier-codex-app-server-runtime-client-id-invalid-format-steer-',
+            { rejectClientUserMessageIdWithFormatError: true },
+        );
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn() } as any,
+        });
+
+        try {
+            await runtime.startOrLoad({});
+            const sendPromptPromise = runtime.sendPrompt('overlap-start');
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            await expect(runtime.steerPrompt('invalid steer id', {
+                localId: 'not-a-provider-uuid',
+            })).rejects.toThrow(/must be UUID/i);
+            await sendPromptPromise;
+
+            const steerRequests = (await readRequestLog(requestLogPath))
+                .filter((entry) => entry.method === 'turn/steer');
+            expect(steerRequests).toHaveLength(1);
+            expect((steerRequests[0]?.params as any)?.clientUserMessageId).toBe('not-a-provider-uuid');
+        } finally {
+            await runtime.reset();
+        }
     });
 
     it('materializes a woken head steer during a genuinely active turn and leaves its FIFO neighbor queued', async () => {
@@ -6203,12 +6507,17 @@ describe('createCodexAppServerRuntime', () => {
 
     it('syncs completed Happier title tool calls to the Codex native thread name', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-native-title-sync-');
+        const updateMetadata = vi.fn();
 
         const runtime = createCodexAppServerRuntime({
             directory: root,
             onThinkingChange: vi.fn(),
             session: {
-                updateMetadata: vi.fn(),
+                getMetadataSnapshot: vi.fn(() => ({
+                    name: 'Old Codex Title',
+                    directSessionV1: { v: 1, providerId: 'codex' },
+                })),
+                updateMetadata,
                 sendAgentMessageCommitted: vi.fn(async () => {}),
                 sendCodexMessage: vi.fn(),
             } as any,
@@ -6217,6 +6526,7 @@ describe('createCodexAppServerRuntime', () => {
 
         try {
             await runtime.startOrLoad({});
+            updateMetadata.mockClear();
             await runtime.sendPrompt('bridge-mcp-title-tool-completed');
 
             await new Promise((resolve) => setTimeout(resolve, 30));
@@ -6231,6 +6541,13 @@ describe('createCodexAppServerRuntime', () => {
                     }),
                 ]),
             );
+            const nativeTitleMetadata = updateMetadata.mock.calls
+                .map(([updater]) => typeof updater === 'function' ? updater({
+                    name: 'Old Codex Title',
+                    directSessionV1: { v: 1, providerId: 'codex' },
+                }) : null)
+                .find((metadata) => metadata?.name === 'New Title');
+            expect(nativeTitleMetadata).toEqual(expect.objectContaining({ name: 'New Title' }));
         } finally {
             await runtime.reset();
         }

@@ -1883,6 +1883,116 @@ describe('getSessionName', () => {
         expect(getSessionName(session)).toBe('Summary Title');
     });
 
+    it('prefers the Codex native name for a linked direct Codex session', async () => {
+        const { getSessionName } = await import('./sessionUtils');
+        const session = createBaseSession({
+            metadata: {
+                path: '/tmp/worktree',
+                host: 'mac',
+                flavor: 'codex',
+                name: 'Codex Desktop Title',
+                summary: {
+                    text: 'Title Derived From The First Prompt',
+                    updatedAt: 1,
+                },
+                directSessionV1: {
+                    v: 1,
+                    providerId: 'codex',
+                    machineId: 'machine-1',
+                    remoteSessionId: 'thread-1',
+                    source: { kind: 'codexHome', home: 'user' },
+                },
+            } as Session['metadata'],
+        });
+
+        expect(getSessionName(session)).toBe('Codex Desktop Title');
+    });
+
+    it('prefers the Codex native name for the compact session-list representation', async () => {
+        const { getSessionName } = await import('./sessionUtils');
+        const { buildSessionListRenderableMetadata } = await import('@/sync/domains/session/listing/sessionListRenderable');
+        const metadata = {
+            path: '/tmp/worktree',
+            host: 'mac',
+            flavor: 'codex',
+            name: 'Codex Desktop Title',
+            summary: {
+                text: 'Title Derived From The First Prompt',
+                updatedAt: 1,
+            },
+            directSessionV1: {
+                v: 1,
+                providerId: 'codex',
+                machineId: 'machine-1',
+                remoteSessionId: 'thread-1',
+                source: { kind: 'codexHome', home: 'user' },
+            },
+        } as Session['metadata'];
+        const session = {
+            id: 'session-list-row-1',
+            metadata: buildSessionListRenderableMetadata(metadata),
+        } as any;
+
+        expect(getSessionName(session)).toBe('Codex Desktop Title');
+    });
+
+    it('ignores a raw Codex remote-session id used as a fallback name', async () => {
+        const { getSessionName } = await import('./sessionUtils');
+        const session = createBaseSession({
+            metadata: {
+                path: '/tmp/worktree',
+                host: 'mac',
+                flavor: 'codex',
+                name: 'thread-1',
+                summary: {
+                    text: 'Readable Happier Summary',
+                    updatedAt: 1,
+                },
+                directSessionV1: {
+                    v: 1,
+                    providerId: 'codex',
+                    machineId: 'machine-1',
+                    remoteSessionId: 'thread-1',
+                    source: { kind: 'codexHome', home: 'user' },
+                },
+            } as Session['metadata'],
+        });
+
+        expect(getSessionName(session)).toBe('Readable Happier Summary');
+
+        const { buildSessionListRenderableMetadata } = await import('@/sync/domains/session/listing/sessionListRenderable');
+        const listSession = {
+            id: session.id,
+            metadata: buildSessionListRenderableMetadata(session.metadata),
+        } as any;
+        expect(getSessionName(listSession)).toBe('Readable Happier Summary');
+    });
+
+    it('keeps the Happier summary authoritative for other direct-session providers', async () => {
+        const { getSessionName } = await import('./sessionUtils');
+        const session = createBaseSession({
+            metadata: {
+                path: '/tmp/worktree',
+                host: 'mac',
+                flavor: 'claude',
+                name: 'Claude Candidate Title',
+                summary: {
+                    text: 'Happier Summary Title',
+                    updatedAt: 1,
+                },
+                directSessionV1: {
+                    v: 1,
+                    providerId: 'claude',
+                    machineId: 'machine-1',
+                    remoteSessionId: 'claude-1',
+                    source: { kind: 'claudeConfig', configDir: '/tmp', projectId: 'project-1' },
+                },
+            } as Session['metadata'],
+        });
+
+        expect(getSessionName(session)).toBe('Happier Summary Title');
+    });
+
     it('falls back to metadata name before path segments', async () => {
         const { getSessionName } = await import('./sessionUtils');
         const session = createBaseSession({

@@ -101,6 +101,12 @@ export type AgentUiBehavior = Readonly<{
     guidance?: Readonly<{
         includeInSessionGettingStartedCliExamples?: boolean;
     }>;
+    sessionTitle?: Readonly<{
+        resolvePreferredTitle?: (ctx: {
+            agentId: AgentId;
+            metadata: unknown;
+        }) => string | null;
+    }>;
     sessionUsage?: Readonly<{
         supportsExactContextUsageBadge?: boolean;
     }>;
@@ -281,6 +287,7 @@ function mergeAgentUiBehavior(a: AgentUiBehavior, b: AgentUiBehavior): AgentUiBe
             }
             : {}),
         ...(a.guidance || b.guidance ? { guidance: { ...(a.guidance ?? {}), ...(b.guidance ?? {}) } } : {}),
+        ...(a.sessionTitle || b.sessionTitle ? { sessionTitle: { ...(a.sessionTitle ?? {}), ...(b.sessionTitle ?? {}) } } : {}),
         ...(a.sessionUsage || b.sessionUsage ? { sessionUsage: { ...(a.sessionUsage ?? {}), ...(b.sessionUsage ?? {}) } } : {}),
         ...(a.workState || b.workState ? { workState: { ...(a.workState ?? {}), ...(b.workState ?? {}) } } : {}),
         ...(a.mcpServers || b.mcpServers ? { mcpServers: { ...(a.mcpServers ?? {}), ...(b.mcpServers ?? {}) } } : {}),
@@ -360,6 +367,13 @@ export const AGENTS_UI_BEHAVIOR: Readonly<Record<AgentId, AgentUiBehavior>> = Ob
 export function resolveAgentUiBehaviorFromFlavor(flavor: unknown): AgentUiBehavior | null {
     const agentId = typeof flavor === 'string' ? resolveAgentIdFromFlavor(flavor) : null;
     return agentId ? AGENTS_UI_BEHAVIOR[agentId] ?? null : null;
+}
+
+export function resolveProviderPreferredSessionTitle(metadata: unknown): string | null {
+    const agentId = resolveAgentIdFromSessionMetadata(metadata);
+    if (!agentId) return null;
+    const title = AGENTS_UI_BEHAVIOR[agentId].sessionTitle?.resolvePreferredTitle?.({ agentId, metadata });
+    return typeof title === 'string' && title.trim().length > 0 ? title.trim() : null;
 }
 
 export function isAttachedSessionTerminalAvailableForSession(session: Session): boolean {

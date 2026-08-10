@@ -7,7 +7,10 @@ import { readJsonlFileForward } from '@/api/directSessions/filePaging/jsonlForwa
 
 import { createCodexRolloutSemanticTracker } from '../rollout/createCodexRolloutSemanticTracker';
 import { collectCodexSessionRolloutFiles, type CodexRolloutFile } from './collectCodexSessionRolloutFiles';
-import { collectCodexDirectTranscriptRolloutStreams } from './collectCodexDirectTranscriptRolloutStreams';
+import {
+  collectCodexDirectTranscriptRolloutStreams,
+  materializeCodexDirectTranscriptRolloutStreams,
+} from './collectCodexDirectTranscriptRolloutStreams';
 import {
   decodeCodexDirectBackwardCursor,
   encodeCodexDirectBackwardCursor,
@@ -220,7 +223,11 @@ async function collectReadAfterRecords(params: Readonly<{
         let childStreams = streamsByThreadId.get(threadId) ?? [];
         if (childStreams.length === 0) {
           const childFiles = await collectCodexSessionRolloutFiles({ codexHome: params.codexHome, remoteSessionId: threadId });
-          childStreams = childFiles.map((file) => ({ ...file, threadId, sidechainId: threadId }));
+          childStreams = [...await materializeCodexDirectTranscriptRolloutStreams({
+            files: childFiles,
+            threadId,
+            sidechainId: threadId,
+          })];
           streamsByThreadId.set(threadId, childStreams);
           for (const childStream of childStreams) {
             streamsById.set(childStream.fileRelPath, childStream);

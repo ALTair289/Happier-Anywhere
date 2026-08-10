@@ -330,6 +330,7 @@ export function registerMachineDirectSessionsRpcHandlers(params: Readonly<{
     }
 
     try {
+      const providerOps = await getDirectSessionProviderOps(parsed.data.providerId);
       const codexBackendMode = normalizeCodexBackendMode(parsed.data.codexBackendMode) ?? undefined;
       const res = await ensureDirectSessionLink({
         credentials,
@@ -339,6 +340,7 @@ export function registerMachineDirectSessionsRpcHandlers(params: Readonly<{
         codexBackendMode,
         runtimeDescriptor: parsed.data.runtimeDescriptor,
         titleHint: parsed.data.titleHint,
+        candidateTitleIsAuthoritative: providerOps.linkMetadata?.titleHintAuthority === 'authoritative',
         directoryHint: parsed.data.directoryHint,
         source: validatedSource.source,
       });

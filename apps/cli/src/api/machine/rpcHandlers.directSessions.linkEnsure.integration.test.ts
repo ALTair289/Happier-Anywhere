@@ -435,6 +435,77 @@ describe('daemon.directSessions.link.ensure (integration)', () => {
     expect(parsedMeta.data.path).toBe('/tmp/project-b');
   });
 
+  it('refreshes the native Codex title on repeat link.ensure while preserving the Happier summary', async () => {
+    const { registerMachineDirectSessionsRpcHandlers } = await import('./rpcHandlers.directSessions');
+    const { updateSessionMetadataWithRetry } = await import('@/session/metadata/updateSessionMetadataWithRetry');
+
+    const registered = new Map<string, (params: any) => Promise<any>>();
+    const rpcHandlerManager = {
+      registerHandler: (method: string, handler: (params: any) => Promise<any>) => {
+        registered.set(method, handler);
+      },
+    } as any;
+
+    registerMachineDirectSessionsRpcHandlers({ rpcHandlerManager });
+
+    const handler = registered.get(RPC_METHODS.DAEMON_DIRECT_SESSION_LINK_ENSURE);
+    expect(handler).toBeDefined();
+
+    const first = await handler!({
+      machineId: 'machine_1',
+      providerId: 'codex',
+      remoteSessionId: 'remote_codex_title_1',
+      titleHint: 'Original Codex Title',
+      source: { kind: 'codexHome', home: 'user' },
+    });
+    expect(first.ok).toBe(true);
+
+    const credentials = await readCredentialsMock();
+    if (!credentials) throw new Error('Expected test credentials');
+    const firstSession = sessionsById.get(first.sessionId);
+    await updateSessionMetadataWithRetry({
+      token: credentials.token,
+      credentials,
+      sessionId: first.sessionId,
+      rawSession: firstSession,
+      updater: (metadata) => ({
+        ...metadata,
+        summary: {
+          text: 'Title Derived From The First Prompt',
+          updatedAt: 1,
+        },
+      }),
+    });
+
+    const second = await handler!({
+      machineId: 'machine_1',
+      providerId: 'codex',
+      remoteSessionId: 'remote_codex_title_1',
+      titleHint: 'Renamed Codex Desktop Title',
+      source: { kind: 'codexHome', home: 'user' },
+    });
+
+    expect(second.ok).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.sessionId).toBe(first.sessionId);
+
+    const updatedSession = sessionsById.get(first.sessionId);
+    const metadata = tryDecryptSessionMetadata({ credentials, rawSession: updatedSession });
+    const parsedMetadata = z.object({
+      name: z.string(),
+      summary: z.object({
+        text: z.string(),
+        updatedAt: z.number(),
+      }),
+    }).passthrough().safeParse(metadata);
+    if (!parsedMetadata.success) {
+      throw new Error('Expected refreshed Codex direct session metadata payload');
+    }
+
+    expect(parsedMetadata.data.name).toBe('Renamed Codex Desktop Title');
+    expect(parsedMetadata.data.summary.text).toBe('Title Derived From The First Prompt');
+  });
+
   it('replaces an existing fallback remote-session title on repeat link.ensure', async () => {
     const { registerMachineDirectSessionsRpcHandlers } = await import('./rpcHandlers.directSessions');
 

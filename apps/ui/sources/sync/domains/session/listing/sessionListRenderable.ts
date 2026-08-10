@@ -46,6 +46,7 @@ export interface SessionListRenderableMetadata {
     directSessionV1?: {
         v: 1;
         providerId?: string;
+        remoteSessionId?: string;
     } | null;
     readStateV1?: {
         v: 1;
@@ -161,6 +162,9 @@ export function buildSessionListRenderableMetadata(metadata: Metadata | null | u
             v: 1,
             ...('providerId' in candidate && typeof candidate.providerId === 'string'
                 ? { providerId: candidate.providerId }
+            : {}),
+            ...('remoteSessionId' in candidate && typeof candidate.remoteSessionId === 'string'
+                ? { remoteSessionId: candidate.remoteSessionId }
             : {}),
         };
     })();
@@ -426,6 +430,7 @@ function areSessionListRenderableMetadataEqual(
         && (previous.flavor ?? null) === (next.flavor ?? null)
         && (previous.directSessionV1?.v ?? null) === (next.directSessionV1?.v ?? null)
         && (previous.directSessionV1?.providerId ?? null) === (next.directSessionV1?.providerId ?? null)
+        && (previous.directSessionV1?.remoteSessionId ?? null) === (next.directSessionV1?.remoteSessionId ?? null)
         && (previous.readStateV1?.v ?? null) === (next.readStateV1?.v ?? null)
         && (previous.readStateV1?.sessionSeq ?? null) === (next.readStateV1?.sessionSeq ?? null)
         && (previous.readStateV1?.pendingActivityAt ?? null) === (next.readStateV1?.pendingActivityAt ?? null)
@@ -809,6 +814,7 @@ export function didSessionListRenderableWarmCacheFieldsChange(
     if ((prevMeta?.hiddenSystemSession === true) !== (nextMeta?.hiddenSystemSession === true)) return true;
     if ((prevMeta?.directSessionV1?.v ?? null) !== (nextMeta?.directSessionV1?.v ?? null)) return true;
     if ((prevMeta?.directSessionV1?.providerId ?? null) !== (nextMeta?.directSessionV1?.providerId ?? null)) return true;
+    if ((prevMeta?.directSessionV1?.remoteSessionId ?? null) !== (nextMeta?.directSessionV1?.remoteSessionId ?? null)) return true;
 
     if ((previous.hasPendingPermissionRequests ?? null) !== (next.hasPendingPermissionRequests ?? null)) return true;
     if ((previous.hasPendingUserActionRequests ?? null) !== (next.hasPendingUserActionRequests ?? null)) return true;

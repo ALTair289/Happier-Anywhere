@@ -326,6 +326,7 @@ type PendingRawAssistantFinal = Readonly<{
 const CODEX_TRANSCRIPT_INITIAL_CHECKPOINT_DELAY_MS = 0;
 
 type CodexAppServerPermissionSupport = 'unknown' | 'supported' | 'legacy';
+type CodexAppServerClientUserMessageIdSupport = 'unknown' | 'supported' | 'legacy';
 
 type CodexAppServerPromptOptions = Readonly<{
     metadata?: unknown;
@@ -372,6 +373,35 @@ function normalizeCodexAppServerPromptLocalIds(options: CodexAppServerPromptOpti
         localIds.push(localId);
     }
     return localIds;
+}
+
+function readCodexAppServerClientUserMessageId(options: CodexAppServerPromptOptions | undefined): string | null {
+    return normalizeCodexAppServerPromptLocalIds(options)[0] ?? null;
+}
+
+function isUnsupportedClientUserMessageIdFieldError(error: unknown): boolean {
+    if (!isCodexAppServerInvalidParamsError(error)) return false;
+    const errorRecord = error && typeof error === 'object'
+        ? error as { data?: unknown }
+        : null;
+    let dataText = '';
+    if (errorRecord?.data !== undefined) {
+        try {
+            dataText = typeof errorRecord.data === 'string'
+                ? errorRecord.data
+                : (JSON.stringify(errorRecord.data) ?? '');
+        } catch {
+            dataText = '';
+        }
+    }
+    const detail = `${error instanceof Error ? error.message : String(error ?? '')}\n${dataText}`;
+    if (!detail.toLowerCase().includes('clientusermessageid')) return false;
+    return [
+        /\b(?:unknown|unrecognized|unexpected)\s+(?:field|parameter|property)\s*[`'\"]?clientUserMessageId\b/i,
+        /\bclientUserMessageId\b\s*(?:(?:field|parameter|property)\s*)?(?:is\s+)?(?:unknown|unrecognized|unexpected|not\s+(?:allowed|permitted|supported))\b/i,
+        /\b(?:additional|extra)\s+(?:field|parameter|property)s?\b[^\r\n]{0,80}\bclientUserMessageId\b/i,
+        /\bunrecognized\s+key\(s\)\s+in\s+object\s*:\s*['\"]clientUserMessageId['\"]/i,
+    ].some((pattern) => pattern.test(detail));
 }
 
 function assertCodexAppServerPendingIdentity(options: CodexAppServerPromptOptions | undefined): void {
@@ -732,6 +762,22 @@ function didHappierTitleToolSucceed(output: unknown, depth = 0): boolean {
     if (record.success === true || record.ok === true) return true;
     if (record.isError === true) return false;
     return readMcpContentTextPayloads(record).some((payload) => didHappierTitleToolSucceed(payload, depth + 1));
+}
+
+function isCodexDirectSessionMetadata(metadata: unknown): metadata is Record<string, unknown> {
+    const metadataRecord = readRecord(metadata);
+    const directSession = readRecord(metadataRecord?.directSessionV1);
+    return directSession?.v === 1 && directSession.providerId === 'codex';
+}
+
+function mergeCodexNativeTitleIntoDirectSessionMetadata<TMetadata extends Record<string, unknown>>(
+    metadata: TMetadata,
+    title: string,
+): TMetadata {
+    const directSession = readRecord(metadata.directSessionV1);
+    if (directSession?.v !== 1 || directSession.providerId !== 'codex') return metadata;
+    if (metadata.name === title) return metadata;
+    return { ...metadata, name: title };
 }
 
 function readRollbackUnsupportedErrorMessage(error: unknown): string | null {
@@ -1323,6 +1369,8 @@ export function createCodexAppServerRuntime(params: Readonly<{
     let hasServiceTierOverride = false;
     let pendingTurnStartSeqInclusive: number | null = null;
     let permissionSupport: CodexAppServerPermissionSupport = 'unknown';
+    let turnStartClientUserMessageIdSupport: CodexAppServerClientUserMessageIdSupport = 'unknown';
+    let turnSteerClientUserMessageIdSupport: CodexAppServerClientUserMessageIdSupport = 'unknown';
     let lastRateLimitSnapshot: unknown = null;
     let onPromptAcceptedByProvider: CodexAppServerPromptAcceptedCallback | null = null;
     let onUndeliverablePrompts: CodexAppServerUndeliverablePromptsCallback | null = null;
@@ -2484,6 +2532,12 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 try {
                     const client = await ensureClient();
                     await client.request('thread/name/set', { threadId, name: completedTitleName });
+                    const metadataSnapshot = params.session.getMetadataSnapshot?.();
+                    if (isCodexDirectSessionMetadata(metadataSnapshot) && metadataSnapshot.name !== completedTitleName) {
+                        await Promise.resolve(params.session.updateMetadata((metadata) =>
+                            mergeCodexNativeTitleIntoDirectSessionMetadata(metadata, completedTitleName),
+                        ));
+                    }
                 } catch (error) {
                     logger.debug('[codex-app-server] Failed to sync Happier title to Codex native thread name', {
                         threadId,
@@ -4407,6 +4461,8 @@ export function createCodexAppServerRuntime(params: Readonly<{
             currentReasoningEffort = null;
             currentServiceTier = null;
             permissionSupport = 'unknown';
+            turnStartClientUserMessageIdSupport = 'unknown';
+            turnSteerClientUserMessageIdSupport = 'unknown';
             latestConnectedServiceRuntimeIdentity = null;
             await disposeClient();
             turnInFlight = false;
@@ -4492,6 +4548,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
             }
             const textOnlyInput: CodexAppServerTurnInputItem[] = [{ type: 'text', text: prompt }];
             const pendingProviderPrompt = trackPendingProviderPrompt(prompt, options);
+            const clientUserMessageId = readCodexAppServerClientUserMessageId(options);
             const payload = {
                 threadId: activeTurn.threadId,
             };
@@ -4502,11 +4559,31 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 if (pendingTurn?.promise !== activeTurn.promise || !canSteerPrompt()) {
                     throw new Error('Codex app-server active turn is not steerable');
                 }
-                await client.request('turn/steer', {
+                const requestParams = {
                     ...payload,
                     input,
                     [turnIdKey]: expectedTurnId,
-                });
+                };
+                const paramsWithClientId = clientUserMessageId && turnSteerClientUserMessageIdSupport !== 'legacy'
+                    ? { ...requestParams, clientUserMessageId }
+                    : requestParams;
+                try {
+                    await client.request('turn/steer', paramsWithClientId);
+                    if (clientUserMessageId && Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId')) {
+                        turnSteerClientUserMessageIdSupport = 'supported';
+                    }
+                } catch (error) {
+                    if (
+                        clientUserMessageId
+                        && Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId')
+                        && isUnsupportedClientUserMessageIdFieldError(error)
+                    ) {
+                        turnSteerClientUserMessageIdSupport = 'legacy';
+                        await client.request('turn/steer', requestParams);
+                        return;
+                    }
+                    throw error;
+                }
             };
             const requestSteerWithStaleTurnRecovery = async (
                 input: CodexAppServerTurnInputItem[],
@@ -4626,6 +4703,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                         : null;
                     const input = await buildCodexTurnInputForPrompt(promptForAttempt, params.directory, optionsForAttempt);
                     const textOnlyInput = [{ type: 'text', text: promptForAttempt }] satisfies CodexAppServerTurnInputItem[];
+                    const clientUserMessageId = readCodexAppServerClientUserMessageId(optionsForAttempt);
                     const baseTurnStartParams = {
                         threadId: activeThreadId,
                         input,
@@ -4638,9 +4716,31 @@ export function createCodexAppServerRuntime(params: Readonly<{
                         ...baseTurnStartParams,
                         ...buildCurrentPermissionParams('turn'),
                     };
+                    const requestTurnStart = async (requestParams: Record<string, unknown>): Promise<unknown> => {
+                        const paramsWithClientId = clientUserMessageId && turnStartClientUserMessageIdSupport !== 'legacy'
+                            ? { ...requestParams, clientUserMessageId }
+                            : requestParams;
+                        try {
+                            const result = await client.request('turn/start', paramsWithClientId);
+                            if (clientUserMessageId && Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId')) {
+                                turnStartClientUserMessageIdSupport = 'supported';
+                            }
+                            return result;
+                        } catch (error) {
+                            if (
+                                clientUserMessageId
+                                && Object.prototype.hasOwnProperty.call(paramsWithClientId, 'clientUserMessageId')
+                                && isUnsupportedClientUserMessageIdFieldError(error)
+                            ) {
+                                turnStartClientUserMessageIdSupport = 'legacy';
+                                return await client.request('turn/start', requestParams);
+                            }
+                            throw error;
+                        }
+                    };
                     let response: unknown;
                     try {
-                        response = await client.request('turn/start', turnStartParams);
+                        response = await requestTurnStart(turnStartParams);
                         if (Object.prototype.hasOwnProperty.call(turnStartParams, 'permissions')) {
                             permissionSupport = 'supported';
                         }
@@ -4652,10 +4752,10 @@ export function createCodexAppServerRuntime(params: Readonly<{
                                 ...buildCurrentLegacyPermissionParams('turn'),
                             };
                             try {
-                                response = await client.request('turn/start', turnStartParams);
+                                response = await requestTurnStart(turnStartParams);
                             } catch (legacyError) {
                                 if (input.length > 1 && isCodexAppServerInvalidParamsError(legacyError)) {
-                                    response = await client.request('turn/start', {
+                                    response = await requestTurnStart({
                                         ...turnStartParams,
                                         input: textOnlyInput,
                                     });
@@ -4664,7 +4764,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                                 }
                             }
                         } else if (input.length > 1 && isCodexAppServerInvalidParamsError(error)) {
-                            response = await client.request('turn/start', {
+                            response = await requestTurnStart({
                                 ...turnStartParams,
                                 input: textOnlyInput,
                             });

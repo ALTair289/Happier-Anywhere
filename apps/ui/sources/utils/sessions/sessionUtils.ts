@@ -29,6 +29,7 @@ import { getCachedIntlDateTimeFormat } from '@/utils/datetime/cachedIntlFormatte
 import { formatPathRelativeToHome } from './formatPathRelativeToHome';
 import { useUnistyles } from 'react-native-unistyles';
 import { resolveTerminalControlServiceabilityPolicy } from '@happier-dev/protocol';
+import { resolveProviderPreferredSessionTitle } from '@/agents/registry/registryUiBehavior';
 export { formatPathRelativeToHome } from './formatPathRelativeToHome';
 export {
     SESSION_RESUMING_PRESENTATION_TIMEOUT_MS,
@@ -445,6 +446,8 @@ export function useSessionStatus(session: SessionStatusSource, options: UseSessi
  * Returns the last segment of the path, or 'unknown' if no path is available.
  */
 export function getSessionName(session: SessionNameSource): string {
+    const providerPreferredTitle = resolveProviderPreferredSessionTitle(session.metadata);
+    if (providerPreferredTitle) return providerPreferredTitle;
     const summaryText = (session.metadata as any)?.summary?.text ?? (session.metadata as any)?.summaryText;
     if (typeof summaryText === 'string' && summaryText.trim()) {
         return summaryText;

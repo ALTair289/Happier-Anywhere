@@ -1,5 +1,6 @@
 import type { DirectTranscriptRawMessageV1 } from '@happier-dev/protocol';
 
+import { markDirectSessionUserMessageMeta } from '@/sync/domains/messages/directSessionUserMessageProvenance';
 import { normalizeRawMessage, type NormalizedMessage } from '@/sync/typesRaw';
 
 export function normalizeDirectTranscriptMessages(items: ReadonlyArray<DirectTranscriptRawMessageV1>): NormalizedMessage[] {
@@ -12,7 +13,15 @@ export function normalizeDirectTranscriptMessages(items: ReadonlyArray<DirectTra
             item.raw,
             { messageRole: item.messageRole ?? undefined },
         );
-        if (normalized) out.push(normalized);
+        if (!normalized) continue;
+        if (normalized.role === 'user') {
+            out.push({
+                ...normalized,
+                meta: markDirectSessionUserMessageMeta(normalized.meta),
+            });
+            continue;
+        }
+        out.push(normalized);
     }
     return out;
 }

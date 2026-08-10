@@ -37,6 +37,9 @@ export type DirectSessionTranscriptReadAfter = Readonly<{
 }>;
 
 export type DirectSessionProviderOps = Readonly<{
+  linkMetadata?: Readonly<{
+    titleHintAuthority: 'fallback' | 'authoritative';
+  }>;
   listCandidates: (params: Readonly<{
     source: DirectSessionsSource;
     cursor?: string;
