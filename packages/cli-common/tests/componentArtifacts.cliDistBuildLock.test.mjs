@@ -161,6 +161,52 @@ function writeCliArtifactFixtures(repoRoot) {
   writeFileSync(join(homebridgePtyDir, 'index.js'), 'module.exports = { spawn() {} };\n', 'utf8');
 }
 
+test('buildCliBinaryArtifactPayload rebuilds a fresh-looking cli dist when reuse is explicitly disabled', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'component-artifacts-cli-force-rebuild-'));
+  try {
+    const repoRoot = join(tempRoot, 'repo');
+    const cliDistDir = join(repoRoot, 'apps', 'cli', 'dist');
+    const payloadDir = join(tempRoot, 'payload');
+
+    writeCliArtifactFixtures(repoRoot);
+    mkdirSync(join(repoRoot, 'apps', 'cli', 'src'), { recursive: true });
+    mkdirSync(cliDistDir, { recursive: true });
+    writeFileSync(join(repoRoot, 'apps', 'cli', 'src', 'index.ts'), 'console.log("source");\n', 'utf8');
+    writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("stale-dist");\n', 'utf8');
+
+    const artifacts = await import('../dist/componentArtifacts/index.js');
+    const runCalls = [];
+    await artifacts.buildCliBinaryArtifactPayload({
+      repoRoot,
+      payloadDir,
+      reuseExistingDist: false,
+      target: artifacts.resolveCurrentBinaryTarget({
+        availableTargets: artifacts.CLI_BINARY_TARGETS,
+        platform: 'linux',
+        arch: 'x64',
+      }),
+      commandProbe: () => true,
+      ensureWorkspacePackagesBuiltByName: admitExistingWorkspaceBundles,
+      runCommand: (cmd, args) => {
+        runCalls.push({ cmd, args });
+        mkdirSync(cliDistDir, { recursive: true });
+        writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("rebuilt-from-source");\n', 'utf8');
+      },
+      compileBinary: async ({ outfile }) => {
+        writeFileSync(outfile, '#!/bin/sh\necho happier\n', 'utf8');
+      },
+    });
+
+    assert.deepEqual(runCalls, [{ cmd: 'yarn', args: ['--cwd', 'apps/cli', 'build'] }]);
+    assert.equal(
+      readFileSync(join(payloadDir, 'package-dist', 'index.mjs'), 'utf8'),
+      'console.log("rebuilt-from-source");\n',
+    );
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('buildCliBinaryArtifactPayload reuses the first completed dist build across concurrent artifact requests', async () => {
   const tempRoot = mkdtempSync(join(tmpdir(), 'component-artifacts-cli-lock-'));
   try {

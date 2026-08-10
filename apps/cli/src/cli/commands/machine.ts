@@ -158,6 +158,8 @@ function buildMachineSetupSpec(params: Readonly<{
   args = knownHostsPath.rest;
   const trustedHostKey = takeFlagValue(args, '--trusted-host-key');
   args = trustedHostKey.rest;
+  const cliPayload = takeFlagValue(args, '--cli-payload');
+  args = cliPayload.rest;
   const serviceMode = takeFlagValue(args, '--service-mode');
   args = serviceMode.rest;
   const relayRuntimeMode = takeFlagValue(args, '--relay-runtime-mode');
@@ -194,6 +196,13 @@ function buildMachineSetupSpec(params: Readonly<{
       ]),
       serviceMode: normalizeServiceMode(serviceMode.value),
       knownHostsMode: 'app',
+      ...(cliPayload.value?.trim()
+        ? {
+            cliPayload: {
+              rootPath: cliPayload.value.trim(),
+            },
+          }
+        : {}),
       ...(installRelayRuntime.present
         ? {
             relayRuntime: {

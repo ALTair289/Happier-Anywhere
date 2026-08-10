@@ -64,6 +64,29 @@ describe('buildSshCommand', () => {
     expect(invocation.args.some((arg) => arg.startsWith('UserKnownHostsFile='))).toBe(false);
     expect(invocation.args).not.toContain('GlobalKnownHostsFile=/dev/null');
   });
+
+  it.each([
+    '-oProxyCommand=sh -c id',
+    'dev@example.test\n-oProxyCommand=sh -c id',
+    'dev\u0000@example.test',
+  ])('rejects an unsafe target in system known_hosts mode: %j', (target) => {
+    expect(() => buildSshCommand({
+      target,
+      auth: { kind: 'agent' },
+      knownHosts: { mode: 'system' },
+      remoteCommand: 'echo ok',
+    })).toThrow(/ssh target/i);
+  });
+
+  it.each([0, -1, 65_536, 22.5])('rejects an invalid port: %j', (port) => {
+    expect(() => buildSshCommand({
+      target: 'dev@example.test',
+      port,
+      auth: { kind: 'agent' },
+      knownHosts: { mode: 'system' },
+      remoteCommand: 'echo ok',
+    })).toThrow(/ssh port/i);
+  });
 });
 
 describe('buildScpCommand', () => {
@@ -128,6 +151,16 @@ describe('buildScpCommand', () => {
     expect(invocation.args).toContain('StrictHostKeyChecking=yes');
     expect(invocation.args.some((arg) => arg.startsWith('UserKnownHostsFile='))).toBe(false);
     expect(invocation.args).not.toContain('GlobalKnownHostsFile=/dev/null');
+  });
+
+  it('rejects ProxyCommand option injection when system known_hosts is selected', () => {
+    expect(() => buildScpCommand({
+      target: '-oProxyCommand=sh -c id',
+      remotePath: '$HOME/.happier/bootstrap-staging',
+      localPath: '/tmp/payload',
+      auth: { kind: 'agent' },
+      knownHosts: { mode: 'system' },
+    })).toThrow(/ssh target/i);
   });
 });
 

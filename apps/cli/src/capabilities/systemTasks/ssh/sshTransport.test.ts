@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildScpCommand,
   buildSshCommand,
   redactRemoteBootstrapPayload,
   SshKnownHostsStore,
@@ -49,6 +50,52 @@ describe('buildSshCommand', () => {
       serverAliveIntervalSec: 20,
       serverAliveCountMax: 2,
     }).args).toContain('/Users/alex/.ssh/id_ed25519');
+  });
+
+  it.each([
+    '-oProxyCommand=sh -c id',
+    'dev@example.test\n-oProxyCommand=sh -c id',
+  ])('rejects a system-known-hosts target that could be parsed as an ssh option: %j', (target) => {
+    expect(() => buildSshCommand({
+      sshBin: 'ssh',
+      target,
+      remoteCommand: ['uname', '-s'],
+      knownHostsMode: 'system',
+      auth: { mode: 'agent' },
+      connectTimeoutSec: 15,
+      serverAliveIntervalSec: 20,
+      serverAliveCountMax: 2,
+    })).toThrow(/ssh target/i);
+  });
+
+  it.each([0, 65_536, 22.5])('rejects an invalid ssh port: %j', (port) => {
+    expect(() => buildSshCommand({
+      sshBin: 'ssh',
+      target: 'dev@example.test',
+      remoteCommand: ['uname', '-s'],
+      knownHostsMode: 'system',
+      auth: { mode: 'agent' },
+      port,
+      connectTimeoutSec: 15,
+      serverAliveIntervalSec: 20,
+      serverAliveCountMax: 2,
+    })).toThrow(/ssh port/i);
+  });
+});
+
+describe('buildScpCommand', () => {
+  it('rejects ProxyCommand option injection when system known_hosts is selected', () => {
+    expect(() => buildScpCommand({
+      scpBin: 'scp',
+      target: '-oProxyCommand=sh -c id',
+      localPath: '/tmp/payload',
+      remotePath: '$HOME/.happier/bootstrap-staging',
+      knownHostsMode: 'system',
+      auth: { mode: 'agent' },
+      connectTimeoutSec: 15,
+      serverAliveIntervalSec: 20,
+      serverAliveCountMax: 2,
+    })).toThrow(/ssh target/i);
   });
 });
 

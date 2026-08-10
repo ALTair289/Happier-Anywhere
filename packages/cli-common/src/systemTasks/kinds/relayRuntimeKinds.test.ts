@@ -5,7 +5,32 @@ import {
   createRelayRuntimeStartTaskKind,
   createRelayRuntimeStatusTaskKind,
   createRelayRuntimeStopTaskKind,
+  parseSystemTaskSshConfig,
 } from './relayRuntimeKinds.js';
+
+describe('parseSystemTaskSshConfig', () => {
+  it.each([
+    '-oProxyCommand=sh -c id',
+    ' dev@example.test\n-oProxyCommand=sh -c id',
+    'dev\u0000@example.test',
+    'dev\t@example.test',
+    'dev\u202e@example.test',
+  ])('rejects unsafe ssh targets before they can become command-line options: %j', (target) => {
+    expect(() => parseSystemTaskSshConfig({ target, auth: 'agent' })).toThrow(/ssh\.target/i);
+  });
+
+  it.each([0, -1, 65_536, 22.5, Number.NaN, Number.POSITIVE_INFINITY, '22', null])(
+    'rejects an invalid ssh port: %j',
+    (port) => {
+      expect(() => parseSystemTaskSshConfig({ target: 'dev@example.test', auth: 'agent', port })).toThrow(/ssh\.port/i);
+    },
+  );
+
+  it('accepts the full valid TCP port boundary', () => {
+    expect(parseSystemTaskSshConfig({ target: ' dev@example.test ', auth: 'agent', port: 1 }).port).toBe(1);
+    expect(parseSystemTaskSshConfig({ target: 'dev@example.test', auth: 'agent', port: 65_535 }).port).toBe(65_535);
+  });
+});
 
 describe('relay runtime shared system task kinds', () => {
   it('returns the canonical relay runtime status payload', async () => {

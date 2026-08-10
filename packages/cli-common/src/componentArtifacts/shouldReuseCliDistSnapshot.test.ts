@@ -92,4 +92,28 @@ describe('shouldReuseCliDistSnapshot', () => {
             expectedBuildVersion: '0.2.10-dev.61',
         })).resolves.toBe(true);
     });
+
+    it('returns false when reuse is explicitly disabled even if the dist snapshot and build version are current', async () => {
+        const rootDir = await createTempDir();
+        const older = new Date('2026-04-13T18:00:00.000Z');
+        const newer = new Date('2026-04-13T18:05:00.000Z');
+        const distDir = join(rootDir, 'apps', 'cli', 'dist');
+        const distEntrypointPath = join(distDir, 'index.mjs');
+        const cliSourceFile = join(rootDir, 'apps', 'cli', 'src', 'index.ts');
+
+        await writeTimedFile(cliSourceFile, 'export default "src";\n', older);
+        await writeTimedFile(distEntrypointPath, 'export default "cli";\n', newer);
+        await writeFile(
+            join(distDir, '.build-manifest.json'),
+            JSON.stringify({ buildVersion: '0.2.10-dev.61' }),
+            'utf8',
+        );
+
+        await expect(shouldReuseCliDistSnapshot({
+            distEntrypointPath,
+            inputPaths: [join(rootDir, 'apps', 'cli', 'src')],
+            expectedBuildVersion: '0.2.10-dev.61',
+            reuseExistingDist: false,
+        })).resolves.toBe(false);
+    });
 });

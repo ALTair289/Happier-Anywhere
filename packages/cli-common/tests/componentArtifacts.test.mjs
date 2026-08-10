@@ -59,6 +59,50 @@ function writeNodePackageFixture({ repoRoot, packageName, packageJson = {}, file
   }
 }
 
+function writeServerSharpRuntimeFixtures({ repoRoot, platform = 'linux', arch = 'x64' }) {
+  const npmPlatform = platform === 'windows' ? 'win32' : platform;
+  const nativePackageName = `@img/sharp-${npmPlatform}-${arch}`;
+  const libvipsPackageName = platform === 'windows'
+    ? nativePackageName
+    : `@img/sharp-libvips-${npmPlatform}-${arch}`;
+  const optionalDependencies = {
+    [nativePackageName]: '0.34.5',
+    ...(libvipsPackageName === nativePackageName ? {} : { [libvipsPackageName]: '1.2.4' }),
+  };
+
+  writeNodePackageFixture({
+    repoRoot,
+    packageName: 'sharp',
+    packageJson: {
+      version: '0.34.5',
+      optionalDependencies,
+    },
+  });
+  writeNodePackageFixture({
+    repoRoot,
+    packageName: nativePackageName,
+    packageJson: {
+      version: '0.34.5',
+      os: [npmPlatform],
+      cpu: [arch],
+      optionalDependencies: libvipsPackageName === nativePackageName
+        ? {}
+        : { [libvipsPackageName]: '1.2.4' },
+    },
+  });
+  if (libvipsPackageName !== nativePackageName) {
+    writeNodePackageFixture({
+      repoRoot,
+      packageName: libvipsPackageName,
+      packageJson: {
+        version: '1.2.4',
+        os: [npmPlatform],
+        cpu: [arch],
+      },
+    });
+  }
+}
+
 function writeCliToolUnpackFixture(repoRoot) {
   const cliDir = join(repoRoot, 'apps', 'cli');
   const cliScriptsDir = join(cliDir, 'scripts');
@@ -214,6 +258,322 @@ test('resolvePrismaSchemaEngineTarget covers every released server binary target
       ['windows-x64', { binaryTarget: 'windows', fileName: 'schema-engine-windows.exe' }, 'happier-server-migrate.exe'],
     ],
   );
+});
+
+test('server runtime requirements cover Sharp 0.34.5 and Prisma for every canonical target', async () => {
+  const artifacts = await import('../dist/componentArtifacts/index.js');
+  assert.deepEqual(
+    artifacts.SERVER_BINARY_TARGETS.map((target) => artifacts.resolveServerTargetRuntimeRequirements(target)),
+    [
+      {
+        target: 'linux-x64',
+        sharp: {
+          javascript: { packageName: 'sharp', version: '0.34.5' },
+          native: { packageName: '@img/sharp-linux-x64', version: '0.34.5' },
+          libvips: { packageName: '@img/sharp-libvips-linux-x64', version: '1.2.4', delivery: 'separate-package' },
+        },
+        prisma: {
+          queryEngineFileName: 'libquery_engine-debian-openssl-3.0.x.so.node',
+          schemaEngineBinaryTarget: 'debian-openssl-3.0.x',
+          schemaEngineFileName: 'schema-engine-debian-openssl-3.0.x',
+        },
+      },
+      {
+        target: 'linux-arm64',
+        sharp: {
+          javascript: { packageName: 'sharp', version: '0.34.5' },
+          native: { packageName: '@img/sharp-linux-arm64', version: '0.34.5' },
+          libvips: { packageName: '@img/sharp-libvips-linux-arm64', version: '1.2.4', delivery: 'separate-package' },
+        },
+        prisma: {
+          queryEngineFileName: 'libquery_engine-linux-arm64-openssl-3.0.x.so.node',
+          schemaEngineBinaryTarget: 'linux-arm64-openssl-3.0.x',
+          schemaEngineFileName: 'schema-engine-linux-arm64-openssl-3.0.x',
+        },
+      },
+      {
+        target: 'darwin-x64',
+        sharp: {
+          javascript: { packageName: 'sharp', version: '0.34.5' },
+          native: { packageName: '@img/sharp-darwin-x64', version: '0.34.5' },
+          libvips: { packageName: '@img/sharp-libvips-darwin-x64', version: '1.2.4', delivery: 'separate-package' },
+        },
+        prisma: {
+          queryEngineFileName: 'libquery_engine-darwin.dylib.node',
+          schemaEngineBinaryTarget: 'darwin',
+          schemaEngineFileName: 'schema-engine-darwin',
+        },
+      },
+      {
+        target: 'darwin-arm64',
+        sharp: {
+          javascript: { packageName: 'sharp', version: '0.34.5' },
+          native: { packageName: '@img/sharp-darwin-arm64', version: '0.34.5' },
+          libvips: { packageName: '@img/sharp-libvips-darwin-arm64', version: '1.2.4', delivery: 'separate-package' },
+        },
+        prisma: {
+          queryEngineFileName: 'libquery_engine-darwin-arm64.dylib.node',
+          schemaEngineBinaryTarget: 'darwin-arm64',
+          schemaEngineFileName: 'schema-engine-darwin-arm64',
+        },
+      },
+      {
+        target: 'windows-x64',
+        sharp: {
+          javascript: { packageName: 'sharp', version: '0.34.5' },
+          native: { packageName: '@img/sharp-win32-x64', version: '0.34.5' },
+          libvips: { packageName: '@img/sharp-win32-x64', version: '0.34.5', delivery: 'embedded-in-native-package' },
+        },
+        prisma: {
+          queryEngineFileName: 'query_engine-windows.dll.node',
+          schemaEngineBinaryTarget: 'windows',
+          schemaEngineFileName: 'schema-engine-windows.exe',
+        },
+      },
+    ],
+  );
+});
+
+test('server runtime preflight rejects empty targets and unsupported provider selections', async () => {
+  const artifacts = await import('../dist/componentArtifacts/index.js');
+  assert.deepEqual(artifacts.resolveRequestedServerDbProviders(' all '), ['sqlite', 'mysql']);
+  assert.deepEqual(artifacts.resolveRequestedServerDbProviders('mysql,sqlite,mysql'), ['mysql', 'sqlite']);
+  assert.throws(
+    () => artifacts.resolveRequestedServerDbProviders('postgres'),
+    /unsupported server database provider selection/,
+  );
+  await assert.rejects(
+    artifacts.inspectServerArtifactRuntimeDependencies({
+      repoRoot: '/not-inspected-without-targets',
+      targets: [],
+      buildDbProviders: 'sqlite',
+    }),
+    /requires at least one target/,
+  );
+});
+
+test('server runtime preflight reports a structured path-free BLOCKED result for missing target sidecars', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'component-artifacts-runtime-preflight-'));
+  try {
+    const repoRoot = join(tempRoot, 'private-workspace-name');
+    const sqliteClientDir = join(repoRoot, 'apps', 'server', 'generated', 'sqlite-client');
+    const postgresClientDir = join(repoRoot, 'node_modules', '.prisma', 'client');
+    mkdirSync(sqliteClientDir, { recursive: true });
+    mkdirSync(postgresClientDir, { recursive: true });
+    writeServerPrismaEngineFixtures({ sqliteClientDir, postgresClientDir, providers: ['sqlite'] });
+    writeNodePackageFixture({
+      repoRoot,
+      packageName: 'sharp',
+      packageJson: { version: '0.34.5' },
+    });
+
+    const artifacts = await import('../dist/componentArtifacts/index.js');
+    const target = artifacts.SERVER_BINARY_TARGETS.find((candidate) => candidate.os === 'linux' && candidate.arch === 'x64');
+    const report = await artifacts.inspectServerArtifactRuntimeDependencies({
+      repoRoot,
+      targets: [target],
+      buildDbProviders: 'sqlite',
+    });
+    assert.deepEqual(report, {
+      status: 'BLOCKED',
+      code: 'SERVER_ARTIFACT_RUNTIME_DEPENDENCIES_UNAVAILABLE',
+      targets: [{
+        target: 'linux-x64',
+        failures: [
+          {
+            dependency: 'sharp-native',
+            packageName: '@img/sharp-linux-x64',
+            expectedVersion: '0.34.5',
+            reason: 'missing-package',
+          },
+          {
+            dependency: 'sharp-libvips',
+            packageName: '@img/sharp-libvips-linux-x64',
+            expectedVersion: '1.2.4',
+            reason: 'missing-package',
+          },
+        ],
+      }],
+    });
+
+    await assert.rejects(
+      artifacts.assertServerArtifactRuntimeDependencies({
+        repoRoot,
+        targets: [target],
+        buildDbProviders: 'sqlite',
+      }),
+      (error) => {
+        assert.equal(error?.name, 'ServerArtifactRuntimeDependenciesBlockedError');
+        assert.deepEqual(error?.report, report);
+        assert.equal(error?.message, JSON.stringify(report));
+        assert.doesNotMatch(error?.message ?? '', /private-workspace-name|[A-Z]:\\|\\\\/i);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('server runtime preflight confirms Sharp sidecars and Prisma engines for all canonical targets', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'component-artifacts-runtime-ready-'));
+  try {
+    const repoRoot = join(tempRoot, 'repo');
+    const sqliteClientDir = join(repoRoot, 'apps', 'server', 'generated', 'sqlite-client');
+    const mysqlClientDir = join(repoRoot, 'apps', 'server', 'generated', 'mysql-client');
+    const postgresClientDir = join(repoRoot, 'node_modules', '.prisma', 'client');
+    mkdirSync(sqliteClientDir, { recursive: true });
+    mkdirSync(mysqlClientDir, { recursive: true });
+    mkdirSync(postgresClientDir, { recursive: true });
+
+    const artifacts = await import('../dist/componentArtifacts/index.js');
+    for (const target of artifacts.SERVER_BINARY_TARGETS) {
+      writeServerSharpRuntimeFixtures({ repoRoot, platform: target.os, arch: target.arch });
+      writeServerPrismaEngineFixtures({
+        sqliteClientDir,
+        mysqlClientDir,
+        postgresClientDir,
+        providers: ['sqlite', 'mysql'],
+        platform: target.os,
+        arch: target.arch,
+      });
+    }
+
+    const report = await artifacts.inspectServerArtifactRuntimeDependencies({
+      repoRoot,
+      targets: artifacts.SERVER_BINARY_TARGETS,
+      buildDbProviders: 'all',
+    });
+    assert.deepEqual(report, {
+      status: 'READY',
+      code: 'SERVER_ARTIFACT_RUNTIME_DEPENDENCIES_READY',
+      targets: artifacts.SERVER_BINARY_TARGETS.map((target) => ({
+        target: `${target.os}-${target.arch}`,
+        failures: [],
+      })),
+    });
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('server runtime preflight rejects mismatched Sharp sidecar versions without echoing actual metadata', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'component-artifacts-runtime-version-'));
+  try {
+    const repoRoot = join(tempRoot, 'repo');
+    const sqliteClientDir = join(repoRoot, 'apps', 'server', 'generated', 'sqlite-client');
+    const postgresClientDir = join(repoRoot, 'node_modules', '.prisma', 'client');
+    mkdirSync(sqliteClientDir, { recursive: true });
+    mkdirSync(postgresClientDir, { recursive: true });
+    writeServerPrismaEngineFixtures({ sqliteClientDir, postgresClientDir, providers: ['sqlite'] });
+    writeServerSharpRuntimeFixtures({ repoRoot });
+    writeNodePackageFixture({
+      repoRoot,
+      packageName: '@img/sharp-linux-x64',
+      packageJson: { version: '0.34.4', os: ['linux'], cpu: ['x64'] },
+    });
+
+    const artifacts = await import('../dist/componentArtifacts/index.js');
+    const target = artifacts.SERVER_BINARY_TARGETS.find((candidate) => candidate.os === 'linux' && candidate.arch === 'x64');
+    const report = await artifacts.inspectServerArtifactRuntimeDependencies({
+      repoRoot,
+      targets: [target],
+      buildDbProviders: 'sqlite',
+    });
+    assert.deepEqual(report, {
+      status: 'BLOCKED',
+      code: 'SERVER_ARTIFACT_RUNTIME_DEPENDENCIES_UNAVAILABLE',
+      targets: [{
+        target: 'linux-x64',
+        failures: [{
+          dependency: 'sharp-native',
+          packageName: '@img/sharp-linux-x64',
+          expectedVersion: '0.34.5',
+          reason: 'version-mismatch',
+        }],
+      }],
+    });
+    assert.doesNotMatch(JSON.stringify(report), /0\.34\.4/);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('server artifact builder blocks before commands or payload writes when runtime dependencies are unavailable', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'component-artifacts-runtime-builder-block-'));
+  try {
+    const repoRoot = join(tempRoot, 'repo');
+    const payloadDir = join(tempRoot, 'payload');
+    const entrypoint = join(repoRoot, 'apps', 'server', 'sources', 'main.light.ts');
+    const sqliteClientDir = join(repoRoot, 'apps', 'server', 'generated', 'sqlite-client');
+    const postgresClientDir = join(repoRoot, 'node_modules', '.prisma', 'client');
+    mkdirSync(join(entrypoint, '..'), { recursive: true });
+    mkdirSync(sqliteClientDir, { recursive: true });
+    mkdirSync(postgresClientDir, { recursive: true });
+    writeFileSync(entrypoint, 'export {};\n', 'utf8');
+    writeServerPrismaEngineFixtures({ sqliteClientDir, postgresClientDir, providers: ['sqlite'] });
+
+    const artifacts = await import('../dist/componentArtifacts/index.js');
+    const target = artifacts.SERVER_BINARY_TARGETS.find((candidate) => candidate.os === 'linux' && candidate.arch === 'x64');
+    let commandCalls = 0;
+    await assert.rejects(
+      artifacts.buildServerBinaryArtifactPayload({
+        repoRoot,
+        payloadDir,
+        target,
+        entrypoint,
+        buildDbProviders: 'sqlite',
+        commandProbe: () => true,
+        runCommand: () => { commandCalls += 1; },
+      }),
+      (error) => error?.name === 'ServerArtifactRuntimeDependenciesBlockedError',
+    );
+    assert.equal(commandCalls, 0);
+    assert.equal(existsSync(payloadDir), false);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('server artifact preflight honors the supplied build environment provider selection', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'component-artifacts-runtime-provider-env-'));
+  try {
+    const repoRoot = join(tempRoot, 'repo');
+    const payloadDir = join(tempRoot, 'payload');
+    const entrypoint = join(repoRoot, 'apps', 'server', 'sources', 'main.light.ts');
+    const sqliteClientDir = join(repoRoot, 'apps', 'server', 'generated', 'sqlite-client');
+    const postgresClientDir = join(repoRoot, 'node_modules', '.prisma', 'client');
+    mkdirSync(join(entrypoint, '..'), { recursive: true });
+    mkdirSync(sqliteClientDir, { recursive: true });
+    mkdirSync(postgresClientDir, { recursive: true });
+    writeFileSync(entrypoint, 'export {};\n', 'utf8');
+    writeServerPrismaEngineFixtures({ sqliteClientDir, postgresClientDir, providers: ['sqlite'] });
+    writeServerSharpRuntimeFixtures({ repoRoot });
+
+    const artifacts = await import('../dist/componentArtifacts/index.js');
+    const target = artifacts.SERVER_BINARY_TARGETS.find((candidate) => candidate.os === 'linux' && candidate.arch === 'x64');
+    await assert.rejects(
+      artifacts.buildServerBinaryArtifactPayload({
+        repoRoot,
+        payloadDir,
+        target,
+        entrypoint,
+        env: { HAPPIER_BUILD_DB_PROVIDERS: 'sqlite' },
+        commandProbe: () => true,
+        runCommand: () => {
+          throw new Error('preflight-passed-provider-env');
+        },
+      }),
+      (error) => {
+        assert.equal(error?.name, 'Error');
+        assert.match(error?.message ?? '', /preflight-passed-provider-env/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(payloadDir), false);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test('commandExists does not execute shell metacharacters on Unix', async () => {
@@ -948,6 +1308,7 @@ test('buildServerBinaryArtifactPayload stages the compiled binary and runtime si
       postgresClientDir,
       providers: ['sqlite', 'mysql'],
     });
+    writeServerSharpRuntimeFixtures({ repoRoot });
     writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = { PrismaClient: class PrismaClient {} };\n', 'utf8');
     if (process.platform !== 'win32') {
       const externalToolPath = join(repoRoot, 'external-prisma-tool.js');
@@ -988,7 +1349,7 @@ test('buildServerBinaryArtifactPayload stages the compiled binary and runtime si
       { cmd: process.execPath, args: ['apps/server/scripts/buildSharedDeps.mjs', '--quiet'] },
       { cmd: 'yarn', args: ['--cwd', 'apps/server', '-s', 'generate:providers'] },
       { cmd: process.execPath, args: ['apps/ui/scripts/ensureWorkspacePackagesBuilt.mjs'] },
-      { cmd: 'yarn', args: ['--cwd', 'apps/ui', '-s', 'expo', 'export', '--platform', 'web', '--output-dir', 'dist'] },
+      { cmd: 'yarn', args: ['--cwd', 'apps/ui', '-s', 'expo', 'export', '--platform', 'web', '--output-dir', 'dist', '--max-workers', '2'] },
       { cmd: process.execPath, args: ['scripts/pipeline/release/precompress-ui-web-assets.mjs', '--dir', 'apps/ui/dist'] },
     ]);
     assert.equal(readFileSync(join(payloadDir, 'happier-server'), 'utf8'), '#!/bin/sh\necho happier-server\n');
@@ -1071,6 +1432,7 @@ test('buildServerBinaryArtifactPayload packages the complete full-server migrate
       postgresClientDir,
       providers: ['mysql'],
     });
+    writeServerSharpRuntimeFixtures({ repoRoot });
     writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
     writeFileSync(join(prismaBuildDir, 'prisma_schema_build_bg.wasm'), 'schema wasm sentinel\n', 'utf8');
 
@@ -1161,6 +1523,7 @@ test('buildServerBinaryArtifactPayload rejects non-bin sidecar symlinks that esc
     writeFileSync(join(sqliteClientDir, 'schema.prisma'), '// sqlite\n', 'utf8');
     writeFileSync(join(sqliteMigrationsDir, 'migration.sql'), '-- sql\n', 'utf8');
     writeServerPrismaEngineFixtures({ sqliteClientDir, postgresClientDir, providers: ['sqlite'] });
+    writeServerSharpRuntimeFixtures({ repoRoot });
     writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
     const externalRuntimePath = join(repoRoot, 'external-prisma-runtime.js');
     writeFileSync(externalRuntimePath, 'module.exports = {};\n', 'utf8');
@@ -1229,6 +1592,7 @@ test('buildServerBinaryArtifactPayload stages sharp native runtime sidecars for 
       repoRoot,
       packageName: 'sharp',
       packageJson: {
+        version: '0.34.5',
         dependencies: {
           '@img/colour': '^1.0.0',
           'detect-libc': '^2.1.2',
@@ -1249,6 +1613,7 @@ test('buildServerBinaryArtifactPayload stages sharp native runtime sidecars for 
       repoRoot,
       packageName: '@img/sharp-darwin-arm64',
       packageJson: {
+        version: '0.34.5',
         os: ['darwin'],
         cpu: ['arm64'],
         optionalDependencies: {
@@ -1260,6 +1625,7 @@ test('buildServerBinaryArtifactPayload stages sharp native runtime sidecars for 
       repoRoot,
       packageName: '@img/sharp-libvips-darwin-arm64',
       packageJson: {
+        version: '1.2.4',
         os: ['darwin'],
         cpu: ['arm64'],
       },
@@ -1361,6 +1727,7 @@ test('buildServerBinaryArtifactPayload fails darwin artifacts without the darwin
       platform: 'darwin',
       arch: 'arm64',
     });
+    writeServerSharpRuntimeFixtures({ repoRoot, platform: 'darwin', arch: 'arm64' });
     writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = { PrismaClient: class PrismaClient {} };\n', 'utf8');
 
     const artifacts = await import('../dist/componentArtifacts/index.js');
@@ -1381,7 +1748,18 @@ test('buildServerBinaryArtifactPayload fails darwin artifacts without the darwin
           writeFileSync(outfile, '#!/bin/sh\necho happier-server\n', 'utf8');
         },
       }),
-      /missing sqlite Prisma query engine for darwin-arm64/i,
+      (error) => {
+        assert.equal(error?.name, 'ServerArtifactRuntimeDependenciesBlockedError');
+        assert.deepEqual(error?.report?.targets, [{
+          target: 'darwin-arm64',
+          failures: [{
+            dependency: 'prisma-sqlite-query-engine',
+            engineFileName: 'libquery_engine-darwin-arm64.dylib.node',
+            reason: 'missing-engine',
+          }],
+        }]);
+        return true;
+      },
     );
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
@@ -1413,6 +1791,7 @@ test('buildServerBinaryArtifactPayload retries transient ENOENT failures while c
     writeFileSync(join(sqliteMigrationsDir, 'migration.sql'), '-- sql\n', 'utf8');
     writeFileSync(join(postgresClientDir, 'client.d.ts'), 'export {};\n', 'utf8');
     writeServerPrismaEngineFixtures({ sqliteClientDir, postgresClientDir });
+    writeServerSharpRuntimeFixtures({ repoRoot });
     writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
 
     const artifacts = await import('../dist/componentArtifacts/index.js');
@@ -1472,15 +1851,18 @@ test('buildServerBinaryArtifactPayload builds ui-web dist when it is missing', a
     writeFileSync(join(sqliteMigrationsDir, 'migration.sql'), '-- sql\n', 'utf8');
     writeFileSync(join(postgresClientDir, 'client.d.ts'), 'export {};\n', 'utf8');
     writeServerPrismaEngineFixtures({ sqliteClientDir, postgresClientDir });
+    writeServerSharpRuntimeFixtures({ repoRoot });
     writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
 
     const artifacts = await import('../dist/componentArtifacts/index.js');
     const runCalls = [];
-    let uiWebExportEnv = null;
+    const uiBuildEnvs = [];
     await artifacts.buildServerBinaryArtifactPayload({
       repoRoot,
       payloadDir,
       buildDbProviders: 'sqlite',
+      env: { HAPPIER_INSTALL_SCOPE: 'ui,protocol' },
+      uiBuildProfile: { kind: 'deployment', releaseRing: 'stable' },
       target: artifacts.resolveCurrentBinaryTarget({
         availableTargets: artifacts.SERVER_BINARY_TARGETS,
         platform: 'linux',
@@ -1491,10 +1873,11 @@ test('buildServerBinaryArtifactPayload builds ui-web dist when it is missing', a
         runCalls.push({ cmd, args });
         const argsText = Array.isArray(args) ? args.join(' ') : '';
         if (cmd === process.execPath && argsText.includes('apps/ui/scripts/ensureWorkspacePackagesBuilt.mjs')) {
+          uiBuildEnvs.push(options?.env ?? null);
           return;
         }
         if (argsText.includes('--cwd apps/ui') && argsText.includes('expo export --platform web --output-dir dist')) {
-          uiWebExportEnv = options?.env ?? null;
+          uiBuildEnvs.push(options?.env ?? null);
           const uiDistDir = join(repoRoot, 'apps', 'ui', 'dist');
           mkdirSync(uiDistDir, { recursive: true });
           writeFileSync(join(uiDistDir, 'index.html'), '<html>ui built</html>\n', 'utf8');
@@ -1502,6 +1885,7 @@ test('buildServerBinaryArtifactPayload builds ui-web dist when it is missing', a
           return;
         }
         if (cmd === process.execPath && argsText.includes('precompress-ui-web-assets.mjs --dir apps/ui/dist')) {
+          uiBuildEnvs.push(options?.env ?? null);
           const uiDistDir = join(repoRoot, 'apps', 'ui', 'dist');
           writeFileSync(join(uiDistDir, 'main.js.br'), 'br-sidecar\n', 'utf8');
           writeFileSync(join(uiDistDir, 'main.js.gz'), 'gz-sidecar\n', 'utf8');
@@ -1517,13 +1901,190 @@ test('buildServerBinaryArtifactPayload builds ui-web dist when it is missing', a
       { cmd: process.execPath, args: ['apps/server/scripts/buildSharedDeps.mjs', '--quiet'] },
       { cmd: 'yarn', args: ['--cwd', 'apps/server', '-s', 'generate:providers'] },
       { cmd: process.execPath, args: ['apps/ui/scripts/ensureWorkspacePackagesBuilt.mjs'] },
-      { cmd: 'yarn', args: ['--cwd', 'apps/ui', '-s', 'expo', 'export', '--platform', 'web', '--output-dir', 'dist'] },
+      { cmd: 'yarn', args: ['--cwd', 'apps/ui', '-s', 'expo', 'export', '--platform', 'web', '--output-dir', 'dist', '--max-workers', '2'] },
       { cmd: process.execPath, args: ['scripts/pipeline/release/precompress-ui-web-assets.mjs', '--dir', 'apps/ui/dist'] },
     ]);
-    assert.equal(uiWebExportEnv?.EXPO_UNSTABLE_WEB_MODAL, '1');
+    assert.equal(uiBuildEnvs.length, 3);
+    assert.equal(uiBuildEnvs[0], uiBuildEnvs[1]);
+    assert.equal(uiBuildEnvs[1], uiBuildEnvs[2]);
+    assert.deepEqual(
+      {
+        APP_ENV: uiBuildEnvs[0]?.APP_ENV,
+        EXPO_UPDATES_CHANNEL: uiBuildEnvs[0]?.EXPO_UPDATES_CHANNEL,
+        EXPO_PUBLIC_HAPPIER_FEATURE_POLICY_ENV: uiBuildEnvs[0]?.EXPO_PUBLIC_HAPPIER_FEATURE_POLICY_ENV,
+        EXPO_NO_DOTENV: uiBuildEnvs[0]?.EXPO_NO_DOTENV,
+        EXPO_UNSTABLE_WEB_MODAL: uiBuildEnvs[0]?.EXPO_UNSTABLE_WEB_MODAL,
+        NODE_ENV: uiBuildEnvs[0]?.NODE_ENV,
+        BABEL_ENV: uiBuildEnvs[0]?.BABEL_ENV,
+        CI: uiBuildEnvs[0]?.CI,
+        HAPPIER_INSTALL_SCOPE: uiBuildEnvs[0]?.HAPPIER_INSTALL_SCOPE,
+      },
+      {
+        APP_ENV: 'production',
+        EXPO_UPDATES_CHANNEL: 'production',
+        EXPO_PUBLIC_HAPPIER_FEATURE_POLICY_ENV: 'production',
+        EXPO_NO_DOTENV: '1',
+        EXPO_UNSTABLE_WEB_MODAL: '1',
+        NODE_ENV: 'production',
+        BABEL_ENV: 'production',
+        CI: '1',
+        HAPPIER_INSTALL_SCOPE: 'ui,protocol',
+      },
+    );
     assert.equal(readFileSync(join(payloadDir, 'ui-web', 'current', 'index.html'), 'utf8'), '<html>ui built</html>\n');
     assert.equal(readFileSync(join(payloadDir, 'ui-web', 'current', 'main.js.br'), 'utf8'), 'br-sidecar\n');
     assert.equal(readFileSync(join(payloadDir, 'ui-web', 'current', 'main.js.gz'), 'utf8'), 'gz-sidecar\n');
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('buildServerBinaryArtifactPayload reuses one verified ui-web generation within a multi-target build invocation', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'component-artifacts-server-ui-invocation-'));
+  try {
+    const repoRoot = join(tempRoot, 'repo');
+    const serverSourcesDir = join(repoRoot, 'apps', 'server', 'sources');
+    const sqliteClientDir = join(repoRoot, 'apps', 'server', 'generated', 'sqlite-client');
+    const sqliteMigrationsDir = join(repoRoot, 'apps', 'server', 'prisma', 'sqlite', 'migrations');
+    const postgresClientDir = join(repoRoot, 'node_modules', '.prisma', 'client');
+    const prismaClientPackageDir = join(repoRoot, 'node_modules', '@prisma', 'client');
+
+    mkdirSync(serverSourcesDir, { recursive: true });
+    mkdirSync(sqliteClientDir, { recursive: true });
+    mkdirSync(sqliteMigrationsDir, { recursive: true });
+    mkdirSync(postgresClientDir, { recursive: true });
+    mkdirSync(prismaClientPackageDir, { recursive: true });
+    writeFileSync(join(serverSourcesDir, 'main.light.ts'), 'export {};\n', 'utf8');
+    writeFileSync(join(sqliteClientDir, 'schema.prisma'), '// sqlite\n', 'utf8');
+    writeFileSync(join(sqliteMigrationsDir, 'migration.sql'), '-- sql\n', 'utf8');
+    writeFileSync(join(postgresClientDir, 'client.d.ts'), 'export {};\n', 'utf8');
+    writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
+    const targetFixtures = [
+      { label: 'linux-x64', resolvePlatform: 'linux', fixturePlatform: 'linux', arch: 'x64' },
+      { label: 'linux-arm64', resolvePlatform: 'linux', fixturePlatform: 'linux', arch: 'arm64' },
+      { label: 'darwin-x64', resolvePlatform: 'darwin', fixturePlatform: 'darwin', arch: 'x64' },
+      { label: 'darwin-arm64', resolvePlatform: 'darwin', fixturePlatform: 'darwin', arch: 'arm64' },
+      { label: 'windows-x64', resolvePlatform: 'win32', fixturePlatform: 'windows', arch: 'x64' },
+    ];
+    for (const targetFixture of targetFixtures) {
+      writeServerPrismaEngineFixtures({
+        sqliteClientDir,
+        postgresClientDir,
+        platform: targetFixture.fixturePlatform,
+        arch: targetFixture.arch,
+      });
+      writeServerSharpRuntimeFixtures({
+        repoRoot,
+        platform: targetFixture.fixturePlatform,
+        arch: targetFixture.arch,
+      });
+    }
+
+    const artifacts = await import('../dist/componentArtifacts/index.js');
+    const buildInvocation = artifacts.createServerArtifactBuildInvocation();
+    const env = { HAPPIER_INSTALL_SCOPE: 'ui,protocol' };
+    let uiExportCount = 0;
+    let uiPrecompressCount = 0;
+    const runCommand = async (cmd, args) => {
+      const argsText = Array.isArray(args) ? args.join(' ') : '';
+      if (argsText.includes('--cwd apps/ui') && argsText.includes('expo export --platform web --output-dir dist')) {
+        uiExportCount += 1;
+        if (uiExportCount > 1) {
+          const error = new Error('simulated Windows rmdir failure during a repeated UI export');
+          error.code = 'EPERM';
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const uiDistDir = join(repoRoot, 'apps', 'ui', 'dist');
+        mkdirSync(uiDistDir, { recursive: true });
+        writeFileSync(join(uiDistDir, 'index.html'), '<html>single generation</html>\n', 'utf8');
+        return;
+      }
+      if (cmd === process.execPath && argsText.includes('precompress-ui-web-assets.mjs --dir apps/ui/dist')) {
+        uiPrecompressCount += 1;
+      }
+    };
+
+    const buildTarget = async ({
+      targetFixture,
+      invocation = buildInvocation,
+      profile = { kind: 'deployment', releaseRing: 'stable' },
+      buildEnv = env,
+      payloadName = `payload-${targetFixture.label}`,
+    }) => {
+      await artifacts.buildServerBinaryArtifactPayload({
+        repoRoot,
+        payloadDir: join(tempRoot, payloadName),
+        buildDbProviders: 'sqlite',
+        env: buildEnv,
+        uiBuildProfile: profile,
+        buildInvocation: invocation,
+        target: artifacts.resolveCurrentBinaryTarget({
+          availableTargets: artifacts.SERVER_BINARY_TARGETS,
+          platform: targetFixture.resolvePlatform,
+          arch: targetFixture.arch,
+        }),
+        commandProbe: () => true,
+        runCommand,
+        compileBinary: async ({ outfile }) => {
+          writeFileSync(outfile, '#!/bin/sh\necho happier-server\n', 'utf8');
+        },
+      });
+    };
+
+    for (const targetFixture of targetFixtures) {
+      await buildTarget({ targetFixture });
+    }
+
+    assert.equal(uiExportCount, 1);
+    assert.equal(uiPrecompressCount, 1);
+    for (const targetFixture of targetFixtures) {
+      assert.equal(
+        readFileSync(
+          join(tempRoot, `payload-${targetFixture.label}`, 'ui-web', 'current', 'index.html'),
+          'utf8',
+        ),
+        '<html>single generation</html>\n',
+      );
+    }
+
+    await assert.rejects(
+      () => buildTarget({
+        targetFixture: targetFixtures[0],
+        profile: { kind: 'deployment', releaseRing: 'preview' },
+        payloadName: 'payload-profile-drift',
+      }),
+      /build invocation UI inputs changed/i,
+    );
+    await assert.rejects(
+      () => buildTarget({
+        targetFixture: targetFixtures[0],
+        buildEnv: { ...env, NON_UI_AMBIENT_INPUT: 'changed' },
+        payloadName: 'payload-env-drift',
+      }),
+      /build invocation UI inputs changed/i,
+    );
+    assert.equal(uiExportCount, 1, 'profile or environment drift must fail before another export');
+
+    await assert.rejects(
+      () => buildTarget({
+        targetFixture: targetFixtures[0],
+        invocation: artifacts.createServerArtifactBuildInvocation(),
+        payloadName: 'payload-new-invocation',
+      }),
+      /simulated Windows rmdir failure/i,
+    );
+    assert.equal(uiExportCount, 2, 'a new invocation must not reuse the previous UI generation');
+
+    await assert.rejects(
+      () => buildTarget({
+        targetFixture: targetFixtures[0],
+        invocation: Object.freeze({}),
+        payloadName: 'payload-forged-invocation',
+      }),
+      /invalid server artifact build invocation/i,
+    );
+    assert.equal(uiExportCount, 2, 'a forged invocation must fail before UI generation');
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -1554,6 +2115,7 @@ test('buildServerBinaryArtifactPayload rebuilds ui-web dist even when a stale di
     writeFileSync(join(sqliteMigrationsDir, 'migration.sql'), '-- sql\n', 'utf8');
     writeFileSync(join(postgresClientDir, 'client.d.ts'), 'export {};\n', 'utf8');
     writeServerPrismaEngineFixtures({ sqliteClientDir, postgresClientDir });
+    writeServerSharpRuntimeFixtures({ repoRoot });
     writeFileSync(join(prismaClientPackageDir, 'index.js'), 'module.exports = {};\n', 'utf8');
 
     const artifacts = await import('../dist/componentArtifacts/index.js');
@@ -1587,7 +2149,7 @@ test('buildServerBinaryArtifactPayload rebuilds ui-web dist even when a stale di
       { cmd: process.execPath, args: ['apps/server/scripts/buildSharedDeps.mjs', '--quiet'] },
       { cmd: 'yarn', args: ['--cwd', 'apps/server', '-s', 'generate:providers'] },
       { cmd: process.execPath, args: ['apps/ui/scripts/ensureWorkspacePackagesBuilt.mjs'] },
-      { cmd: 'yarn', args: ['--cwd', 'apps/ui', '-s', 'expo', 'export', '--platform', 'web', '--output-dir', 'dist'] },
+      { cmd: 'yarn', args: ['--cwd', 'apps/ui', '-s', 'expo', 'export', '--platform', 'web', '--output-dir', 'dist', '--max-workers', '2'] },
       { cmd: process.execPath, args: ['scripts/pipeline/release/precompress-ui-web-assets.mjs', '--dir', 'apps/ui/dist'] },
     ]);
     assert.equal(readFileSync(join(payloadDir, 'ui-web', 'current', 'index.html'), 'utf8'), '<html>fresh ui</html>\n');

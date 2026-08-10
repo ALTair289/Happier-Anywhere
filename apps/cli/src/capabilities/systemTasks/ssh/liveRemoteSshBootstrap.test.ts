@@ -18,9 +18,13 @@ const {
   createRelayHostEngineMock: vi.fn(),
 }));
 
-vi.mock('node:child_process', () => ({
-  spawnSync,
-}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawnSync,
+  };
+});
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -278,9 +282,50 @@ describe('createLiveRemoteSshBootstrapTaskKind', () => {
           target: 'dev@example.test',
         }),
       }),
-      expect.any(Object),
+      expect.not.objectContaining({
+        preparePayload: expect.anything(),
+      }),
     );
     expect(approveTerminalAuthRequest).toHaveBeenCalledWith({ publicKey: 'pub-key' });
+  });
+
+  it('uses a validated local CLI payload when remote setup supplies one', async () => {
+    const kind = createLiveRemoteSshBootstrapTaskKind();
+
+    await kind.run({
+      params: {
+        ssh: {
+          target: 'dev@example.test',
+          auth: 'agent',
+        },
+        relay: {
+          relayUrl: 'https://relay.example.test',
+        },
+        channel: 'stable',
+        knownHostsMode: 'system',
+        serviceMode: 'none',
+        cliPayload: {
+          rootPath: '/verified/happier-v0.2.10-linux-x64',
+        },
+      },
+      emit: () => undefined,
+      prompt: async (request) => {
+        if (request.kind === 'auth.approveRemoteProvisioning') {
+          return { approved: true };
+        }
+        throw new Error(`Unexpected prompt: ${request.kind}`);
+      },
+    });
+
+    expect(installRemoteFirstPartyComponentMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        componentId: 'happier-cli',
+        channel: 'stable',
+      }),
+      expect.objectContaining({
+        preparePayload: expect.any(Function),
+      }),
+    );
   });
 
   it('executes remote shell commands via bash -lc to avoid /bin/sh pipefail incompatibilities', async () => {

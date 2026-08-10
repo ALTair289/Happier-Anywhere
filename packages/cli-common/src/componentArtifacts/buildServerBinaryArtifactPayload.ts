@@ -6,25 +6,17 @@ import { SERVER_BINARY_TARGETS, resolveCurrentBinaryTarget, resolveExecutableNam
 import { commandExists, compileBunBinary, ensureFileExists, execOrThrow, resolveBunCommand, type RunCommand } from './commands.js';
 import { finalizeRuntimeArtifactPayload } from './finalizeRuntimeArtifactPayload.js';
 import { compilePrismaMigrateBinary } from './compilePrismaMigrateBinary.js';
-import { resolveRequestedServerDbProviders, resolveServerBinarySidecarEntries, type ServerComponent } from './serverSidecars.js';
-
-function resolvePrismaEngineFileNameForTarget(target: BinaryTarget): string {
-  const key = `${target.os}-${target.arch}`;
-  switch (key) {
-    case 'linux-x64':
-      return 'libquery_engine-debian-openssl-3.0.x.so.node';
-    case 'linux-arm64':
-      return 'libquery_engine-linux-arm64-openssl-3.0.x.so.node';
-    case 'darwin-x64':
-      return 'libquery_engine-darwin.dylib.node';
-    case 'darwin-arm64':
-      return 'libquery_engine-darwin-arm64.dylib.node';
-    case 'windows-x64':
-      return 'query_engine-windows.dll.node';
-    default:
-      throw new Error(`[component-artifacts] unsupported Prisma binary target: ${key}`);
-  }
-}
+import {
+  resolveServerBinarySidecarEntries,
+  type ServerArtifactBuildInvocation,
+  type ServerComponent,
+  type UiBuildProfile,
+} from './serverSidecars.js';
+import {
+  assertServerArtifactRuntimeDependencies,
+  resolvePrismaQueryEngineFileNameForTarget,
+  resolveRequestedServerDbProviders,
+} from './serverRuntimePreflight.js';
 
 async function ensureFile(path: string, message: string): Promise<void> {
   const info = await stat(path).catch(() => null);
@@ -43,7 +35,7 @@ async function validateServerPrismaEnginesForTarget({
   buildDbProviders: string;
 }): Promise<void> {
   const targetKey = `${target.os}-${target.arch}`;
-  const engineFileName = resolvePrismaEngineFileNameForTarget(target);
+  const engineFileName = resolvePrismaQueryEngineFileNameForTarget(target);
   await ensureFile(
     join(payloadDir, 'node_modules', '.prisma', 'client', engineFileName),
     `[component-artifacts] missing postgres Prisma query engine for ${targetKey}: node_modules/.prisma/client/${engineFileName}`,
@@ -66,6 +58,8 @@ export async function buildServerBinaryArtifactPayload({
   externals = ['redis'],
   buildDbProviders,
   env = process.env,
+  uiBuildProfile,
+  buildInvocation,
   runCommand = execOrThrow,
   commandProbe = commandExists,
   compileBinary = compileBunBinary,
@@ -80,12 +74,28 @@ export async function buildServerBinaryArtifactPayload({
   externals?: string[];
   buildDbProviders?: string;
   env?: NodeJS.ProcessEnv;
+  uiBuildProfile?: UiBuildProfile;
+  buildInvocation?: ServerArtifactBuildInvocation;
   runCommand?: RunCommand;
   commandProbe?: (cmd: string) => boolean;
   compileBinary?: typeof compileBunBinary;
   compilePrismaBinary?: typeof compilePrismaMigrateBinary;
   copyPath?: (entry: { sourcePath: string; destPath: string; recursive: boolean }, fallbackCopyPath: typeof defaultCopyPath) => Promise<void>;
 }): Promise<{ executableName: string; entrypoint: string; migrationEntrypoint?: string }> {
+  const requestedBuildDbProviders = buildDbProviders
+    ?? env.HAPPIER_BUILD_DB_PROVIDERS
+    ?? env.HAPPY_BUILD_DB_PROVIDERS
+    ?? 'all';
+  const effectiveBuildDbProviders = serverComponent === 'happier-server'
+    ? 'mysql'
+    : String(requestedBuildDbProviders).trim() || 'all';
+  await assertServerArtifactRuntimeDependencies({
+    repoRoot,
+    targets: [target],
+    serverComponent,
+    buildDbProviders: effectiveBuildDbProviders,
+  });
+
   const bunCommand = resolveBunCommand({ commandProbe, processEnv: env });
   if (!bunCommand) {
     throw new Error('[component-artifacts] bun is required to build server binary artifacts');
@@ -105,8 +115,10 @@ export async function buildServerBinaryArtifactPayload({
     repoRoot,
     target,
     serverComponent,
-    buildDbProviders,
+    buildDbProviders: effectiveBuildDbProviders,
     env,
+    uiBuildProfile,
+    buildInvocation,
     runCommand,
     commandProbe,
   });
@@ -163,9 +175,7 @@ export async function buildServerBinaryArtifactPayload({
   await validateServerPrismaEnginesForTarget({
     payloadDir,
     target,
-    buildDbProviders: serverComponent === 'happier-server'
-      ? 'mysql'
-      : String(buildDbProviders ?? 'all').trim() || 'all',
+    buildDbProviders: effectiveBuildDbProviders,
   });
   await finalizeRuntimeArtifactPayload(payloadDir);
 

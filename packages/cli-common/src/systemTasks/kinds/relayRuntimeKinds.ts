@@ -13,6 +13,31 @@ export interface SystemTaskSshConnectionConfig {
   trustedHostKey?: string;
 }
 
+export function normalizeSystemTaskSshTarget(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw new SystemTaskExecutionError('invalid_params', 'Missing ssh target (ssh.target).');
+  }
+  if (/[\p{Cc}\p{Cf}]/u.test(value)) {
+    throw new SystemTaskExecutionError('invalid_params', 'Invalid ssh target (ssh.target): control or format characters are not allowed.');
+  }
+  const target = value.trim();
+  if (!target) {
+    throw new SystemTaskExecutionError('invalid_params', 'Missing ssh target (ssh.target).');
+  }
+  if (target.startsWith('-')) {
+    throw new SystemTaskExecutionError('invalid_params', 'Invalid ssh target (ssh.target): option-like targets are not allowed.');
+  }
+  return target;
+}
+
+export function normalizeSystemTaskSshPort(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65_535) {
+    throw new SystemTaskExecutionError('invalid_params', 'Invalid ssh port (ssh.port): expected an integer from 1 through 65535.');
+  }
+  return value;
+}
+
 export interface RelayRuntimeTaskParams {
   target: Readonly<{ kind: 'local' }> | Readonly<{ kind: 'ssh'; ssh: SystemTaskSshConnectionConfig }>;
   channel?: 'stable' | 'preview' | 'dev';
@@ -206,9 +231,10 @@ export function parseSystemTaskSshConfig(value: unknown): SystemTaskSshConnectio
   }
   const record = value as Record<string, unknown>;
   const auth = record.auth === 'keyfile' ? 'keyfile' : 'agent';
+  const port = normalizeSystemTaskSshPort(record.port);
   return {
-    target: ensureNonEmptyString(record.target, 'ssh.target'),
-    ...(typeof record.port === 'number' ? { port: record.port } : {}),
+    target: normalizeSystemTaskSshTarget(record.target),
+    ...(port !== undefined ? { port } : {}),
     auth,
     ...(typeof record.identityFile === 'string' ? { identityFile: record.identityFile } : {}),
     ...(typeof record.sshConfigFile === 'string' ? { sshConfigFile: record.sshConfigFile } : {}),

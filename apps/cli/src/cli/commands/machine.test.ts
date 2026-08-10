@@ -80,6 +80,8 @@ describe('handleMachineCommand', () => {
         '/tmp/known_hosts',
         '--trusted-host-key',
         'example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA',
+        '--cli-payload',
+        '/opt/happier-v0.2.10-linux-x64',
         '--install-relay-runtime',
         '--relay-runtime-mode',
         'system',
@@ -129,6 +131,9 @@ describe('handleMachineCommand', () => {
           channel: 'preview',
           serviceMode: 'none',
           knownHostsMode: 'app',
+          cliPayload: {
+            rootPath: '/opt/happier-v0.2.10-linux-x64',
+          },
           relayRuntime: {
             enabled: true,
             mode: 'system',

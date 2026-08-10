@@ -19,4 +19,8 @@ export {
   type InteractiveSystemTaskKindMap,
   type InteractiveSystemTaskPromptRequest,
 } from './interactiveTaskKinds.js';
+export {
+  normalizeSystemTaskSshPort,
+  normalizeSystemTaskSshTarget,
+} from './kinds/relayRuntimeKinds.js';
 export * from './kinds/index.js';

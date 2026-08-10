@@ -38,6 +38,11 @@ import {
 } from '../firstPartyRuntime/selfHostServerEnv.js';
 import { buildRelayRuntimeHealthProbeCommand, RELAY_RUNTIME_HEALTH_OK_TOKEN } from './buildRelayRuntimeHealthProbeCommand.js';
 import { buildRemoteRelayRuntimeInstallCommand } from './remoteRelayRuntimeInstallCommand.js';
+import {
+  createRemoteRelaySnapshotBlockedPreflight,
+  inspectLocalRelaySnapshotReadiness,
+  type RelayHostSnapshotPreflightResult,
+} from './relayHostSnapshotPreflight.js';
 
 import type {
   RelayRuntimeStatusSnapshot,
@@ -95,6 +100,7 @@ export type RelayHostEngineDeps = Readonly<{
 export type RelayHostEngine = Readonly<{
   readStatus: (params: RelayRuntimeTaskParams) => Promise<RelayRuntimeStatusSnapshot>;
   installOrUpdate: (params: RelayRuntimeTaskParams) => Promise<Readonly<{ relayUrl: string; mode: 'user' | 'system' }>>;
+  preflightSnapshot: (params: RelayRuntimeTaskParams) => Promise<RelayHostSnapshotPreflightResult>;
   control: (params: RelayRuntimeTaskParams & Readonly<{ action: 'start' | 'stop' | 'restart' | 'uninstall' }>) => Promise<void>;
 }>;
 
@@ -781,10 +787,40 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
       env: buildServiceCommandEnv({ cmd, args, env: process.env }),
     });
     return {
+      started: typeof res.status === 'number',
       status: typeof res.status === 'number' ? res.status : 1,
       stdout: String(res.stdout ?? ''),
       stderr: `${String(res.stderr ?? '')}${res.error instanceof Error ? `\n${res.error.message}` : ''}`.trim(),
     };
+  };
+
+  const resolveLocalRelayWriterProcessCount = (binaryPath: string): number | null => {
+    if (process.platform === 'win32') {
+      const script = [
+        '& {',
+        'param([string]$Target)',
+        '$count = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {',
+        '  $_.ExecutablePath -and ([string]$_.ExecutablePath -ieq $Target)',
+        '}).Count',
+        '[Console]::Out.Write([string]$count)',
+        '}',
+      ].join('\n');
+      const result = runLocalText('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        script,
+        binaryPath,
+      ]);
+      const value = result.stdout.trim();
+      return result.status === 0 && /^\d+$/u.test(value) ? Number.parseInt(value, 10) : null;
+    }
+
+    const escapedBinaryPath = binaryPath.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const result = runLocalText('pgrep', ['-f', `^${escapedBinaryPath}([[:space:]]|$)`]);
+    if (result.status === 1 && !result.stdout.trim()) return 0;
+    if (result.status !== 0) return null;
+    return result.stdout.split(/\r?\n/u).filter((line) => line.trim().length > 0).length;
   };
 
   const resolveSystemdUnitExists = (params: Readonly<{
@@ -862,11 +898,11 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
   const resolveLocalLaunchdServiceState = (params: Readonly<{
     backend: 'launchd-user' | 'launchd-system';
     label: string;
-  }>): Readonly<{ loadState: string; activeState: string; enabledState: string }> => {
+  }>): Readonly<{ queryStarted: boolean; loadState: string; activeState: string; enabledState: string }> => {
     const result = runLocalText('launchctl', ['list', params.label]);
     return result.status === 0
-      ? { loadState: 'loaded', activeState: 'active', enabledState: 'enabled' }
-      : { loadState: 'not-found', activeState: '', enabledState: '' };
+      ? { queryStarted: result.started, loadState: 'loaded', activeState: 'active', enabledState: 'enabled' }
+      : { queryStarted: result.started, loadState: 'not-found', activeState: '', enabledState: '' };
   };
 
   const resolveLocalWindowsScheduledTaskState = (params: Readonly<{
@@ -1315,6 +1351,61 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
         })],
       } : {}),
     };
+  }
+
+  async function preflightLocalSnapshot(parsed: RelayRuntimeTaskParams): Promise<RelayHostSnapshotPreflightResult> {
+    const mode = normalizeMode(parsed.mode);
+    const channel = normalizeChannel(parsed.channel);
+    const defaults = resolveRelayRuntimeDefaults({
+      platform: process.platform,
+      mode,
+      channel,
+      homeDir: homedir(),
+    });
+    const backend = resolveServiceBackend({ platform: process.platform, mode }) as ServiceBackend;
+    const effectiveServiceName = await resolveLocalEffectiveServiceName({
+      backend,
+      channel,
+      defaults,
+    });
+    const serverBinaryName = process.platform === 'win32' ? 'happier-server.exe' : 'happier-server';
+    const installBinaryPath = join(defaults.installRoot, 'bin', serverBinaryName);
+    const relayInstalled = existsSync(join(defaults.installRoot, 'self-host-state.json')) || existsSync(installBinaryPath);
+
+    const serviceDefinitionPath = backend === 'systemd-user' || backend === 'systemd-system'
+      ? resolveSystemdUnitDefinitionPath({ backend, unitName: effectiveServiceName, homeDir: homedir() })
+      : backend === 'launchd-user' || backend === 'launchd-system'
+        ? resolveLaunchdPlistDefinitionPath({ backend, label: effectiveServiceName, homeDir: homedir() })
+        : resolveWindowsWrapperDefinitionPath({ backend, label: effectiveServiceName, homeDir: homedir() });
+
+    const serviceActive = (() => {
+      if (backend === 'systemd-user' || backend === 'systemd-system') {
+        const state = resolveLocalSystemdUnitState({ backend, unitName: effectiveServiceName });
+        return state.loadState === 'not-found' ? null : state.activeState === 'active';
+      }
+      if (backend === 'launchd-user' || backend === 'launchd-system') {
+        const state = resolveLocalLaunchdServiceState({ backend, label: effectiveServiceName });
+        return state.loadState === 'not-found'
+          ? (state.queryStarted && existsSync(serviceDefinitionPath) ? false : null)
+          : state.activeState === 'active';
+      }
+      const state = resolveLocalWindowsScheduledTaskState({ label: effectiveServiceName });
+      return state.loadState === 'not-found' ? null : state.activeState === 'active';
+    })();
+
+    return await inspectLocalRelaySnapshotReadiness({
+      platform: process.platform,
+      channel: formatRelayChannelLabel(channel),
+      mode,
+      relayInstalled,
+      serviceActive,
+      matchingWriterProcessCount: resolveLocalRelayWriterProcessCount(installBinaryPath),
+      configDir: defaults.configDir,
+      homeDir: homedir(),
+      defaultDataDir: defaults.dataDir,
+      installRoot: defaults.installRoot,
+      serviceDefinitionPath,
+    });
   }
 
   async function installLocal(parsed: RelayRuntimeTaskParams): Promise<Readonly<{ relayUrl: string; mode: 'user' | 'system' }>> {
@@ -1958,6 +2049,18 @@ export function createRelayHostEngine(deps: RelayHostEngineDeps): RelayHostEngin
         return await installRemote({ parsed, ssh: parsed.target.ssh });
       }
       return await installLocal(parsed);
+    },
+    async preflightSnapshot(params) {
+      const parsed = params;
+      const mode = normalizeMode(parsed.mode);
+      const channel = normalizeChannel(parsed.channel);
+      if (parsed.target.kind === 'ssh') {
+        return createRemoteRelaySnapshotBlockedPreflight({
+          channel: formatRelayChannelLabel(channel),
+          mode,
+        });
+      }
+      return await preflightLocalSnapshot(parsed);
     },
     async control(params) {
       const parsed = params;

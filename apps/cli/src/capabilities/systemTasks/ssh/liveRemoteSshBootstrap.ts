@@ -27,6 +27,7 @@ import {
   safeBashSingleQuote,
   type SshAuth,
 } from './sshTransport';
+import { prepareLocalCliPayload } from './prepareLocalCliPayload';
 
 type JsonRecord = Record<string, unknown>;
 type RemoteCommandResult = Readonly<{ status: number; stdout: string; stderr: string }>;
@@ -529,6 +530,7 @@ export function createLiveRemoteSshBootstrapTaskKind() {
     },
     installRemoteCli: async ({ parsed, auth, knownHostsMode }) => {
       const knownHostsPath = resolveKnownHostsPath(parsed.ssh, knownHostsMode);
+      const localPayloadRoot = parsed.cliPayload?.rootPath ?? null;
       await installRemoteFirstPartyComponent({
         componentId: 'happier-cli',
         channel: parsed.channel,
@@ -569,6 +571,17 @@ export function createLiveRemoteSshBootstrapTaskKind() {
             remotePath,
           });
         },
+        ...(localPayloadRoot
+          ? {
+              preparePayload: async (payloadParams) => await prepareLocalCliPayload({
+                localPayloadRoot,
+                componentId: payloadParams.componentId,
+                channel: payloadParams.channel,
+                os: payloadParams.os,
+                arch: payloadParams.arch,
+              }),
+            }
+          : {}),
       });
     },
     approveLocalAuthRequest: async ({ publicKey }) => {

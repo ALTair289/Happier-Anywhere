@@ -28,7 +28,12 @@ export async function shouldReuseCliDistSnapshot(params: Readonly<{
     distEntrypointPath: string;
     inputPaths: readonly string[];
     expectedBuildVersion?: string;
+    reuseExistingDist?: boolean;
 }>): Promise<boolean> {
+    if (params.reuseExistingDist === false) {
+        return false;
+    }
+
     let distEntrypointStat;
     try {
         distEntrypointStat = await stat(params.distEntrypointPath);

@@ -22,6 +22,13 @@ export interface RemoteFirstPartyCommandResult {
   stderr: string;
 }
 
+function assertRemoteCommandSucceeded(result: RemoteFirstPartyCommandResult, label: string): void {
+  if (!Number.isSafeInteger(result.status) || result.status !== 0) {
+    const status = Number.isSafeInteger(result.status) ? String(result.status) : 'unknown';
+    throw new Error(`[remote-first-party-install] ${label} failed with status ${status}.`);
+  }
+}
+
 export interface RemoteFirstPartyInstallDeps {
   resolveRemoteReleaseTarget: (params: Readonly<{
     ssh: SystemTaskSshConnectionConfig;
@@ -50,6 +57,9 @@ export interface RemoteFirstPartyInstallDeps {
 
 function sanitizeRemotePathSegment(value: string): string {
   const sanitized = String(value ?? '').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-+/g, '-');
+  if (sanitized === '.' || sanitized === '..') {
+    throw new Error(`[remote-first-party-install] unsafe remote path segment: ${sanitized}`);
+  }
   return sanitized || 'payload';
 }
 
@@ -57,6 +67,14 @@ function quoteShellSingleArg(value: string): string {
   const raw = String(value ?? '');
   if (raw === '') return "''";
   return `'${raw.replaceAll("'", `'\"'\"'`)}'`;
+}
+
+function quoteRemoteShellPath(value: string): string {
+  const raw = String(value ?? '');
+  if (raw === '$HOME' || raw.startsWith('$HOME/')) {
+    return `"${raw}"`;
+  }
+  return quoteShellSingleArg(raw);
 }
 
 function normalizeBootstrapReleaseChannel(raw: unknown): PublicReleaseRingId {
@@ -163,19 +181,32 @@ export async function installRemoteFirstPartyComponent(params: Readonly<{
         componentId: params.componentId,
         channel,
       });
-      const stageParent = `${remoteHomeDir}/bootstrap-staging/${sanitizeRemotePathSegment(params.componentId)}-${sanitizeRemotePathSegment(prepared.versionId)}-${resolvedDeps.now()}`;
+      const installAttemptId = resolvedDeps.now();
+      const versionSegment = sanitizeRemotePathSegment(prepared.versionId);
+      const stageParent = `${remoteHomeDir}/bootstrap-staging/${sanitizeRemotePathSegment(params.componentId)}-${versionSegment}-${installAttemptId}`;
+      const stageParentShellPath = quoteRemoteShellPath(stageParent);
       const stageParentForScp = normalizeScpRemotePath(stageParent);
-      await resolvedDeps.runRemoteText({
+      const stagingResult = await resolvedDeps.runRemoteText({
         ssh: params.ssh,
         knownHostsMode: params.knownHostsMode,
-        remoteCommand: `mkdir -p ${stageParent}`,
+        remoteCommand: `mkdir -p ${stageParentShellPath}`,
       });
-      await resolvedDeps.copyLocalDirectoryToRemote({
-        ssh: params.ssh,
-        knownHostsMode: params.knownHostsMode,
-        localPath: scpReadyPayload.archiveStageRoot,
-        remotePath: stageParentForScp,
-      });
+      assertRemoteCommandSucceeded(stagingResult, 'Remote staging command');
+      try {
+        await resolvedDeps.copyLocalDirectoryToRemote({
+          ssh: params.ssh,
+          knownHostsMode: params.knownHostsMode,
+          localPath: scpReadyPayload.archiveStageRoot,
+          remotePath: stageParentForScp,
+        });
+      } catch (error) {
+        await resolvedDeps.runRemoteText({
+          ssh: params.ssh,
+          knownHostsMode: params.knownHostsMode,
+          remoteCommand: `rm -rf ${stageParentShellPath}`,
+        }).catch(() => null);
+        throw error;
+      }
 
       const remoteArchiveRoot = `${stageParent}/${sanitizeRemotePathSegment(basename(scpReadyPayload.archiveStageRoot))}`;
       const remoteArchivePath = `${remoteArchiveRoot}/${sanitizeRemotePathSegment(scpReadyPayload.archiveFileName)}`;
@@ -183,29 +214,77 @@ export async function installRemoteFirstPartyComponent(params: Readonly<{
       const remotePayloadRoot = `${remoteExtractRoot}/${sanitizeRemotePathSegment(scpReadyPayload.extractedPayloadDirName)}`;
       const installRoot = `${remoteHomeDir}/${variant.installRootName}`;
       const versionsDir = `${installRoot}/versions`;
-      const versionDir = `${versionsDir}/${sanitizeRemotePathSegment(prepared.versionId)}`;
+      const versionDir = `${versionsDir}/${versionSegment}`;
       const currentPath = `${installRoot}/current`;
       const previousPath = `${installRoot}/previous`;
       const binaryPath = `${currentPath}/${component.binaryRelativePath}`;
+      const versionBinaryPath = `${versionDir}/${component.binaryRelativePath}`;
+      const candidateBinaryPath = `$candidate_dir/${component.binaryRelativePath}`;
+      const candidateEntrypointPath = component.nodeEntrypointRelativePath
+        ? `$candidate_dir/${component.nodeEntrypointRelativePath}`
+        : null;
+      const versionEntrypointPath = component.nodeEntrypointRelativePath
+        ? `${versionDir}/${component.nodeEntrypointRelativePath}`
+        : null;
+      const atomicReplaceFlag = target.os === 'darwin' ? '-fh' : '-fT';
+      const remoteArchivePathShell = quoteRemoteShellPath(remoteArchivePath);
+      const remoteExtractRootShell = quoteRemoteShellPath(remoteExtractRoot);
+      const remotePayloadContentsShell = quoteRemoteShellPath(`${remotePayloadRoot}/.`);
+      const versionsDirShell = quoteRemoteShellPath(versionsDir);
+      const versionDirShell = quoteRemoteShellPath(versionDir);
+      const currentPathShell = quoteRemoteShellPath(currentPath);
+      const previousPathShell = quoteRemoteShellPath(previousPath);
+      const binaryPathShell = quoteRemoteShellPath(binaryPath);
+      const versionBinaryPathShell = quoteRemoteShellPath(versionBinaryPath);
+      const versionEntrypointPathShell = versionEntrypointPath ? quoteRemoteShellPath(versionEntrypointPath) : null;
+      const candidateTemplateShell = quoteRemoteShellPath(`${versionsDir}/.${versionSegment}.candidate.XXXXXX`);
+      const currentTemplateShell = quoteRemoteShellPath(`${installRoot}/.current-next.XXXXXX`);
+      const previousTemplateShell = quoteRemoteShellPath(`${installRoot}/.previous-next.XXXXXX`);
 
-      await resolvedDeps.runRemoteText({
+      const installResult = await resolvedDeps.runRemoteText({
         ssh: params.ssh,
         knownHostsMode: params.knownHostsMode,
         remoteCommand: [
           'set -eu',
-          `cleanup() { rm -rf ${stageParent}; }`,
+          'candidate_dir=',
+          'next_current=',
+          'next_previous=',
+          `cleanup() { rm -rf ${stageParentShellPath}; if [ -n "$candidate_dir" ]; then rm -rf "$candidate_dir"; fi; if [ -n "$next_current" ]; then rm -f "$next_current"; fi; if [ -n "$next_previous" ]; then rm -f "$next_previous"; fi; }`,
           'trap cleanup EXIT',
-          `mkdir -p ${versionsDir}`,
-          `rm -rf ${versionDir}`,
-          `rm -rf ${remoteExtractRoot}`,
-          `mkdir -p ${remoteExtractRoot}`,
-          `tar -xf ${remoteArchivePath} -C ${remoteExtractRoot}`,
-          `cp -R ${remotePayloadRoot} ${versionDir}`,
-          `if [ -L ${currentPath} ]; then prev="$(readlink ${currentPath} || true)"; if [ -n "$prev" ]; then ln -sfn "$prev" ${previousPath}; fi; fi`,
-          `ln -sfn ${versionDir} ${currentPath}`,
-          `chmod +x ${binaryPath}`,
+          `mkdir -p ${versionsDirShell}`,
+          `rm -rf ${remoteExtractRootShell}`,
+          `mkdir -p ${remoteExtractRootShell}`,
+          `tar -xf ${remoteArchivePathShell} -C ${remoteExtractRootShell}`,
+          `candidate_dir="$(mktemp -d ${candidateTemplateShell})"`,
+          `cp -R ${remotePayloadContentsShell} "$candidate_dir"`,
+          'test ! -L "$candidate_dir"',
+          'test -d "$candidate_dir"',
+          `test ! -L "${candidateBinaryPath}"`,
+          `test -f "${candidateBinaryPath}"`,
+          ...(candidateEntrypointPath
+            ? [`test ! -L "${candidateEntrypointPath}"`, `test -f "${candidateEntrypointPath}"`]
+            : []),
+          `chmod +x "${candidateBinaryPath}"`,
+          `if [ -L ${versionDirShell} ]; then exit 1; fi`,
+          `if [ -e ${versionDirShell} ]; then test -d ${versionDirShell}; test ! -L ${versionBinaryPathShell}; test -f ${versionBinaryPathShell};${versionEntrypointPathShell ? ` test ! -L ${versionEntrypointPathShell}; test -f ${versionEntrypointPathShell};` : ''} rm -rf "$candidate_dir"; candidate_dir=; else mv "$candidate_dir" ${versionDirShell}; candidate_dir=; fi`,
+          `test ! -L ${versionBinaryPathShell}`,
+          `test -f ${versionBinaryPathShell}`,
+          ...(versionEntrypointPathShell
+            ? [`test ! -L ${versionEntrypointPathShell}`, `test -f ${versionEntrypointPathShell}`]
+            : []),
+          `if [ -e ${currentPathShell} ] && [ ! -L ${currentPathShell} ]; then exit 1; fi`,
+          'prev=',
+          `if [ -L ${currentPathShell} ]; then prev="$(readlink ${currentPathShell} || true)"; fi`,
+          `if [ -n "$prev" ] && [ "$prev" != ${versionDirShell} ]; then if [ -e ${previousPathShell} ] && [ ! -L ${previousPathShell} ]; then exit 1; fi; next_previous="$(mktemp ${previousTemplateShell})"; rm -f "$next_previous"; ln -s "$prev" "$next_previous"; mv ${atomicReplaceFlag} "$next_previous" ${previousPathShell}; next_previous=; fi`,
+          `next_current="$(mktemp ${currentTemplateShell})"`,
+          'rm -f "$next_current"',
+          `ln -s ${versionDirShell} "$next_current"`,
+          `mv ${atomicReplaceFlag} "$next_current" ${currentPathShell}`,
+          'next_current=',
+          `test -x ${binaryPathShell}`,
         ].join('; '),
       });
+      assertRemoteCommandSucceeded(installResult, 'Remote install command');
     } finally {
       await scpReadyPayload.cleanup();
     }

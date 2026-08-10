@@ -182,6 +182,7 @@ export async function buildCliBinaryArtifactPayload({
   commandProbe = commandExists,
   compileBinary = compileBunBinary,
   ensureWorkspacePackagesBuiltByName,
+  reuseExistingDist = true,
 }: {
   repoRoot: string;
   payloadDir: string;
@@ -192,6 +193,7 @@ export async function buildCliBinaryArtifactPayload({
   commandProbe?: (cmd: string) => boolean;
   compileBinary?: typeof compileBunBinary;
   ensureWorkspacePackagesBuiltByName?: EnsureWorkspacePackagesBuiltByName;
+  reuseExistingDist?: boolean;
 }): Promise<{ executableName: string; entrypoint: string }> {
   const bunCommand = resolveBunCommand({ commandProbe });
   if (!bunCommand) {
@@ -238,6 +240,7 @@ export async function buildCliBinaryArtifactPayload({
       if (await shouldReuseCliDistSnapshot({
         distEntrypointPath: entrypoint,
         expectedBuildVersion: releaseVersion,
+        reuseExistingDist,
         inputPaths: [
           join(cliDir, 'src'),
           join(cliDir, 'package.json'),

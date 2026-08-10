@@ -1,16 +1,54 @@
+import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { commandExists, execOrThrow, resolveYarnCommand, type RunCommand } from './commands.js';
 import type { BinaryTarget } from './targets.js';
+import {
+  resolvePrismaSchemaEngineTarget,
+  resolveRequestedServerDbProviders,
+  resolveServerTargetRuntimeRequirements,
+} from './serverRuntimePreflight.js';
+import { resolveUiBuildEnvironment, type UiBuildProfile } from './uiBuildProfile.js';
+
+const UI_WEB_EXPORT_MAX_WORKERS = '2';
+
+declare const SERVER_ARTIFACT_BUILD_INVOCATION_BRAND: unique symbol;
+
+export type ServerArtifactBuildInvocation = Readonly<{
+  [SERVER_ARTIFACT_BUILD_INVOCATION_BRAND]: true;
+}>;
+
+type ServerArtifactBuildInvocationState = {
+  uiGeneration: null | {
+    repoRoot: string;
+    inputFingerprint: string;
+    generation: Promise<string>;
+  };
+};
+
+const serverArtifactBuildInvocationStates = new WeakMap<object, ServerArtifactBuildInvocationState>();
+
+export function createServerArtifactBuildInvocation(): ServerArtifactBuildInvocation {
+  const invocation = Object.freeze({});
+  serverArtifactBuildInvocationStates.set(invocation, { uiGeneration: null });
+  return invocation as ServerArtifactBuildInvocation;
+}
+
+export {
+  SUPPORTED_UI_DEPLOYMENT_RELEASE_RINGS,
+  resolveUiBuildEnvironment,
+} from './uiBuildProfile.js';
+export type { UiBuildProfile } from './uiBuildProfile.js';
 
 export type StageEntry = {
   sourcePath: string;
   targetPath: string;
 };
 
-export type ServerDbProvider = 'sqlite' | 'mysql';
 export type ServerComponent = 'happier-server' | 'happier-server-light';
+export { resolvePrismaSchemaEngineTarget, resolveRequestedServerDbProviders } from './serverRuntimePreflight.js';
+export type { ServerDbProvider } from './serverRuntimePreflight.js';
 
 type PackageJson = {
   name?: string;
@@ -19,35 +57,6 @@ type PackageJson = {
   os?: string[];
   cpu?: string[];
 };
-
-export function resolveRequestedServerDbProviders(buildDbProviders: string): ServerDbProvider[] {
-  const normalized = buildDbProviders.toLowerCase();
-  const requestedProviders: ServerDbProvider[] = normalized === 'all'
-    ? ['sqlite', 'mysql']
-    : normalized
-        .split(',')
-        .map((value) => value.trim())
-        .filter((value): value is ServerDbProvider => value === 'sqlite' || value === 'mysql');
-  return [...new Set(requestedProviders)];
-}
-
-export function resolvePrismaSchemaEngineTarget(target: BinaryTarget): { binaryTarget: string; fileName: string } {
-  const targetKey = `${target.os}-${target.arch}`;
-  switch (targetKey) {
-    case 'linux-x64':
-      return { binaryTarget: 'debian-openssl-3.0.x', fileName: 'schema-engine-debian-openssl-3.0.x' };
-    case 'linux-arm64':
-      return { binaryTarget: 'linux-arm64-openssl-3.0.x', fileName: 'schema-engine-linux-arm64-openssl-3.0.x' };
-    case 'darwin-x64':
-      return { binaryTarget: 'darwin', fileName: 'schema-engine-darwin' };
-    case 'darwin-arm64':
-      return { binaryTarget: 'darwin-arm64', fileName: 'schema-engine-darwin-arm64' };
-    case 'windows-x64':
-      return { binaryTarget: 'windows', fileName: 'schema-engine-windows.exe' };
-    default:
-      throw new Error(`[component-artifacts] unsupported Prisma schema engine target: ${targetKey}`);
-  }
-}
 
 async function ensureUiWebDist({
   repoRoot,
@@ -61,26 +70,25 @@ async function ensureUiWebDist({
   commandProbe: (cmd: string) => boolean;
 }): Promise<string> {
   const uiDistPath = join(repoRoot, 'apps', 'ui', 'dist');
-  runCommand(process.execPath, ['apps/ui/scripts/ensureWorkspacePackagesBuilt.mjs'], {
+  await runCommand(process.execPath, ['apps/ui/scripts/ensureWorkspacePackagesBuilt.mjs'], {
     cwd: repoRoot,
-    env: {
-      ...env,
-      CI: env.CI ?? '1',
-      EXPO_UNSTABLE_WEB_MODAL: '1',
-    },
+    env,
   });
 
   const yarn = resolveYarnCommand({ commandProbe });
-  runCommand(
+  await runCommand(
     yarn.cmd,
-    [...yarn.args, '--cwd', 'apps/ui', '-s', 'expo', 'export', '--platform', 'web', '--output-dir', 'dist'],
+    [
+      ...yarn.args,
+      '--cwd', 'apps/ui',
+      '-s', 'expo', 'export',
+      '--platform', 'web',
+      '--output-dir', 'dist',
+      '--max-workers', UI_WEB_EXPORT_MAX_WORKERS,
+    ],
     {
       cwd: repoRoot,
-      env: {
-        ...env,
-        CI: env.CI ?? '1',
-        EXPO_UNSTABLE_WEB_MODAL: '1',
-      },
+      env,
     },
   );
 
@@ -88,15 +96,65 @@ async function ensureUiWebDist({
   if (!builtInfo?.isDirectory()) {
     throw new Error(`[component-artifacts] missing ui web dist directory: ${uiDistPath}`);
   }
-  runCommand(process.execPath, ['scripts/pipeline/release/precompress-ui-web-assets.mjs', '--dir', 'apps/ui/dist'], {
+  await runCommand(process.execPath, ['scripts/pipeline/release/precompress-ui-web-assets.mjs', '--dir', 'apps/ui/dist'], {
     cwd: repoRoot,
-    env: {
-      ...env,
-      CI: env.CI ?? '1',
-      EXPO_UNSTABLE_WEB_MODAL: '1',
-    },
+    env,
   });
   return uiDistPath;
+}
+
+function fingerprintUiGenerationInputs(
+  env: NodeJS.ProcessEnv,
+  uiBuildProfile: UiBuildProfile | undefined,
+): string {
+  const hash = createHash('sha256');
+  hash.update(JSON.stringify(uiBuildProfile ?? { kind: 'legacy' }));
+  for (const name of Object.keys(env).sort()) {
+    const value = env[name];
+    hash.update('\0');
+    hash.update(name);
+    hash.update('\0');
+    hash.update(value === undefined ? '\0' : `1${value}`);
+  }
+  return hash.digest('hex');
+}
+
+async function ensureInvocationUiWebDist({
+  repoRoot,
+  env,
+  uiBuildProfile,
+  buildInvocation,
+  runCommand,
+  commandProbe,
+}: {
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+  uiBuildProfile?: UiBuildProfile;
+  buildInvocation?: ServerArtifactBuildInvocation;
+  runCommand: RunCommand;
+  commandProbe: (cmd: string) => boolean;
+}): Promise<string> {
+  const uiBuildEnv = await resolveUiBuildEnvironment({ repoRoot, env, uiBuildProfile });
+  if (!buildInvocation) {
+    return await ensureUiWebDist({ repoRoot, env: uiBuildEnv, runCommand, commandProbe });
+  }
+
+  const state = serverArtifactBuildInvocationStates.get(buildInvocation);
+  if (!state) {
+    throw new Error('[component-artifacts] invalid server artifact build invocation');
+  }
+  const inputFingerprint = fingerprintUiGenerationInputs(uiBuildEnv, uiBuildProfile);
+  if (state.uiGeneration) {
+    if (state.uiGeneration.repoRoot !== repoRoot
+      || state.uiGeneration.inputFingerprint !== inputFingerprint) {
+      throw new Error('[component-artifacts] server artifact build invocation UI inputs changed');
+    }
+    return await state.uiGeneration.generation;
+  }
+
+  const generation = ensureUiWebDist({ repoRoot, env: uiBuildEnv, runCommand, commandProbe });
+  state.uiGeneration = { repoRoot, inputFingerprint, generation };
+  return await generation;
 }
 
 function packageNameToNodeModulesPath(packageName: string): string {
@@ -107,7 +165,7 @@ async function readPackageJson(packageJsonPath: string): Promise<PackageJson> {
   const raw = await readFile(packageJsonPath, 'utf8');
   const parsed = JSON.parse(raw) as unknown;
   if (!parsed || typeof parsed !== 'object') {
-    throw new Error(`[component-artifacts] invalid package.json: ${packageJsonPath}`);
+    throw new Error('[component-artifacts] invalid runtime package metadata');
   }
   return parsed as PackageJson;
 }
@@ -124,14 +182,6 @@ function packageSupportsTarget(packageJson: PackageJson, target: BinaryTarget): 
   const npmOs = target.os === 'windows' ? 'win32' : target.os;
   return matchesPackageConstraint(packageJson.os, npmOs)
     && matchesPackageConstraint(packageJson.cpu, target.arch);
-}
-
-function requiredSharpRuntimePackages(target: BinaryTarget): string[] {
-  const platform = target.os === 'windows' ? 'win32' : target.os;
-  const suffix = `${platform}-${target.arch}`;
-  return target.os === 'windows'
-    ? [`@img/sharp-${suffix}`]
-    : [`@img/sharp-${suffix}`, `@img/sharp-libvips-${suffix}`];
 }
 
 async function collectInstalledPackageSidecars({
@@ -153,7 +203,7 @@ async function collectInstalledPackageSidecars({
   const packageJsonInfo = await stat(packageJsonPath).catch(() => null);
   if (!packageJsonInfo?.isFile()) {
     if (optional) return [];
-    throw new Error(`[component-artifacts] missing runtime package ${packageName}: ${packageJsonPath}`);
+    throw new Error(`[component-artifacts] missing runtime package ${packageName}`);
   }
 
   const packageJson = await readPackageJson(packageJsonPath);
@@ -197,6 +247,8 @@ export async function resolveServerBinarySidecarEntries({
   serverComponent = 'happier-server-light',
   buildDbProviders = String(process.env.HAPPIER_BUILD_DB_PROVIDERS ?? process.env.HAPPY_BUILD_DB_PROVIDERS ?? 'all').trim() || 'all',
   env = process.env,
+  uiBuildProfile,
+  buildInvocation,
   runCommand = execOrThrow,
   commandProbe = commandExists,
 }: {
@@ -205,12 +257,14 @@ export async function resolveServerBinarySidecarEntries({
   serverComponent?: ServerComponent;
   buildDbProviders?: string;
   env?: NodeJS.ProcessEnv;
+  uiBuildProfile?: UiBuildProfile;
+  buildInvocation?: ServerArtifactBuildInvocation;
   runCommand?: RunCommand;
   commandProbe?: (cmd: string) => boolean;
 }): Promise<StageEntry[]> {
   const yarn = resolveYarnCommand({ commandProbe });
   const effectiveBuildDbProviders = serverComponent === 'happier-server' ? 'mysql' : buildDbProviders;
-  runCommand(
+  await runCommand(
     yarn.cmd,
     [...yarn.args, '--cwd', 'apps/server', '-s', 'generate:providers'],
     {
@@ -228,7 +282,7 @@ export async function resolveServerBinarySidecarEntries({
       throw new Error('[component-artifacts] a binary target is required for full-server migration artifacts');
     }
     const schemaEngine = resolvePrismaSchemaEngineTarget(target);
-    runCommand(
+    await runCommand(
       process.execPath,
       [
         'apps/server/scripts/runtime/prepareFullRuntimeMigrationEngine.mjs',
@@ -333,9 +387,11 @@ export async function resolveServerBinarySidecarEntries({
     });
   }
 
-  const uiDistPath = await ensureUiWebDist({
+  const uiDistPath = await ensureInvocationUiWebDist({
     repoRoot,
     env,
+    uiBuildProfile,
+    buildInvocation,
     runCommand,
     commandProbe,
   });
@@ -365,21 +421,20 @@ export async function resolveServerBinarySidecarEntries({
   });
 
   if (target) {
-    const sharpVisited = new Set<string>();
-    entries.push(...await collectInstalledPackageSidecars({
-      repoRoot,
-      packageName: 'sharp',
-      target,
-      optional: false,
-      visited: sharpVisited,
-    }));
-    for (const packageName of requiredSharpRuntimePackages(target)) {
+    const requirements = resolveServerTargetRuntimeRequirements(target);
+    const requiredPackageNames = [...new Set([
+      requirements.sharp.javascript.packageName,
+      requirements.sharp.native.packageName,
+      requirements.sharp.libvips.packageName,
+    ])];
+    const visited = new Set<string>();
+    for (const packageName of requiredPackageNames) {
       entries.push(...await collectInstalledPackageSidecars({
         repoRoot,
         packageName,
         target,
         optional: false,
-        visited: sharpVisited,
+        visited,
       }));
     }
   }

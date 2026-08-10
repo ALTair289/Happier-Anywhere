@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
 
+import {
+  normalizeSystemTaskSshPort,
+  normalizeSystemTaskSshTarget,
+} from '@happier-dev/cli-common/systemTasks';
+
 export type SshAuth =
   | Readonly<{ mode: 'agent' }>
   | Readonly<{ mode: 'keyFile'; privateKeyPath: string }>
@@ -78,6 +83,7 @@ function buildSshTransportArgs(params: Readonly<{
   serverAliveCountMax: number;
   portFlag: '-p' | '-P';
 }>): string[] {
+  const port = normalizeSystemTaskSshPort(params.port);
   const args: string[] = [];
   if (params.sshConfigFile) {
     args.unshift('-F', params.sshConfigFile);
@@ -108,8 +114,8 @@ function buildSshTransportArgs(params: Readonly<{
     args.push('-o', 'NumberOfPasswordPrompts=1');
     args.push('-o', 'PreferredAuthentications=password,keyboard-interactive');
   }
-  if (typeof params.port === 'number' && Number.isFinite(params.port) && params.port > 0) {
-    args.push(params.portFlag, String(Math.floor(params.port)));
+  if (port !== undefined) {
+    args.push(params.portFlag, String(port));
   }
 
   return args;
@@ -132,6 +138,7 @@ export function buildSshCommand(params: Readonly<{
   args: string[];
   redactedLabel: string;
 }> {
+  const target = normalizeSystemTaskSshTarget(params.target);
   const args = buildSshTransportArgs({
     knownHostsPath: params.knownHostsPath,
     sshConfigFile: params.sshConfigFile,
@@ -144,7 +151,7 @@ export function buildSshCommand(params: Readonly<{
     portFlag: '-p',
   });
 
-  args.push(params.target, ...params.remoteCommand);
+  args.push(target, ...params.remoteCommand);
 
   const commandLabel = params.remoteCommand.length >= 2
     ? `${params.remoteCommand[0]} ${params.remoteCommand[1]} …`
@@ -153,7 +160,7 @@ export function buildSshCommand(params: Readonly<{
   return {
     command: params.sshBin,
     args,
-    redactedLabel: `${params.sshBin} ${params.target} ${commandLabel}`,
+    redactedLabel: `${params.sshBin} ${target} ${commandLabel}`,
   };
 }
 
@@ -175,6 +182,7 @@ export function buildScpCommand(params: Readonly<{
   args: string[];
   redactedLabel: string;
 }> {
+  const target = normalizeSystemTaskSshTarget(params.target);
   const args = buildSshTransportArgs({
     knownHostsPath: params.knownHostsPath,
     sshConfigFile: params.sshConfigFile,
@@ -187,12 +195,12 @@ export function buildScpCommand(params: Readonly<{
     portFlag: '-P',
   });
 
-  args.push('-r', params.localPath, `${params.target}:${params.remotePath}`);
+  args.push('-r', params.localPath, `${target}:${params.remotePath}`);
 
   return {
     command: params.scpBin,
     args,
-    redactedLabel: `${params.scpBin} ${params.localPath} ${params.target}:…`,
+    redactedLabel: `${params.scpBin} ${params.localPath} ${target}:…`,
   };
 }
 

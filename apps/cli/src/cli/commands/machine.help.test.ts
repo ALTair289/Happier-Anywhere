@@ -21,6 +21,8 @@ describe('happier machine --help', () => {
       const output = logSpy.mock.calls.flat().join('\n');
       expect(output).toContain('happier machine');
       expect(output).toContain('happier machine setup');
+      expect(output).toContain('--cli-payload <extracted-root>');
+      expect(output).toContain('local path on the Controller');
     } finally {
       logSpy.mockRestore();
     }

@@ -30,6 +30,9 @@ export interface RemoteBootstrapMachineParams {
   channel?: 'stable' | 'preview' | 'dev';
   serviceMode?: 'user' | 'none';
   knownHostsMode?: 'app' | 'system';
+  cliPayload?: Readonly<{
+    rootPath: string;
+  }>;
   relayRuntime?: Readonly<{
     enabled: boolean;
     mode?: 'user' | 'system';
@@ -314,6 +317,11 @@ export function parseRemoteBootstrapMachineParams(params: unknown): RemoteBootst
     channel: value.channel === 'preview' || value.channel === 'dev' ? value.channel : 'stable',
     serviceMode: value.serviceMode === 'none' ? 'none' : 'user',
     knownHostsMode: value.knownHostsMode === 'system' ? 'system' : 'app',
+    ...(value.cliPayload !== undefined
+      ? {
+          cliPayload: parseRemoteCliPayload(value.cliPayload),
+        }
+      : {}),
     ...(relayRuntime
       ? {
           relayRuntime: {
@@ -340,8 +348,27 @@ export function parseRemoteBootstrapMachineParams(params: unknown): RemoteBootst
   };
 }
 
+function parseRemoteCliPayload(value: unknown): NonNullable<RemoteBootstrapMachineParams['cliPayload']> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new SystemTaskExecutionError('invalid_params', 'Invalid local CLI payload config.');
+  }
+  return {
+    rootPath: ensureNonEmptyString(
+      (value as Record<string, unknown>).rootPath,
+      'cliPayload.rootPath',
+    ),
+  };
+}
+
 export function redactRemoteBootstrapPayload(params: Record<string, unknown>): SystemTaskJsonObject {
-  return redactSensitiveSystemTaskJsonValue(params) as SystemTaskJsonObject;
+  const redacted = redactSensitiveSystemTaskJsonValue(params) as SystemTaskJsonObject;
+  if (!Object.prototype.hasOwnProperty.call(params, 'cliPayload')) {
+    return redacted;
+  }
+  return {
+    ...redacted,
+    cliPayload: { provided: true },
+  };
 }
 
 function normalizeRemoteSshAuth(ssh: SystemTaskSshConnectionConfig): RemoteSshAuth {

@@ -1,7 +1,7 @@
-import { execFile } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile, spawnSync } from 'node:child_process';
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { describe, expect, it } from 'vitest';
@@ -9,6 +9,12 @@ import { describe, expect, it } from 'vitest';
 import { installRemoteFirstPartyComponent } from './remoteFirstPartyPayloadInstaller.js';
 
 const execFileAsync = promisify(execFile);
+
+function expectPosixShellSyntax(command: string): void {
+  const result = spawnSync('sh', ['-n', '-c', command], { encoding: 'utf8', windowsHide: true });
+  if (result.error && (result.error as NodeJS.ErrnoException).code === 'ENOENT') return;
+  expect(result.status, result.stderr || 'remote installer command must parse as POSIX sh').toBe(0);
+}
 
 async function createPayloadRootFixture(): Promise<Readonly<{
   payloadRoot: string;
@@ -85,13 +91,209 @@ describe('installRemoteFirstPartyComponent', () => {
       expect(copiedRemotePaths).toEqual([
         '.happier/bootstrap-staging/happier-cli-preview-1-123',
       ]);
-      expect(remoteTextCommands.some((command) => command.includes('mkdir -p $HOME/.happier'))).toBe(true);
+      expect(remoteTextCommands.some((command) => command.includes('mkdir -p "$HOME/.happier'))).toBe(true);
+      expect(remoteTextCommands.some((command) => command.includes('mkdir -p $HOME/.happier'))).toBe(false);
       expect(remoteTextCommands.some((command) => command.includes('/versions/'))).toBe(true);
       expect(remoteTextCommands.some((command) => command.includes('tar -xf'))).toBe(true);
-      expect(remoteTextCommands.some((command) => command.includes('ln -sfn'))).toBe(true);
+      expect(remoteTextCommands.some((command) => command.includes('mv -fT "$next_current"'))).toBe(true);
       expect(remoteTextCommands.some((command) => command.includes('chmod +x'))).toBe(true);
       expect(remoteTextCommands.some((command) => command.includes('bash $HOME/.happier'))).toBe(false);
       expect(remoteTextCommands.some((command) => command.includes('pipefail'))).toBe(false);
+
+      const installCommand = remoteTextCommands.find((command) => command.includes('tar -xf'))!;
+      expect(installCommand).toContain('.candidate.XXXXXX');
+      expect(installCommand).not.toContain('rm -rf $HOME/.happier/cli-preview/versions/preview-1');
+      expect(installCommand.indexOf('cp -R')).toBeLessThan(installCommand.indexOf('mv -fT "$next_current"'));
+      expect(installCommand).toContain('test ! -L "$candidate_dir/happier"');
+      expect(installCommand).toContain('test -f "$candidate_dir/happier"');
+      expect(installCommand).toContain('mv -fT "$next_previous" "$HOME/.happier/cli-preview/previous"');
+      expect(installCommand).toContain('trap cleanup EXIT');
+      expect(installCommand).toContain('else mv "$candidate_dir" "$HOME/.happier/cli-preview/versions/preview-1"; candidate_dir=; fi');
+      expectPosixShellSyntax(installCommand);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('best-effort removes remote staging when SCP fails before the install trap exists', async () => {
+    const remoteTextCommands: string[] = [];
+    const fixture = await createPayloadRootFixture();
+    let preparedCleanupCount = 0;
+    try {
+      await expect(installRemoteFirstPartyComponent(
+        {
+          componentId: 'happier-cli',
+          channel: 'preview',
+          ssh: { target: 'dev@example.test', auth: 'agent' },
+        },
+        {
+          resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+          runRemoteText: async ({ remoteCommand }) => {
+            remoteTextCommands.push(remoteCommand);
+            return { status: 0, stdout: '', stderr: '' };
+          },
+          copyLocalDirectoryToRemote: async () => {
+            throw new Error('injected SCP failure');
+          },
+          preparePayload: async () => ({
+            componentId: 'happier-cli',
+            channel: 'preview',
+            versionId: 'scp-failure',
+            payloadRoot: fixture.payloadRoot,
+            source: null,
+            cleanup: async () => {
+              preparedCleanupCount += 1;
+            },
+          }),
+          now: () => 123,
+        },
+      )).rejects.toThrow(/injected SCP failure/i);
+
+      expect(remoteTextCommands).toEqual([
+        'mkdir -p "$HOME/.happier/bootstrap-staging/happier-cli-scp-failure-123"',
+        'rm -rf "$HOME/.happier/bootstrap-staging/happier-cli-scp-failure-123"',
+      ]);
+      expect(preparedCleanupCount).toBe(1);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps a same-version current target intact when an injected archive failure happens before atomic activation',
+    async () => {
+      const fixture = await createPayloadRootFixture();
+      const remoteHome = await mkdtemp(join(tmpdir(), 'happier-remote-first-party-home-'));
+      const installRoot = join(remoteHome, '.happier', 'cli-preview');
+      const versionDir = join(installRoot, 'versions', 'same-version');
+      const currentPath = join(installRoot, 'current');
+      await mkdir(versionDir, { recursive: true });
+      await writeFile(join(versionDir, 'happier'), 'existing-safe-binary', 'utf8');
+      await symlink(versionDir, currentPath);
+
+      try {
+        await expect(installRemoteFirstPartyComponent(
+          {
+            componentId: 'happier-cli',
+            channel: 'preview',
+            ssh: { target: 'dev@example.test', auth: 'agent' },
+          },
+          {
+            resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+            runRemoteText: async ({ remoteCommand }) => {
+              try {
+                await execFileAsync('/bin/sh', ['-c', remoteCommand], {
+                  env: { ...process.env, HOME: remoteHome },
+                });
+                return { status: 0, stdout: '', stderr: '' };
+              } catch (error) {
+                throw new Error('injected remote archive failure', { cause: error });
+              }
+            },
+            copyLocalDirectoryToRemote: async ({ localPath, remotePath }) => {
+              const remoteParent = join(remoteHome, remotePath);
+              const copiedRoot = join(remoteParent, basename(localPath));
+              await mkdir(remoteParent, { recursive: true });
+              await cp(localPath, copiedRoot, { recursive: true });
+              const archiveName = (await readdir(copiedRoot)).find((name) => name.endsWith('.tar'))!;
+              await writeFile(join(copiedRoot, archiveName), 'not-a-tar', 'utf8');
+            },
+            preparePayload: async () => ({
+              componentId: 'happier-cli',
+              channel: 'preview',
+              versionId: 'same-version',
+              payloadRoot: fixture.payloadRoot,
+              source: null,
+              cleanup: async () => undefined,
+            }),
+            now: () => 123,
+          },
+        )).rejects.toThrow(/injected remote archive failure/i);
+
+        expect(await readlink(currentPath)).toBe(versionDir);
+        expect(await readFile(join(versionDir, 'happier'), 'utf8')).toBe('existing-safe-binary');
+      } finally {
+        await fixture.cleanup();
+        await rm(remoteHome, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('uses the BSD no-dereference move form for atomic current replacement on Darwin', async () => {
+    const fixture = await createPayloadRootFixture();
+    const remoteTextCommands: string[] = [];
+    try {
+      await installRemoteFirstPartyComponent(
+        {
+          componentId: 'happier-server',
+          channel: 'stable',
+          ssh: { target: 'dev@example.test', auth: 'agent' },
+        },
+        {
+          resolveRemoteReleaseTarget: async () => ({ os: 'darwin', arch: 'arm64' }),
+          runRemoteText: async ({ remoteCommand }) => {
+            remoteTextCommands.push(remoteCommand);
+            return { status: 0, stdout: '', stderr: '' };
+          },
+          copyLocalDirectoryToRemote: async () => undefined,
+          preparePayload: async () => ({
+            componentId: 'happier-server',
+            channel: 'stable',
+            versionId: 'darwin-atomic',
+            payloadRoot: fixture.payloadRoot,
+            source: null,
+            cleanup: async () => undefined,
+          }),
+          now: () => 123,
+        },
+      );
+
+      const installCommand = remoteTextCommands.find((command) => command.includes('tar -xf'))!;
+      expect(installCommand).toContain('mv -fh "$next_current"');
+      expect(installCommand).toContain('mv -fh "$next_previous" "$HOME/.happier/server/previous"');
+      expect(installCommand).not.toContain('mv -fT "$next_current"');
+      expectPosixShellSyntax(installCommand);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('fails closed on an injected non-zero remote install status and still cleans local payload state', async () => {
+    const fixture = await createPayloadRootFixture();
+    let remoteCallCount = 0;
+    let preparedCleanupCount = 0;
+    try {
+      await expect(installRemoteFirstPartyComponent(
+        {
+          componentId: 'happier-cli',
+          channel: 'preview',
+          ssh: { target: 'dev@example.test', auth: 'agent' },
+        },
+        {
+          resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+          runRemoteText: async () => {
+            remoteCallCount += 1;
+            return remoteCallCount === 1
+              ? { status: 0, stdout: '', stderr: '' }
+              : { status: 23, stdout: 'must-not-be-surfaced', stderr: 'must-not-be-surfaced' };
+          },
+          copyLocalDirectoryToRemote: async () => undefined,
+          preparePayload: async () => ({
+            componentId: 'happier-cli',
+            channel: 'preview',
+            versionId: 'injected-failure',
+            payloadRoot: fixture.payloadRoot,
+            source: null,
+            cleanup: async () => {
+              preparedCleanupCount += 1;
+            },
+          }),
+          now: () => 123,
+        },
+      )).rejects.toThrow(/remote install command failed.*23/i);
+
+      expect(remoteCallCount).toBe(2);
+      expect(preparedCleanupCount).toBe(1);
     } finally {
       await fixture.cleanup();
     }
@@ -168,7 +370,42 @@ describe('installRemoteFirstPartyComponent', () => {
     }
   });
 
-  it('materializes symlinked payload entries before copying them over scp', async () => {
+  it.each(['.', '..'])('rejects the reserved remote version path segment %s before staging', async (versionId) => {
+    const fixture = await createPayloadRootFixture();
+    let remoteCallCount = 0;
+    try {
+      await expect(installRemoteFirstPartyComponent(
+        {
+          componentId: 'happier-cli',
+          channel: 'preview',
+          ssh: { target: 'dev@example.test', auth: 'agent' },
+        },
+        {
+          resolveRemoteReleaseTarget: async () => ({ os: 'linux', arch: 'x64' }),
+          runRemoteText: async () => {
+            remoteCallCount += 1;
+            return { status: 0, stdout: '', stderr: '' };
+          },
+          copyLocalDirectoryToRemote: async () => undefined,
+          preparePayload: async () => ({
+            componentId: 'happier-cli',
+            channel: 'preview',
+            versionId,
+            payloadRoot: fixture.payloadRoot,
+            source: null,
+            cleanup: async () => undefined,
+          }),
+          now: () => 123,
+        },
+      )).rejects.toThrow(/unsafe remote path segment/i);
+
+      expect(remoteCallCount).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('materializes symlinked payload entries before copying them over scp', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-remote-first-party-payload-'));
     const capturedLocalPaths: string[] = [];
 
@@ -232,7 +469,7 @@ describe('installRemoteFirstPartyComponent', () => {
     }
   });
 
-  it('drops dangling payload symlinks before copying them over scp', async () => {
+  it.skipIf(process.platform === 'win32')('drops dangling payload symlinks before copying them over scp', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'happier-remote-first-party-dangling-'));
     const capturedLocalPaths: string[] = [];
 

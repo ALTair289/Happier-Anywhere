@@ -1,3 +1,8 @@
+import {
+  normalizeSystemTaskSshPort,
+  normalizeSystemTaskSshTarget,
+} from '@happier-dev/cli-common/systemTasks';
+
 export interface SshAuthConfig {
   kind: 'agent' | 'keyfile';
   identityFile?: string;
@@ -50,6 +55,7 @@ function resolveCommonSshArgs(params: Readonly<{
   connectTimeoutSeconds?: number;
   portFlag: '-p' | '-P';
 }>): string[] {
+  const port = normalizeSystemTaskSshPort(params.port);
   const auth = params.auth ?? { kind: 'agent' };
   if (auth.kind === 'keyfile' && !String(auth.identityFile ?? '').trim()) {
     throw new Error('identityFile is required for keyfile auth');
@@ -60,7 +66,7 @@ function resolveCommonSshArgs(params: Readonly<{
     : 10;
 
   const args = [
-    ...(params.port ? [params.portFlag, String(Math.floor(params.port))] : []),
+    ...(port !== undefined ? [params.portFlag, String(port)] : []),
     '-o',
     'BatchMode=yes',
     '-o',
@@ -99,10 +105,7 @@ function resolveCommonSshArgs(params: Readonly<{
 }
 
 export function buildSshCommand(params: BuildSshCommandParams): SshCommandInvocation {
-  const target = String(params.target ?? '').trim();
-  if (!target) {
-    throw new Error('ssh target is required');
-  }
+  const target = normalizeSystemTaskSshTarget(params.target);
   const args = resolveCommonSshArgs({
     port: params.port,
     auth: params.auth,
@@ -120,12 +123,9 @@ export function buildSshCommand(params: BuildSshCommandParams): SshCommandInvoca
 }
 
 export function buildScpCommand(params: BuildScpCommandParams): ScpCommandInvocation {
-  const target = String(params.target ?? '').trim();
+  const target = normalizeSystemTaskSshTarget(params.target);
   const remotePath = String(params.remotePath ?? '').trim();
   const localPath = String(params.localPath ?? '').trim();
-  if (!target) {
-    throw new Error('ssh target is required');
-  }
   if (!remotePath) {
     throw new Error('remote path is required');
   }

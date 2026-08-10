@@ -22,6 +22,8 @@ import {
   installRemoteFirstPartyComponent,
   normalizeRemoteReleaseArch,
   normalizeRemoteReleaseOs,
+  normalizeSystemTaskSshPort,
+  normalizeSystemTaskSshTarget,
   type RelayRuntimeStatusSnapshot,
   type RelayRuntimeTaskParams,
   type SystemTaskSshConnectionConfig,
@@ -286,10 +288,12 @@ function buildSshArgs(params: Readonly<{
   knownHostsMode: 'app' | 'system';
   remoteCommand: string;
 }>): string[] {
+  const target = normalizeSystemTaskSshTarget(params.ssh.target);
+  const port = normalizeSystemTaskSshPort(params.ssh.port);
   const args: string[] = [];
 
-  if (typeof params.ssh.port === 'number') {
-    args.push('-p', String(Math.floor(params.ssh.port)));
+  if (port !== undefined) {
+    args.push('-p', String(port));
   }
   if (params.ssh.sshConfigFile) {
     args.push('-F', params.ssh.sshConfigFile);
@@ -332,7 +336,7 @@ function buildSshArgs(params: Readonly<{
     args.push('-i', params.ssh.identityFile);
   }
 
-  args.push(params.ssh.target, 'bash', '-lc', quoteForRemoteBash(params.remoteCommand));
+  args.push(target, 'bash', '-lc', quoteForRemoteBash(params.remoteCommand));
   return args;
 }
 
@@ -342,10 +346,12 @@ function buildScpArgs(params: Readonly<{
   localPath: string;
   remotePath: string;
 }>): string[] {
+  const target = normalizeSystemTaskSshTarget(params.ssh.target);
+  const port = normalizeSystemTaskSshPort(params.ssh.port);
   const args: string[] = [];
 
-  if (typeof params.ssh.port === 'number') {
-    args.push('-P', String(Math.floor(params.ssh.port)));
+  if (port !== undefined) {
+    args.push('-P', String(port));
   }
   if (params.ssh.sshConfigFile) {
     args.push('-F', params.ssh.sshConfigFile);
@@ -388,7 +394,7 @@ function buildScpArgs(params: Readonly<{
     args.push('-i', params.ssh.identityFile);
   }
 
-  args.push('-r', params.localPath, `${params.ssh.target}:${params.remotePath}`);
+  args.push('-r', params.localPath, `${target}:${params.remotePath}`);
   return args;
 }
 
@@ -495,7 +501,7 @@ export async function runRelayHostSubcommand(args: string[]): Promise<void> {
   const json = wantsJson(args);
   const op = String(args[0] ?? '').trim();
   if (!op) {
-    throw new Error('Usage: happier relay host <install|status|start|stop|restart|uninstall> [--ssh <user@host>] [--mode user|system] [--channel stable|preview|dev] [--env KEY=VALUE]... [--server-binary <path>] [--lan | --expose | --host <ip>] [--preserve-active-server] [--yes] [--json]');
+    throw new Error('Usage: happier relay host <install|status|start|stop|restart|uninstall|snapshot> [--preflight] [--ssh <user@host>] [--mode user|system] [--channel stable|preview|dev] [--env KEY=VALUE]... [--server-binary <path>] [--lan | --expose | --host <ip>] [--preserve-active-server] [--yes] [--json]');
   }
 
   let rest = args.slice(1);
@@ -531,6 +537,8 @@ export async function runRelayHostSubcommand(args: string[]): Promise<void> {
   rest = hostFlag.rest;
   const yesFlag = takeFlag(rest, '--yes');
   rest = yesFlag.rest;
+  const preflightFlag = takeFlag(rest, '--preflight');
+  rest = preflightFlag.rest;
   const jsonFlag = takeFlag(rest, '--json');
   rest = jsonFlag.rest;
 
@@ -548,25 +556,38 @@ export async function runRelayHostSubcommand(args: string[]): Promise<void> {
   if (bindFlagCount > 0 && op !== 'install') {
     throw createInvalidArgumentsError('--lan, --expose, and --host can only be used with the install subcommand.');
   }
+  if (preflightFlag.present && op !== 'snapshot') {
+    throw createInvalidArgumentsError('--preflight can only be used with the snapshot subcommand.');
+  }
 
   const channel = normalizeChannel(channelFlag.value);
   const mode = normalizeMode(modeFlag.value);
   const preserveActiveServer = preserveActiveServerFlag.present;
 
-  const ssh: SystemTaskSshConnectionConfig | null = sshFlag.value
-    ? {
-        target: sshFlag.value.trim(),
+  let ssh: SystemTaskSshConnectionConfig | null = null;
+  if (sshFlag.value !== null) {
+    try {
+      const normalizedPort = normalizeSystemTaskSshPort(
+        port.value === null ? undefined : Number(port.value),
+      );
+      ssh = {
+        target: normalizeSystemTaskSshTarget(sshFlag.value),
         auth: identityFile.value?.trim() ? 'keyfile' : 'agent',
         ...(identityFile.value?.trim() ? { identityFile: identityFile.value.trim() } : {}),
         ...(sshConfigFile.value?.trim() ? { sshConfigFile: sshConfigFile.value.trim() } : {}),
         ...(knownHostsPath.value?.trim() ? { knownHostsPath: knownHostsPath.value.trim() } : {}),
         ...(trustedHostKey.value?.trim() ? { trustedHostKey: trustedHostKey.value.trim() } : {}),
-        ...(port.value && Number.isFinite(Number(port.value)) ? { port: Number(port.value) } : {}),
-      }
-    : null;
-
-  if (ssh && !ssh.target) {
-    throw createInvalidArgumentsError('Missing required flag: --ssh <user@host>');
+        ...(normalizedPort !== undefined ? { port: normalizedPort } : {}),
+      };
+    } catch (error) {
+      throw createInvalidArgumentsError(error instanceof Error ? error.message : 'Invalid SSH arguments.');
+    }
+  } else if (port.value !== null
+    || identityFile.value !== null
+    || sshConfigFile.value !== null
+    || knownHostsPath.value !== null
+    || trustedHostKey.value !== null) {
+    throw createInvalidArgumentsError('SSH connection flags require --ssh <user@host>.');
   }
   if (serverBinaryFlag.value && selfHostServerBinaryFlag.value) {
     throw createInvalidArgumentsError('Do not combine --server-binary with --self-host-server-binary.');
@@ -579,6 +600,48 @@ export async function runRelayHostSubcommand(args: string[]): Promise<void> {
   const env = envFlag.values.length > 0 ? parseEnvOverrides(envFlag.values) : null;
   const selfHostRelayBinaryOverride = String(serverBinaryFlag.value ?? selfHostServerBinaryFlag.value ?? '').trim() || null;
   const localEngine = createLocalRelayHostEngine({});
+
+  if (op === 'snapshot') {
+    const ignoredSnapshotFlags = [
+      envFlag.values.length > 0 ? '--env' : null,
+      serverBinaryFlag.value ? '--server-binary' : null,
+      selfHostServerBinaryFlag.value ? '--self-host-server-binary' : null,
+      preserveActiveServerFlag.present ? '--preserve-active-server' : null,
+      yesFlag.present ? '--yes' : null,
+    ].filter((value): value is string => value !== null);
+    if (ignoredSnapshotFlags.length > 0) {
+      throw createInvalidArgumentsError(
+        `${ignoredSnapshotFlags.join(', ')} cannot be used with the snapshot subcommand.`,
+      );
+    }
+    if (!preflightFlag.present) {
+      throw createInvalidArgumentsError(
+        'Relay snapshot creation is BLOCKED until an ACL-preserving backend is verified; use snapshot --preflight to inspect readiness.',
+      );
+    }
+    const snapshotPreflight = await localEngine.preflightSnapshot(taskParams);
+    const currentExitCode = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = Math.max(currentExitCode, 1);
+    if (json) {
+      printJsonEnvelope({
+        ok: false,
+        kind: 'relay_host_snapshot_preflight',
+        error: {
+          code: 'snapshot_blocked',
+          details: snapshotPreflight,
+        },
+      });
+      return;
+    }
+
+    console.log(chalk.yellow('Relay host snapshot: BLOCKED'));
+    console.log(chalk.gray(`  writer stopped: ${snapshotPreflight.writerStopped ? 'yes' : 'no'}`));
+    console.log(chalk.gray(`  source state ready: ${snapshotPreflight.sourceStateReady ? 'yes' : 'no'}`));
+    for (const blocker of snapshotPreflight.blockers) {
+      console.log(chalk.yellow(`  blocker: ${blocker}`));
+    }
+    return;
+  }
 
   if (op === 'status') {
     const engine = ssh

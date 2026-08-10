@@ -5,6 +5,8 @@ export {
   createRelayRuntimeStopTaskKind,
   parseRelayRuntimeTaskParams,
   parseSystemTaskSshConfig,
+  normalizeSystemTaskSshPort,
+  normalizeSystemTaskSshTarget,
   type RelayRuntimeKindDeps,
   type RelayRuntimeStatusSnapshot,
   type RelayRuntimeTaskParams,
