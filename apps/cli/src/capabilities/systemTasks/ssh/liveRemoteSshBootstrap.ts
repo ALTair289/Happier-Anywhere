@@ -65,41 +65,53 @@ function writeKnownHostsText(knownHostsPath: string | undefined, text: string): 
   writeFileSync(knownHostsPath, text ? `${text}\n` : '', 'utf8');
 }
 
-function parseSshTarget(target: string): Readonly<{ host: string; port?: number }> {
+function parseSshTarget(target: string): Readonly<{ target: string; host: string; port?: number }> {
   const raw = String(target ?? '').trim();
-  const withoutUser = raw.includes('@') ? raw.slice(raw.lastIndexOf('@') + 1) : raw;
+  const userSeparatorIndex = raw.lastIndexOf('@');
+  const userPrefix = userSeparatorIndex >= 0 ? raw.slice(0, userSeparatorIndex + 1) : '';
+  const withoutUser = userSeparatorIndex >= 0 ? raw.slice(userSeparatorIndex + 1) : raw;
   const bracketMatch = /^\[(.+)\](?::(\d+))?$/u.exec(withoutUser);
   if (bracketMatch) {
     return {
+      target: `${userPrefix}[${bracketMatch[1]}]`,
       host: bracketMatch[1],
       ...(bracketMatch[2] ? { port: Number(bracketMatch[2]) } : {}),
     };
   }
   const colonParts = withoutUser.split(':');
   if (colonParts.length === 2 && /^\d+$/u.test(colonParts[1] ?? '')) {
+    const host = colonParts[0] ?? withoutUser;
     return {
-      host: colonParts[0] ?? withoutUser,
+      target: `${userPrefix}${host}`,
+      host,
       port: Number(colonParts[1]),
     };
   }
-  return { host: withoutUser };
+  return { target: raw, host: withoutUser };
 }
 
 function resolveSshEndpoint(params: Readonly<{
   ssh: SystemTaskSshConnectionConfig;
-}>): Readonly<{ host: string; port?: number }> {
+}>): Readonly<{
+  ssh: SystemTaskSshConnectionConfig;
+  keyscanHost: string;
+}> {
   const parsedTarget = parseSshTarget(params.ssh.target);
+  const { port: _inputPort, ...sshWithoutPort } = params.ssh;
+  const buildEndpoint = (keyscanHost: string, port?: number) => ({
+    ssh: {
+      ...sshWithoutPort,
+      target: parsedTarget.target,
+      ...(typeof port === 'number' ? { port } : {}),
+    },
+    keyscanHost,
+  });
   const sshConfigFile = String(params.ssh.sshConfigFile ?? '').trim();
   if (!sshConfigFile) {
-    return {
-      host: parsedTarget.host,
-      ...(typeof params.ssh.port === 'number'
-        ? { port: params.ssh.port }
-        : (typeof parsedTarget.port === 'number' ? { port: parsedTarget.port } : {})),
-    };
+    return buildEndpoint(parsedTarget.host, params.ssh.port ?? parsedTarget.port);
   }
 
-  const result = spawnSync('ssh', ['-G', '-F', sshConfigFile, params.ssh.target], {
+  const result = spawnSync('ssh', ['-G', '-F', sshConfigFile, parsedTarget.target], {
     encoding: 'utf8',
     windowsHide: true,
   });
@@ -125,14 +137,12 @@ function resolveSshEndpoint(params: Readonly<{
   }
 
   const resolvedPort = Number(values.get('port') ?? '');
-  return {
-    host: values.get('hostname')?.trim() || parsedTarget.host,
-    ...(typeof params.ssh.port === 'number'
-      ? { port: params.ssh.port }
-      : Number.isFinite(resolvedPort) && resolvedPort > 0
-        ? { port: Math.floor(resolvedPort) }
-        : (typeof parsedTarget.port === 'number' ? { port: parsedTarget.port } : {})),
-  };
+  const finalPort = typeof params.ssh.port === 'number'
+    ? params.ssh.port
+    : Number.isFinite(resolvedPort) && resolvedPort > 0
+      ? Math.floor(resolvedPort)
+      : parsedTarget.port;
+  return buildEndpoint(values.get('hostname')?.trim() || parsedTarget.host, finalPort);
 }
 
 function runCommandSync(params: Readonly<{
@@ -472,24 +482,32 @@ async function installRemoteRelayRuntimeUsingSharedEngine(params: Readonly<{
 }
 
 export function createLiveRemoteSshBootstrapTaskKind() {
+  const endpointCache = new WeakMap<SystemTaskSshConnectionConfig, ReturnType<typeof resolveSshEndpoint>>();
+  const resolveEndpoint = (ssh: SystemTaskSshConnectionConfig): ReturnType<typeof resolveSshEndpoint> => {
+    const cached = endpointCache.get(ssh);
+    if (cached) return cached;
+    const resolved = resolveSshEndpoint({ ssh });
+    endpointCache.set(ssh, resolved);
+    return resolved;
+  };
   const baseKind = createRemoteSshBootstrapMachineTaskKind({
     resolveHostTrust: async ({ ssh, knownHostsMode }): Promise<RemoteHostTrustResolution> => {
       if (knownHostsMode === 'system') {
         return { status: 'trusted' };
       }
 
-      const knownHostsPath = resolveKnownHostsPath(ssh, knownHostsMode);
+      const endpoint = resolveEndpoint(ssh);
+      const knownHostsPath = resolveKnownHostsPath(endpoint.ssh, knownHostsMode);
       const existingKnownHostsText = readKnownHostsText(knownHostsPath);
-      const parsedTarget = resolveSshEndpoint({ ssh });
       const keyscanOutput = runCommandSync({
         command: 'ssh-keyscan',
         args: [
           '-T',
           '5',
-          ...(parsedTarget.port ? ['-p', String(parsedTarget.port)] : []),
+          ...(endpoint.ssh.port ? ['-p', String(endpoint.ssh.port)] : []),
           '-t',
           'ed25519',
-          parsedTarget.host,
+          endpoint.keyscanHost,
         ],
         errorPrefix: 'ssh-keyscan failed',
       });
@@ -536,18 +554,19 @@ export function createLiveRemoteSshBootstrapTaskKind() {
       };
     },
     installRemoteCli: async ({ parsed, auth, knownHostsMode }) => {
-      const knownHostsPath = resolveKnownHostsPath(parsed.ssh, knownHostsMode);
+      const ssh = resolveEndpoint(parsed.ssh).ssh;
+      const knownHostsPath = resolveKnownHostsPath(ssh, knownHostsMode);
       const localPayloadRoot = parsed.cliPayload?.rootPath ?? null;
       const localPayloadSha256 = parsed.cliPayload?.sha256 ?? null;
       await installRemoteFirstPartyComponent({
         componentId: 'happier-cli',
         channel: parsed.channel,
-        ssh: parsed.ssh,
+        ssh,
         knownHostsMode,
       }, {
         resolveRemoteReleaseTarget: async () => {
           const preflight = runSshPosixJson<Readonly<{ platform?: unknown; arch?: unknown }>>({
-            ssh: parsed.ssh,
+            ssh,
             auth: auth as SshAuth,
             knownHostsPath,
             knownHostsMode,
@@ -563,7 +582,7 @@ export function createLiveRemoteSshBootstrapTaskKind() {
           };
         },
         runRemoteText: async ({ remoteCommand }) => runSshPosixText({
-          ssh: parsed.ssh,
+          ssh,
           auth: auth as SshAuth,
           knownHostsPath,
           knownHostsMode,
@@ -571,7 +590,7 @@ export function createLiveRemoteSshBootstrapTaskKind() {
         }),
         copyLocalDirectoryToRemote: async ({ localPath, remotePath }) => {
           copyLocalDirectoryToRemote({
-            ssh: parsed.ssh,
+            ssh,
             auth: auth as SshAuth,
             knownHostsPath,
             knownHostsMode,
@@ -597,11 +616,12 @@ export function createLiveRemoteSshBootstrapTaskKind() {
       await approveTerminalAuthRequest({ publicKey });
     },
     runRemoteCommand: async ({ label, parsed, auth, knownHostsMode, data }) => {
-      const knownHostsPath = resolveKnownHostsPath(parsed.ssh, knownHostsMode);
+      const ssh = resolveEndpoint(parsed.ssh).ssh;
+      const knownHostsPath = resolveKnownHostsPath(ssh, knownHostsMode);
 
       if (label === 'relay.runtime.install') {
         const relayInstall = await installRemoteRelayRuntimeUsingSharedEngine({
-          ssh: parsed.ssh,
+          ssh,
           auth: auth as SshAuth,
           knownHostsPath,
           knownHostsMode,
@@ -620,7 +640,7 @@ export function createLiveRemoteSshBootstrapTaskKind() {
       }
 
       const result = runSshPosixJson<JsonRecord>({
-        ssh: parsed.ssh,
+        ssh,
         auth: auth as SshAuth,
         knownHostsPath,
         knownHostsMode,
