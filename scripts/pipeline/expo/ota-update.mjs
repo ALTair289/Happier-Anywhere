@@ -12,7 +12,6 @@ import { applyExpoNodeHeapEnv } from '../../expo/expoNodeHeapEnv.mjs';
 import { normalizeInteractiveOverride, resolveExpoInteractivity } from './resolve-expo-interactivity.mjs';
 import { resolveEasBuildProfileEnv } from './resolve-eas-build-profile-env.mjs';
 import { createCanonicalFingerprintFromExpoFingerprint } from './canonical-fingerprint.mjs';
-import { parseEasJsonCommandOutput } from './parse-eas-json-command-output.mjs';
 import {
   MOBILE_RELEASE_PROFILES,
   MOBILE_RELEASE_ENVIRONMENT_CHOICES,
@@ -210,32 +209,26 @@ function resolveOtaFingerprintProfile(environment, platform) {
  * @param {{
  *   opts: { dryRun: boolean };
  *   uiDir: string;
- *   easCliVersion: string;
  *   platform: 'ios' | 'android';
- *   profile: string;
  *   env: Record<string, string>;
  * }} params
  * @returns {string}
  */
-function generateCanonicalOtaFingerprintHash({ opts, uiDir, easCliVersion, platform, profile, env }) {
+function generateCanonicalOtaFingerprintHash({ opts, uiDir, platform, env }) {
   const fpJson = run(
     opts,
-    'npx',
+    'yarn',
     [
-      '--yes',
-      `eas-cli@${easCliVersion}`,
+      '--silent',
+      'fingerprint',
       'fingerprint:generate',
       '--platform',
       platform,
-      '--build-profile',
-      profile,
-      '--json',
-      '--non-interactive',
     ],
-    { cwd: uiDir, env, stdio: 'pipe' },
+    { cwd: uiDir, env: { ...env, EXPO_TOKEN: '' }, stdio: 'pipe' },
   ).trim();
   if (!fpJson) return '';
-  const parsed = parseEasJsonCommandOutput(fpJson, `eas fingerprint:generate (${platform})`);
+  const parsed = JSON.parse(fpJson);
   const canonical = createCanonicalFingerprintFromExpoFingerprint(parsed);
   const rawHash = String(parsed?.hash ?? parsed?.fingerprintHash ?? '').trim();
   if (canonical.hash && rawHash && canonical.hash !== rawHash) {
@@ -256,10 +249,11 @@ function generateCanonicalOtaFingerprintHash({ opts, uiDir, easCliVersion, platf
  *
  * @param {string} uiDir
  * @param {import('./mobile-release-environments.mjs').MobileReleaseEnvironment} environment
+ * @param {string} profileId
  */
-function resolveOtaFingerprintEnv(uiDir, environment) {
+function resolveOtaFingerprintEnv(uiDir, environment, profileId) {
   const easJsonPath = path.join(uiDir, 'eas.json');
-  const easProfileEnv = resolveEasBuildProfileEnv({ easJsonPath, profileId: environment });
+  const easProfileEnv = resolveEasBuildProfileEnv({ easJsonPath, profileId });
 
   /** @type {Record<string, string>} */
   const resolved = { ...easProfileEnv };
@@ -345,7 +339,14 @@ function main() {
   const appEnvironment = normalizedEnvironment;
   const updateLane = resolveMobileAppEnvironmentConfig(normalizedEnvironment).updatesChannel;
   const nodeEnvironment = resolveMobileBuildNodeEnvironment(normalizedEnvironment);
-  const otaFingerprintEnv = resolveOtaFingerprintEnv(uiDir, normalizedEnvironment);
+  const otaFingerprintProfile = platform === 'all'
+    ? normalizedEnvironment
+    : resolveOtaFingerprintProfile(normalizedEnvironment, platform);
+  const otaFingerprintEnv = resolveOtaFingerprintEnv(
+    uiDir,
+    normalizedEnvironment,
+    otaFingerprintProfile,
+  );
   const explicitRuntimeVersion = String(values['runtime-version'] ?? '').trim();
 
   /** @type {Record<string, string>} */
@@ -378,9 +379,7 @@ function main() {
       ? generateCanonicalOtaFingerprintHash({
           opts,
           uiDir,
-          easCliVersion,
           platform,
-          profile: resolveOtaFingerprintProfile(normalizedEnvironment, platform),
           env: easCommandEnv,
         })
       : '');
