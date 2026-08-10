@@ -1,12 +1,15 @@
 import * as React from 'react';
+import { normalizePairingClaimOriginV1 } from '@happier-dev/protocol';
 
 import { createPairingSecret } from '@/auth/pairing/pairingSecret';
-import { buildPairingDeepLink } from '@/auth/pairing/pairingUrl';
+import { buildPairingClaimDeepLink, buildPairingDeepLink } from '@/auth/pairing/pairingUrl';
 import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
+import type { ActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
 import { getCachedServerFeaturesSnapshot } from '@/sync/api/capabilities/serverFeaturesClient';
 import { resolvePreferredShareableServerUrl } from '@/sync/domains/server/url/shareableServerUrl';
 import { isRuntimeActive } from '@/utils/runtime/isRuntimeActive';
 import {
+    pairingClaimStart,
     pairingStart,
     pairingStatus,
     type PairingStatus,
@@ -16,9 +19,32 @@ const PAIRING_STATUS_POLL_INTERVAL_MS = 1_000;
 
 type StartPairingResult = { ok: true } | { ok: false; status: number };
 
+type PairingSessionOwner = Readonly<{
+    pairId: string;
+    serverId: string;
+    serverUrl: string;
+    generation: number;
+}>;
+
+function createPairingSessionOwner(pairId: string, snapshot: ActiveServerSnapshot): PairingSessionOwner {
+    return {
+        pairId,
+        serverId: snapshot.serverId,
+        serverUrl: snapshot.serverUrl,
+        generation: snapshot.generation,
+    };
+}
+
+function isPairingSessionOwnerActive(owner: PairingSessionOwner): boolean {
+    const active = getActiveServerSnapshot();
+    return active.serverId === owner.serverId
+        && active.serverUrl === owner.serverUrl
+        && active.generation === owner.generation;
+}
+
 /**
  * Desktop/web pairing session lifecycle:
- * - start: generate secret + POST /v1/auth/pairing/start
+ * - start: prefer an origin-bound one-time claim; fall back to the legacy secret protocol only when unsupported
  * - poll: GET /v1/auth/pairing/status until phone requests
  * - approve: handled by caller via existing auth account link flow
  */
@@ -38,13 +64,19 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
     const [deepLink, setDeepLink] = React.useState<string | null>(null);
     const [isExpired, setIsExpired] = React.useState(false);
     const [isStarting, setIsStarting] = React.useState(false);
-    const isStartingRef = React.useRef(false);
+    const operationGenerationRef = React.useRef(0);
+    const activeStartGenerationRef = React.useRef<number | null>(null);
+    const sessionOwnerRef = React.useRef<PairingSessionOwner | null>(null);
 
     const clearSession = React.useCallback(() => {
+        operationGenerationRef.current += 1;
+        activeStartGenerationRef.current = null;
+        sessionOwnerRef.current = null;
         setPairId(null);
         setStatus(null);
         setDeepLink(null);
         setIsExpired(false);
+        setIsStarting(false);
     }, []);
 
     React.useEffect(() => {
@@ -52,29 +84,32 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
         clearSession();
     }, [clearSession, enabled, isAuthenticated]);
 
+    React.useEffect(() => () => {
+        operationGenerationRef.current += 1;
+        activeStartGenerationRef.current = null;
+        sessionOwnerRef.current = null;
+    }, []);
+
     const startPairing = React.useCallback(async () => {
         if (!enabled || !isAuthenticated) {
             return { ok: false, status: 401 } as const;
         }
-        if (isStartingRef.current) {
+        if (activeStartGenerationRef.current !== null) {
             return { ok: false, status: 409 } as const;
         }
 
-        isStartingRef.current = true;
+        const operationGeneration = operationGenerationRef.current + 1;
+        operationGenerationRef.current = operationGeneration;
+        activeStartGenerationRef.current = operationGeneration;
+        const isCurrentOperation = () => activeStartGenerationRef.current === operationGeneration;
         setIsStarting(true);
         setIsExpired(false);
         setStatus(null);
         setDeepLink(null);
         setPairId(null);
+        sessionOwnerRef.current = null;
 
         try {
-            const { secret, secretHash } = await createPairingSecret();
-            const started = await pairingStart({ secretHash });
-            if (!started.ok) {
-                return { ok: false, status: started.status } as const;
-            }
-
-            const data = started.data;
             const active = getActiveServerSnapshot();
             const cached = getCachedServerFeaturesSnapshot({ serverId: active.serverId });
             const canonicalRaw =
@@ -88,6 +123,41 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
                 activeServerUrl: active.serverUrl,
             });
 
+            const claimOrigin = serverUrl ? normalizePairingClaimOriginV1(serverUrl) : null;
+            if (claimOrigin) {
+                const claimed = await pairingClaimStart({ origin: claimOrigin });
+                if (!isCurrentOperation()) return { ok: false, status: 409 } as const;
+                if (claimed.ok) {
+                    const data = claimed.data;
+                    if (!isPairingSessionOwnerActive(createPairingSessionOwner(data.claimId, active))) {
+                        return { ok: false, status: 409 } as const;
+                    }
+                    sessionOwnerRef.current = createPairingSessionOwner(data.claimId, active);
+                    setPairId(data.claimId);
+                    setDeepLink(buildPairingClaimDeepLink({ claimId: data.claimId, origin: data.origin }));
+                    setStatus({ state: 'pending', pairId: data.claimId, expiresAt: data.expiresAt });
+                    return { ok: true } as const;
+                }
+                if (claimed.reason !== 'unsupported') {
+                    return { ok: false, status: claimed.status } as const;
+                }
+            }
+
+            const { secret, secretHash } = await createPairingSecret();
+            if (!isCurrentOperation()) return { ok: false, status: 409 } as const;
+            const started = await pairingStart({ secretHash });
+            if (!isCurrentOperation()) return { ok: false, status: 409 } as const;
+            if (!started.ok) {
+                return { ok: false, status: started.status } as const;
+            }
+
+            const data = started.data;
+
+            if (!isPairingSessionOwnerActive(createPairingSessionOwner(data.pairId, active))) {
+                return { ok: false, status: 409 } as const;
+            }
+            sessionOwnerRef.current = createPairingSessionOwner(data.pairId, active);
+
             const link = buildPairingDeepLink({ pairId: data.pairId, secret, serverUrl });
 
             setPairId(data.pairId);
@@ -97,52 +167,73 @@ export function usePairingSession(params: Readonly<{ enabled: boolean; isAuthent
         } catch {
             return { ok: false, status: 500 } as const;
         } finally {
-            setIsStarting(false);
-            isStartingRef.current = false;
+            if (activeStartGenerationRef.current === operationGeneration) {
+                activeStartGenerationRef.current = null;
+                setIsStarting(false);
+            }
         }
     }, [enabled, isAuthenticated]);
 
     React.useEffect(() => {
         if (!enabled || !isAuthenticated) return;
         if (!pairId) return;
+        const owner = sessionOwnerRef.current;
+        if (!owner || owner.pairId !== pairId) return;
         let cancelled = false;
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+
+        const invalidateOwnedSession = () => {
+            if (cancelled || sessionOwnerRef.current !== owner) return;
+            clearSession();
+        };
 
         const poll = async () => {
-            if (!isRuntimeActive()) {
+            if (cancelled) return;
+            if (!isPairingSessionOwnerActive(owner)) {
+                invalidateOwnedSession();
                 return;
             }
-            try {
-                const res = await pairingStatus({ pairId });
-                if (!res.ok) {
-                    if (res.reason === 'not_found') {
-                        if (!cancelled) {
+            if (isRuntimeActive()) {
+                try {
+                    const res = await pairingStatus({ pairId });
+                    if (cancelled || sessionOwnerRef.current !== owner) return;
+                    if (!isPairingSessionOwnerActive(owner)) {
+                        invalidateOwnedSession();
+                        return;
+                    }
+                    if (!res.ok) {
+                        if (res.reason === 'not_found') {
+                            sessionOwnerRef.current = null;
                             setIsExpired(true);
                             setStatus(null);
                             setDeepLink(null);
                             setPairId(null);
                         }
+                    } else {
+                        setIsExpired(false);
+                        setStatus(res.data);
                     }
-                    return;
+                } catch {
+                    if (!isPairingSessionOwnerActive(owner)) {
+                        invalidateOwnedSession();
+                        return;
+                    }
                 }
-                if (!cancelled) {
-                    setIsExpired(false);
-                    setStatus(res.data);
-                }
-            } catch {
-                // ignore
+            }
+            if (!cancelled && sessionOwnerRef.current === owner && isPairingSessionOwnerActive(owner)) {
+                timeout = setTimeout(() => {
+                    void poll();
+                }, PAIRING_STATUS_POLL_INTERVAL_MS);
             }
         };
 
-        const interval = setInterval(() => {
-            void poll();
-        }, PAIRING_STATUS_POLL_INTERVAL_MS);
         void poll();
 
         return () => {
             cancelled = true;
-            clearInterval(interval);
+            if (timeout) clearTimeout(timeout);
         };
-    }, [enabled, isAuthenticated, pairId]);
+    }, [clearSession, enabled, isAuthenticated, pairId]);
 
     return { deepLink, status, isExpired, isStarting, startPairing, clearSession };
 }

@@ -1,6 +1,23 @@
 export const HAPPY_PROTOCOL_PACKAGE = '@happier-dev/protocol';
 
 export {
+  PAIRING_CLAIM_V1_MAX_TTL_MS,
+  PairingClaimConsumeRequestV1Schema,
+  PairingClaimConsumeResponseV1Schema,
+  PairingClaimIdV1Schema,
+  PairingClaimInvalidPublicKeyResponseV1Schema,
+  PairingClaimNotFoundResponseV1Schema,
+  PairingClaimOriginV1Schema,
+  PairingClaimStartRequestV1Schema,
+  PairingClaimStartResponseV1Schema,
+  normalizePairingClaimOriginV1,
+  type PairingClaimConsumeRequestV1,
+  type PairingClaimConsumeResponseV1,
+  type PairingClaimStartRequestV1,
+  type PairingClaimStartResponseV1,
+} from './auth/pairingClaimV1.js';
+
+export {
   isPendingLocalId,
   readPendingLocalId,
   PendingLocalIdSchema,

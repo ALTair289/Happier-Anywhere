@@ -56,10 +56,18 @@ vi.mock('@/auth/context/AuthContext', () => ({
 vi.mock('@/sync/domains/server/serverProfiles', () => ({
     getActiveServerUrl: () => 'https://lan.example.test:53288',
 }));
+vi.mock('@/sync/domains/server/serverRuntime', () => ({
+    getActiveServerSnapshot: () => ({
+        serverId: 'server-lan',
+        serverUrl: 'https://lan.example.test:53288',
+        generation: 1,
+    }),
+}));
 
 const upsertActivateAndSwitchServerSpy = vi.fn(async () => {});
 vi.mock('@/sync/domains/server/activeServerSwitch', () => ({
     normalizeServerUrl: (s: string) => s,
+    setActiveServerAndSwitch: vi.fn(async () => true),
     upsertActivateAndSwitchServer: upsertActivateAndSwitchServerSpy,
 }));
 

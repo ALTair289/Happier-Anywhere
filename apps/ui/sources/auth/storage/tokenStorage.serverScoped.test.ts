@@ -71,6 +71,30 @@ describe('TokenStorage (web) server-scoped credentials', () => {
         await expect(TokenStorage.getCredentials()).resolves.toEqual({ token: 'token-b', secret: 'secret-b' });
     });
 
+    it('can write credentials for a specific server URL without changing or overwriting the active scope', async () => {
+        restoreLocalStorage = installLocalStorageMock().restore;
+
+        const { setServerUrl } = await import('@/sync/domains/server/serverConfig');
+        const { TokenStorage } = await import('./tokenStorage');
+
+        setServerUrl('https://active.example.test');
+        await expect(TokenStorage.setCredentials({ token: 'active-token', secret: 'active-secret' })).resolves.toBe(true);
+
+        await expect(TokenStorage.setCredentialsForServerUrl(
+            { token: 'target-token', secret: 'target-secret' },
+            'https://target.example.test',
+        )).resolves.toBe(true);
+
+        await expect(TokenStorage.getCredentials()).resolves.toEqual({
+            token: 'active-token',
+            secret: 'active-secret',
+        });
+        await expect(TokenStorage.getCredentialsForServerUrl('https://target.example.test')).resolves.toEqual({
+            token: 'target-token',
+            secret: 'target-secret',
+        });
+    });
+
     it('treats localhost and 127.0.0.1 as the same server scope for credentials', async () => {
         restoreLocalStorage = installLocalStorageMock().restore;
 

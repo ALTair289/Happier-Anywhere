@@ -4,6 +4,8 @@ import { encodeBase64 } from '@/encryption/base64';
 import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
 import { serverFetch } from '@/sync/http/client';
 import { ServerFetchAbortedForServerSwitchError } from '@/sync/http/client';
+import { pairingClaimFetch } from '@/sync/api/account/pairingClaimTransport';
+import { normalizePairingClaimOriginV1 } from '@happier-dev/protocol';
 
 const AUTH_QR_START_SERVER_SWITCH_ABORT_MAX_ATTEMPTS = 4;
 const AUTH_QR_START_SERVER_SWITCH_ABORT_RETRY_DELAY_MS = 150;
@@ -26,31 +28,44 @@ export function generateAuthKeyPair(): QRAuthKeyPair {
     };
 }
 
-export async function authQRStart(keypair: QRAuthKeyPair): Promise<boolean> {
+export type AuthQRStartOptions = Readonly<{
+    serverUrl?: string;
+    shouldCancel?: () => boolean;
+}>;
+
+export async function authQRStart(keypair: QRAuthKeyPair, options: AuthQRStartOptions = {}): Promise<boolean> {
     const publicKey = encodeBase64(keypair.publicKey);
     const publicKeyPreview = publicKey.substring(0, 20);
+    const explicitServerUrl = options.serverUrl === undefined
+        ? null
+        : normalizePairingClaimOriginV1(options.serverUrl);
+    if (options.serverUrl !== undefined && !explicitServerUrl) return false;
 
     for (let attempt = 0; attempt < AUTH_QR_START_SERVER_SWITCH_ABORT_MAX_ATTEMPTS; attempt += 1) {
+        if (options.shouldCancel?.()) return false;
         try {
-            const serverUrl = getActiveServerSnapshot().serverUrl;
+            const serverUrl = explicitServerUrl ?? getActiveServerSnapshot().serverUrl;
             if (process.env.EXPO_PUBLIC_DEBUG) {
                 console.log(`[AUTH DEBUG] Sending auth request to: ${serverUrl}/v1/auth/account/request`);
                 console.log(`[AUTH DEBUG] Public key: ${publicKeyPreview}...`);
             }
 
-            const response = await serverFetch(
-                '/v1/auth/account/request',
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        publicKey,
-                    }),
+            const requestInit: RequestInit = {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
                 },
-                { includeAuth: false },
-            );
+                body: JSON.stringify({
+                    publicKey,
+                }),
+            };
+            const response = explicitServerUrl
+                ? await pairingClaimFetch(explicitServerUrl, '/v1/auth/account/request', requestInit)
+                : await serverFetch(
+                    '/v1/auth/account/request',
+                    requestInit,
+                    { includeAuth: false },
+                );
             if (!response.ok) {
                 throw new Error(`Auth request failed: ${response.status}`);
             }
@@ -61,7 +76,8 @@ export async function authQRStart(keypair: QRAuthKeyPair): Promise<boolean> {
             return true;
         } catch (error) {
             const shouldRetry =
-                error instanceof ServerFetchAbortedForServerSwitchError
+                explicitServerUrl === null
+                && error instanceof ServerFetchAbortedForServerSwitchError
                 && attempt < AUTH_QR_START_SERVER_SWITCH_ABORT_MAX_ATTEMPTS - 1;
 
             if (process.env.EXPO_PUBLIC_DEBUG) {

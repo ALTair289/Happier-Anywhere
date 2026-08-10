@@ -64,4 +64,21 @@ describe('authQRStart', () => {
         expect(authRequestCount).toBeLessThanOrEqual(4);
         expect(totalFetchCount).toBeGreaterThanOrEqual(authRequestCount);
     });
+
+    it('pins the auth request to an explicit server URL without changing the active server', async () => {
+        upsertAndActivateServer({ serverUrl: 'http://active.example.test', scope: 'tab' });
+
+        const requestedUrls: string[] = [];
+        setRuntimeFetch(async (input) => {
+            requestedUrls.push(String(input ?? ''));
+            return new Response(null, { status: 200 });
+        });
+
+        await expect(authQRStart(generateAuthKeyPair(), {
+            serverUrl: 'https://relay.example.test',
+        })).resolves.toBe(true);
+
+        expect(requestedUrls).toEqual(['https://relay.example.test/v1/auth/account/request']);
+    });
+
 });

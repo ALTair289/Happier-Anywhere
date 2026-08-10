@@ -1,4 +1,13 @@
 import { serverFetch } from '@/sync/http/client';
+import { isRetryablePairingClaimFetchError, pairingClaimFetch } from './pairingClaimTransport';
+import {
+    PAIRING_CLAIM_V1_MAX_TTL_MS,
+    PairingClaimConsumeRequestV1Schema,
+    PairingClaimConsumeResponseV1Schema,
+    PairingClaimStartRequestV1Schema,
+    PairingClaimStartResponseV1Schema,
+    type PairingClaimStartResponseV1,
+} from '@happier-dev/protocol';
 
 export type PairingStartResponse = Readonly<{
     pairId: string;
@@ -36,6 +45,14 @@ export type PairingStartResult =
     | Readonly<{ ok: true; data: PairingStartResponse }>
     | Readonly<{ ok: false; reason: 'http_error'; status: number }>;
 
+export type PairingClaimStartResult =
+    | Readonly<{ ok: true; data: PairingClaimStartResponseV1 }>
+    | Readonly<{ ok: false; reason: 'unsupported' | 'http_error'; status: number }>;
+
+export type PairingClaimConsumeResult =
+    | Readonly<{ ok: true; data: PairingRequestOk }>
+    | Readonly<{ ok: false; reason: 'not_found' | 'invalid_public_key' | 'http_error'; status: number }>;
+
 export type PairingStatusResult =
     | Readonly<{ ok: true; data: PairingStatus }>
     | Readonly<{ ok: false; reason: 'not_found' | 'http_error'; status: number }>;
@@ -66,6 +83,81 @@ export async function pairingStart(params: { secretHash: string }): Promise<Pair
         return { ok: false, reason: 'http_error', status: 502 };
     }
     return { ok: true, data: { pairId: json.pairId, expiresAt: json.expiresAt } };
+}
+
+export async function pairingClaimStart(params: { origin: string }): Promise<PairingClaimStartResult> {
+    const request = PairingClaimStartRequestV1Schema.safeParse(params);
+    if (!request.success) {
+        return { ok: false, reason: 'http_error', status: 400 };
+    }
+
+    const res = await serverFetch(
+        '/v1/auth/pairing/claim/start',
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(request.data),
+        },
+        { includeAuth: true },
+    );
+    if (!res.ok) {
+        if (res.status === 404 || res.status === 405) {
+            return { ok: false, reason: 'unsupported', status: res.status };
+        }
+        return { ok: false, reason: 'http_error', status: res.status };
+    }
+
+    const parsed = PairingClaimStartResponseV1Schema.safeParse(await safeReadJson(res));
+    const localNowMs = Date.now();
+    const expiresAtMs = parsed.success ? Date.parse(parsed.data.expiresAt) : Number.NaN;
+    if (
+        !parsed.success
+        || parsed.data.origin !== request.data.origin
+        || !Number.isFinite(expiresAtMs)
+        || expiresAtMs <= localNowMs
+        || expiresAtMs > localNowMs + PAIRING_CLAIM_V1_MAX_TTL_MS
+    ) {
+        return { ok: false, reason: 'http_error', status: 502 };
+    }
+    return { ok: true, data: parsed.data };
+}
+
+export async function pairingClaimConsume(
+    params: Readonly<{ claimId: string; origin: string; publicKey: string; deviceLabel?: string }>,
+): Promise<PairingClaimConsumeResult> {
+    const request = PairingClaimConsumeRequestV1Schema.safeParse(params);
+    if (!request.success) {
+        return { ok: false, reason: 'http_error', status: 400 };
+    }
+
+    const requestInit: RequestInit = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request.data),
+    };
+    let res: Response | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            res = await pairingClaimFetch(
+                request.data.origin,
+                '/v1/auth/pairing/claim/consume',
+                requestInit,
+            );
+            break;
+        } catch (error) {
+            if (attempt === 0 && isRetryablePairingClaimFetchError(error)) continue;
+            throw error;
+        }
+    }
+    if (!res) throw new Error('Pairing claim consume completed without a response');
+    if (res.ok) {
+        const parsed = PairingClaimConsumeResponseV1Schema.safeParse(await safeReadJson(res));
+        if (!parsed.success) return { ok: false, reason: 'http_error', status: 502 };
+        return { ok: true, data: parsed.data };
+    }
+    if (res.status === 404) return { ok: false, reason: 'not_found', status: 404 };
+    if (res.status === 401) return { ok: false, reason: 'invalid_public_key', status: 401 };
+    return { ok: false, reason: 'http_error', status: res.status };
 }
 
 export async function pairingStatus(params: { pairId: string }): Promise<PairingStatusResult> {

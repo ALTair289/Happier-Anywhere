@@ -21,26 +21,37 @@ vi.mock('react-native', async () => {
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock('@/auth/pairing/pairingSecret', () => ({
-    createPairingSecret: vi.fn(async () => ({ secret: 'sec_test', secretHash: 'hash_test' })),
-}));
+const createPairingSecretMock = vi.fn(async () => ({ secret: 'sec_test', secretHash: 'hash_test' }));
+vi.mock('@/auth/pairing/pairingSecret', () => ({ createPairingSecret: createPairingSecretMock }));
 
 const pairingStartMock = vi.fn(async () => ({ ok: true, data: { pairId: 'pair_123', expiresAt: Date.now() + 60_000 } }));
+const pairingClaimStartMock = vi.fn(async (params: { origin: string }) => ({
+    ok: true,
+    data: {
+        protocol: 'claim-v1',
+        claimId: `claim_${'a'.repeat(43)}`,
+        origin: params.origin,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    },
+}));
 const pairingStatusMock = vi.fn(async () => ({ ok: true, data: { state: 'pending', pairId: 'pair_123', expiresAt: Date.now() + 60_000 } }));
 vi.mock('@/sync/api/account/apiPairingAuth', () => ({
+    pairingClaimStart: pairingClaimStartMock,
     pairingStart: pairingStartMock,
     pairingStatus: pairingStatusMock,
 }));
 
 let activeServerUrl = 'http://localhost:53288';
 let activeShareableServerUrl: string | null = null;
+let activeServerId = 'srv-a';
+let activeServerGeneration = 0;
 vi.mock('@/sync/domains/server/serverProfiles', () => ({
     getActiveServerUrl: () => activeServerUrl,
     getActiveServerSnapshot: () => ({
-        serverId: 'srv-a',
+        serverId: activeServerId,
         serverUrl: activeServerUrl,
         activeShareableServerUrl,
-        generation: 0,
+        generation: activeServerGeneration,
     }),
 }));
 
@@ -56,10 +67,14 @@ describe('usePairingSession (pairing deep link server URL)', () => {
     beforeEach(() => {
         vi.resetModules();
         pairingStartMock.mockClear();
+        pairingClaimStartMock.mockClear();
         pairingStatusMock.mockClear();
+        createPairingSecretMock.mockClear();
         cachedCanonicalServerUrl = null;
         activeServerUrl = 'http://localhost:53288';
         activeShareableServerUrl = null;
+        activeServerId = 'srv-a';
+        activeServerGeneration = 0;
         appState.currentState = 'active';
     });
 
@@ -84,6 +99,9 @@ describe('usePairingSession (pairing deep link server URL)', () => {
             expect(deepLink).toBeTruthy();
             const url = new URL(deepLink!);
             expect(url.searchParams.get('server')).toBeNull();
+            expect(url.searchParams.get('v')).toBe('1');
+            expect(pairingClaimStartMock).not.toHaveBeenCalled();
+            expect(createPairingSecretMock).toHaveBeenCalledTimes(1);
 
             await act(async () => {
                 hookApi!.clearSession();
@@ -117,7 +135,13 @@ describe('usePairingSession (pairing deep link server URL)', () => {
             const deepLink = hookApi!.deepLink;
             expect(deepLink).toBeTruthy();
             const url = new URL(deepLink!);
-            expect(url.searchParams.get('server')).toBe('https://api.example.test');
+            expect(url.searchParams.get('v')).toBe('claim-v1');
+            expect(url.searchParams.get('origin')).toBe('https://api.example.test');
+            expect(url.searchParams.get('claimId')).toMatch(/^claim_/);
+            expect(url.searchParams.has('secret')).toBe(false);
+            expect(url.searchParams.has('pairId')).toBe(false);
+            expect(pairingStartMock).not.toHaveBeenCalled();
+            expect(createPairingSecretMock).not.toHaveBeenCalled();
 
             await act(async () => {
                 hookApi!.clearSession();
@@ -152,7 +176,7 @@ describe('usePairingSession (pairing deep link server URL)', () => {
             const deepLink = hookApi!.deepLink;
             expect(deepLink).toBeTruthy();
             const url = new URL(deepLink!);
-            expect(url.searchParams.get('server')).toBe('https://api.example.test');
+            expect(url.searchParams.get('origin')).toBe('https://api.example.test');
         } finally {
             act(() => {
                 tree?.unmount();
@@ -184,11 +208,40 @@ describe('usePairingSession (pairing deep link server URL)', () => {
             const deepLink = hookApi!.deepLink;
             expect(deepLink).toBeTruthy();
             const url = new URL(deepLink!);
-            expect(url.searchParams.get('server')).toBe('https://relay.example.ts.net');
+            expect(url.searchParams.get('origin')).toBe('https://relay.example.ts.net');
         } finally {
             act(() => {
                 tree?.unmount();
             });
+        }
+    });
+
+    it('falls back to the legacy secret link only when claim-v1 is explicitly unsupported', async () => {
+        cachedCanonicalServerUrl = 'https://api.example.test';
+        pairingClaimStartMock.mockResolvedValueOnce({ ok: false, reason: 'unsupported', status: 404 } as any);
+
+        const { usePairingSession } = await import('./usePairingSession');
+
+        let hookApi: ReturnType<typeof usePairingSession> | null = null;
+        function Probe() {
+            hookApi = usePairingSession({ enabled: true, isAuthenticated: true });
+            return null;
+        }
+
+        const tree = (await renderScreen(<Probe />)).tree;
+        try {
+            await act(async () => {
+                expect((await hookApi!.startPairing()).ok).toBe(true);
+            });
+
+            const url = new URL(hookApi!.deepLink!);
+            expect(url.searchParams.get('v')).toBe('1');
+            expect(url.searchParams.get('secret')).toBe('sec_test');
+            expect(url.searchParams.get('server')).toBe('https://api.example.test');
+            expect(pairingClaimStartMock).toHaveBeenCalledTimes(1);
+            expect(pairingStartMock).toHaveBeenCalledTimes(1);
+        } finally {
+            act(() => tree.unmount());
         }
     });
 
@@ -234,6 +287,225 @@ describe('usePairingSession (pairing deep link server URL)', () => {
             });
             vi.useRealTimers();
             globalWithDocument.document = previousDocument;
+        }
+    });
+
+    it('does not publish a stale start result after clearSession invalidates the operation', async () => {
+        cachedCanonicalServerUrl = 'https://api.example.test';
+        let resolveClaim!: (value: any) => void;
+        pairingClaimStartMock.mockImplementationOnce(async () => await new Promise((resolve) => {
+            resolveClaim = resolve;
+        }));
+
+        const { usePairingSession } = await import('./usePairingSession');
+        let hookApi: ReturnType<typeof usePairingSession> | null = null;
+        function Probe() {
+            hookApi = usePairingSession({ enabled: true, isAuthenticated: true });
+            return null;
+        }
+
+        const tree = (await renderScreen(<Probe />)).tree;
+        try {
+            let startPromise!: Promise<{ ok: boolean; status?: number }>;
+            await act(async () => {
+                startPromise = hookApi!.startPairing();
+                await Promise.resolve();
+            });
+            expect(hookApi!.isStarting).toBe(true);
+
+            await act(async () => {
+                hookApi!.clearSession();
+            });
+            resolveClaim({
+                ok: true,
+                data: {
+                    protocol: 'claim-v1',
+                    claimId: `claim_${'z'.repeat(43)}`,
+                    origin: 'https://api.example.test',
+                    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+                },
+            });
+            await act(async () => {
+                await startPromise;
+            });
+
+            expect(hookApi!.deepLink).toBeNull();
+            expect(hookApi!.status).toBeNull();
+            expect(hookApi!.isStarting).toBe(false);
+        } finally {
+            act(() => tree.unmount());
+        }
+    });
+
+    it('does not publish an in-flight status response after clearSession releases its owner', async () => {
+        cachedCanonicalServerUrl = 'https://api.example.test';
+        let resolvePoll!: (value: any) => void;
+        pairingStatusMock.mockImplementationOnce(async () => await new Promise((resolve) => {
+            resolvePoll = resolve;
+        }));
+
+        const { usePairingSession } = await import('./usePairingSession');
+        let hookApi: ReturnType<typeof usePairingSession> | null = null;
+        function Probe() {
+            hookApi = usePairingSession({ enabled: true, isAuthenticated: true });
+            return null;
+        }
+
+        const tree = (await renderScreen(<Probe />)).tree;
+        try {
+            await act(async () => {
+                expect((await hookApi!.startPairing()).ok).toBe(true);
+                await Promise.resolve();
+            });
+            expect(pairingStatusMock).toHaveBeenCalledTimes(1);
+
+            await act(async () => {
+                hookApi!.clearSession();
+                resolvePoll({
+                    ok: true,
+                    data: {
+                        state: 'requested',
+                        pairId: `claim_${'a'.repeat(43)}`,
+                        expiresAt: Date.now() + 60_000,
+                        requestedPublicKey: 'pk-stale',
+                        requestedDeviceLabel: null,
+                        confirmCode: '123456',
+                    },
+                });
+                await Promise.resolve();
+            });
+
+            expect(hookApi!.deepLink).toBeNull();
+            expect(hookApi!.status).toBeNull();
+        } finally {
+            act(() => tree.unmount());
+        }
+    });
+
+    it('never overlaps pairing status polls', async () => {
+        vi.useFakeTimers();
+        cachedCanonicalServerUrl = 'https://api.example.test';
+        let resolveFirstPoll!: (value: any) => void;
+        pairingStatusMock.mockImplementationOnce(async () => await new Promise((resolve) => {
+            resolveFirstPoll = resolve;
+        }));
+
+        const { usePairingSession } = await import('./usePairingSession');
+        let hookApi: ReturnType<typeof usePairingSession> | null = null;
+        function Probe() {
+            hookApi = usePairingSession({ enabled: true, isAuthenticated: true });
+            return null;
+        }
+
+        const tree = (await renderScreen(<Probe />)).tree;
+        try {
+            await act(async () => {
+                expect((await hookApi!.startPairing()).ok).toBe(true);
+            });
+            await act(async () => {
+                await Promise.resolve();
+            });
+            expect(pairingStatusMock).toHaveBeenCalledTimes(1);
+
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(3_100);
+            });
+            expect(pairingStatusMock).toHaveBeenCalledTimes(1);
+
+            resolveFirstPoll({
+                ok: true,
+                data: { state: 'pending', pairId: `claim_${'a'.repeat(43)}`, expiresAt: Date.now() + 60_000 },
+            });
+            await act(async () => {
+                await Promise.resolve();
+                await vi.advanceTimersByTimeAsync(1_100);
+            });
+            expect(pairingStatusMock).toHaveBeenCalledTimes(2);
+        } finally {
+            act(() => tree.unmount());
+            vi.useRealTimers();
+        }
+    });
+
+    it('cancels the session without polling a different active server', async () => {
+        vi.useFakeTimers();
+        cachedCanonicalServerUrl = 'https://api.example.test';
+
+        const { usePairingSession } = await import('./usePairingSession');
+        let hookApi: ReturnType<typeof usePairingSession> | null = null;
+        function Probe() {
+            hookApi = usePairingSession({ enabled: true, isAuthenticated: true });
+            return null;
+        }
+
+        const tree = (await renderScreen(<Probe />)).tree;
+        try {
+            await act(async () => {
+                expect((await hookApi!.startPairing()).ok).toBe(true);
+                await Promise.resolve();
+            });
+            expect(pairingStatusMock).toHaveBeenCalledTimes(1);
+
+            activeServerId = 'srv-b';
+            activeServerUrl = 'https://other.example.test';
+            activeServerGeneration += 1;
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(1_100);
+            });
+
+            expect(pairingStatusMock).toHaveBeenCalledTimes(1);
+            expect(hookApi!.deepLink).toBeNull();
+            expect(hookApi!.status).toBeNull();
+        } finally {
+            act(() => tree.unmount());
+            vi.useRealTimers();
+        }
+    });
+
+    it('does not publish a status response after the active server changes in flight', async () => {
+        cachedCanonicalServerUrl = 'https://api.example.test';
+        let resolvePoll!: (value: any) => void;
+        pairingStatusMock.mockImplementationOnce(async () => await new Promise((resolve) => {
+            resolvePoll = resolve;
+        }));
+
+        const { usePairingSession } = await import('./usePairingSession');
+        let hookApi: ReturnType<typeof usePairingSession> | null = null;
+        function Probe() {
+            hookApi = usePairingSession({ enabled: true, isAuthenticated: true });
+            return null;
+        }
+
+        const tree = (await renderScreen(<Probe />)).tree;
+        try {
+            await act(async () => {
+                expect((await hookApi!.startPairing()).ok).toBe(true);
+                await Promise.resolve();
+            });
+            expect(pairingStatusMock).toHaveBeenCalledTimes(1);
+
+            activeServerId = 'srv-b';
+            activeServerUrl = 'https://other.example.test';
+            activeServerGeneration += 1;
+            resolvePoll({
+                ok: true,
+                data: {
+                    state: 'requested',
+                    pairId: `claim_${'a'.repeat(43)}`,
+                    expiresAt: Date.now() + 60_000,
+                    requestedPublicKey: 'pk-other',
+                    requestedDeviceLabel: null,
+                    confirmCode: '999999',
+                },
+            });
+            await act(async () => {
+                await Promise.resolve();
+            });
+
+            expect(hookApi!.deepLink).toBeNull();
+            expect(hookApi!.status).toBeNull();
+        } finally {
+            act(() => tree.unmount());
         }
     });
 });

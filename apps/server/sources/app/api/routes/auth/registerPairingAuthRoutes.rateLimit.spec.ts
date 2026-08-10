@@ -10,6 +10,8 @@ describe("pairing auth routes rate limits", () => {
 
         for (const key of [
             "POST /v1/auth/pairing/start",
+            "POST /v1/auth/pairing/claim/start",
+            "POST /v1/auth/pairing/claim/consume",
             "POST /v1/auth/pairing/request",
             "GET /v1/auth/pairing/status",
             "POST /v1/auth/pairing/consume",

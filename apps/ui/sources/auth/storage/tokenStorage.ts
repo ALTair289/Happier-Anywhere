@@ -645,6 +645,18 @@ async function readCredentialsForScopedKeys(keys: ScopedStorageKeys): Promise<Au
     return null;
 }
 
+async function writeCredentialsToScopedKeys(
+    keys: ScopedStorageKeys,
+    credentials: AuthCredentials,
+): Promise<boolean> {
+    const written = await writeCredentialRawByKey(keys.primary, JSON.stringify(credentials));
+    if (!written) return false;
+    for (const legacyKey of keys.legacy) {
+        await removeCredentialByKey(legacyKey);
+    }
+    return true;
+}
+
 type CredentialCleanupTarget = Readonly<{
     serverUrl: string;
     serverId?: string | null;
@@ -828,14 +840,19 @@ export const TokenStorage = {
 
     async setCredentials(credentials: AuthCredentials): Promise<boolean> {
         const keys = await getAuthKeys();
-        const json = JSON.stringify(credentials);
-        const written = await writeCredentialRawByKey(keys.primary, json);
+        const written = await writeCredentialsToScopedKeys(keys, credentials);
         if (!written) return false;
         await TokenStorage.setAuthAutoRedirectSuppressedUntil(0);
-        for (const legacyKey of keys.legacy) {
-            await removeCredentialByKey(legacyKey);
-        }
         return true;
+    },
+
+    async setCredentialsForServerUrl(
+        credentials: AuthCredentials,
+        serverUrl: string,
+        options: ServerCredentialLookupOptions = {},
+    ): Promise<boolean> {
+        const keys = await getAuthKeys(serverUrl, options);
+        return await writeCredentialsToScopedKeys(keys, credentials);
     },
 
     async removeCredentials(): Promise<boolean> {

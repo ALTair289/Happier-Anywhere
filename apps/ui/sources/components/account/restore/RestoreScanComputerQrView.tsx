@@ -4,9 +4,11 @@ import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 import { useIsFocused } from '@react-navigation/native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { normalizePairingClaimOriginV1 } from '@happier-dev/protocol';
 import { ActivitySpinner } from '@/components/ui/feedback/ActivitySpinner';
 
 import { useAuth } from '@/auth/context/AuthContext';
+import { TokenStorage } from '@/auth/storage/tokenStorage';
 import { generateAuthKeyPair, authQRStart } from '@/auth/flows/qrStart';
 import { authQRWait } from '@/auth/flows/qrWait';
 import { buildPairingDeepLink, parsePairingDeepLink } from '@/auth/pairing/pairingUrl';
@@ -14,9 +16,14 @@ import { encodeBase64 } from '@/encryption/base64';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { useFeatureDecision } from '@/hooks/server/useFeatureDecision';
-import { pairingRequest } from '@/sync/api/account/apiPairingAuth';
+import { pairingClaimConsume, pairingRequest } from '@/sync/api/account/apiPairingAuth';
 import { getActiveServerUrl } from '@/sync/domains/server/serverProfiles';
-import { normalizeServerUrl, upsertActivateAndSwitchServer } from '@/sync/domains/server/activeServerSwitch';
+import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
+import {
+    normalizeServerUrl,
+    setActiveServerAndSwitch,
+    upsertActivateAndSwitchServer,
+} from '@/sync/domains/server/activeServerSwitch';
 import { resolveEffectiveServerUrlOverride } from '@/sync/domains/server/url/serverUrlOverridePolicy';
 import { isLoopbackServerUrl } from '@/sync/domains/server/url/serverUrlClassification';
 import { Text } from '@/components/ui/text/Text';
@@ -96,6 +103,13 @@ function resolveDeviceLabel(): string | null {
     return null;
 }
 
+type OwnedClaimServerSwitch = Readonly<{
+    operationGeneration: number;
+    priorServerId: string;
+    targetServerId: string;
+    targetGeneration: number;
+}>;
+
 export const RestoreScanComputerQrView = React.memo(function RestoreScanComputerQrView() {
     const { theme } = useUnistyles();
     const styles = stylesheet;
@@ -108,13 +122,50 @@ export const RestoreScanComputerQrView = React.memo(function RestoreScanComputer
     const [phase, setPhase] = React.useState<'idle' | 'requesting' | 'waiting'>('idle');
     const [confirmCode, setConfirmCode] = React.useState<string | null>(null);
     const [waitingDots, setWaitingDots] = React.useState(0);
-    const isCancelledRef = React.useRef(false);
+    const mountedRef = React.useRef(true);
+    const operationGenerationRef = React.useRef(0);
+    const activeOperationRef = React.useRef<number | null>(null);
+    const ownedClaimServerSwitchRef = React.useRef<OwnedClaimServerSwitch | null>(null);
+
+    const rollbackOwnedClaimServerSwitch = React.useCallback(async (expectedOperationGeneration: number) => {
+        const owned = ownedClaimServerSwitchRef.current;
+        if (!owned || owned.operationGeneration !== expectedOperationGeneration) return;
+
+        const current = getActiveServerSnapshot();
+        if (
+            current.serverId !== owned.targetServerId
+            || current.generation !== owned.targetGeneration
+        ) {
+            ownedClaimServerSwitchRef.current = null;
+            return;
+        }
+
+        ownedClaimServerSwitchRef.current = null;
+        await setActiveServerAndSwitch({
+            serverId: owned.priorServerId,
+            scope: 'device',
+            refreshAuth: auth.refreshFromActiveServer,
+        });
+    }, [auth.refreshFromActiveServer]);
 
     const processPairingLink = React.useCallback(
         async (rawUrl: string) => {
+            if (activeOperationRef.current !== null) return;
+            const operationGeneration = operationGenerationRef.current + 1;
+            operationGenerationRef.current = operationGeneration;
+            activeOperationRef.current = operationGeneration;
+            const isCurrentOperation = () =>
+                mountedRef.current && activeOperationRef.current === operationGeneration;
+
             const parsed = parsePairingDeepLink(rawUrl.trim());
             if (!parsed) {
-                await Modal.alertAsync(t('common.error'), t('modals.invalidAuthUrl'));
+                try {
+                    await Modal.alertAsync(t('common.error'), t('modals.invalidAuthUrl'));
+                } finally {
+                    if (activeOperationRef.current === operationGeneration) {
+                        activeOperationRef.current = null;
+                    }
+                }
                 return;
             }
 
@@ -122,10 +173,21 @@ export const RestoreScanComputerQrView = React.memo(function RestoreScanComputer
             setConfirmCode(null);
 
             try {
-                const activeServerUrl = normalizeServerUrl(getActiveServerUrl());
+                const priorServer = getActiveServerSnapshot();
+                const activeServerUrl = normalizeServerUrl(priorServer.serverUrl);
                 const activeServerUrlIsLoopback = activeServerUrl ? isLoopbackServerUrl(activeServerUrl) : false;
+                const isClaimV1 = 'claimId' in parsed;
+                let claimTargetUrl: string | null = null;
 
-                if (parsed.serverUrl) {
+                if (isClaimV1) {
+                    const target = resolveEffectiveServerUrlOverride({
+                        requestedServerUrl: parsed.origin,
+                        activeServerUrl,
+                    });
+                    const activeClaimOrigin = normalizePairingClaimOriginV1(activeServerUrl ?? '');
+                    claimTargetUrl = target ?? (activeClaimOrigin === parsed.origin ? parsed.origin : null);
+                    if (claimTargetUrl !== parsed.origin) throw new Error('Claim origin is not an allowed target');
+                } else if (parsed.serverUrl) {
                     const target = resolveEffectiveServerUrlOverride({
                         requestedServerUrl: parsed.serverUrl,
                         activeServerUrl,
@@ -139,32 +201,51 @@ export const RestoreScanComputerQrView = React.memo(function RestoreScanComputer
                         });
                     }
                 }
+                if (!isCurrentOperation()) return;
 
                 const keypair = generateAuthKeyPair();
-                const started = await authQRStart(keypair);
+                const started = await authQRStart(keypair, {
+                    ...(claimTargetUrl ? { serverUrl: claimTargetUrl } : null),
+                    shouldCancel: () => !isCurrentOperation(),
+                });
+                if (!isCurrentOperation()) return;
                 if (!started) {
                     await Modal.alertAsync(t('common.error'), t('errors.authenticationFailed'));
-                    setPhase('idle');
+                    if (isCurrentOperation()) setPhase('idle');
                     return;
                 }
 
-                const pairingRes = await pairingRequest({
-                    pairId: parsed.pairId,
-                    secret: parsed.secret,
-                    publicKey: encodeBase64(keypair.publicKey),
-                    deviceLabel: resolveDeviceLabel() ?? undefined,
-                });
+                const publicKey = encodeBase64(keypair.publicKey);
+                const deviceLabel = resolveDeviceLabel() ?? undefined;
+                const pairingRes = isClaimV1
+                    ? await pairingClaimConsume({
+                        claimId: parsed.claimId,
+                        origin: parsed.origin,
+                        publicKey,
+                        deviceLabel,
+                    })
+                    : await pairingRequest({
+                        pairId: parsed.pairId,
+                        secret: parsed.secret,
+                        publicKey,
+                        deviceLabel,
+                    });
+                if (!isCurrentOperation()) return;
 
                 if (!pairingRes.ok) {
                     if (pairingRes.reason === 'not_found') {
-                        const requestedLoopback = parsed.serverUrl ? isLoopbackServerUrl(parsed.serverUrl) : false;
-                        const showServerUrlNotEmbeddedHint = parsed.serverUrl == null || (requestedLoopback && !activeServerUrlIsLoopback);
-                        if (showServerUrlNotEmbeddedHint) {
-                            await Modal.alertAsync(t('connect.serverUrlNotEmbeddedTitle'), t('connect.serverUrlNotEmbeddedBody'));
-                        } else {
+                        if (isClaimV1) {
                             await Modal.alertAsync(t('modals.authRequestExpired'), t('modals.authRequestExpiredDescription'));
+                        } else {
+                            const requestedLoopback = parsed.serverUrl ? isLoopbackServerUrl(parsed.serverUrl) : false;
+                            const showServerUrlNotEmbeddedHint = parsed.serverUrl == null || (requestedLoopback && !activeServerUrlIsLoopback);
+                            if (showServerUrlNotEmbeddedHint) {
+                                await Modal.alertAsync(t('connect.serverUrlNotEmbeddedTitle'), t('connect.serverUrlNotEmbeddedBody'));
+                            } else {
+                                await Modal.alertAsync(t('modals.authRequestExpired'), t('modals.authRequestExpiredDescription'));
+                            }
                         }
-                    } else if (pairingRes.reason === 'already_requested') {
+                    } else if (!isClaimV1 && pairingRes.reason === 'already_requested') {
                         await Modal.alertAsync(
                             t('connect.pairingAlreadyRequestedTitle'),
                             t('connect.pairingAlreadyRequestedBody'),
@@ -172,7 +253,7 @@ export const RestoreScanComputerQrView = React.memo(function RestoreScanComputer
                     } else {
                         await Modal.alertAsync(t('common.error'), t('errors.operationFailed'));
                     }
-                    setPhase('idle');
+                    if (isCurrentOperation()) setPhase('idle');
                     return;
                 }
 
@@ -181,35 +262,147 @@ export const RestoreScanComputerQrView = React.memo(function RestoreScanComputer
                 setPhase('waiting');
                 const credentials = await authQRWait(
                     keypair,
-                    (dots) => setWaitingDots(dots),
-                    () => isCancelledRef.current,
+                    (dots) => {
+                        if (isCurrentOperation()) setWaitingDots(dots);
+                    },
+                    () => !isCurrentOperation(),
+                    claimTargetUrl ? { serverUrl: claimTargetUrl } : undefined,
                 );
 
-                if (credentials && !isCancelledRef.current) {
-                    const secretString = encodeBase64(credentials.secret, 'base64url');
-                    await auth.login(credentials.token, secretString);
-                    if (!isCancelledRef.current) {
-                        router.replace('/');
+                if (credentials && isCurrentOperation()) {
+                    if (isClaimV1 && claimTargetUrl) {
+                        const currentBeforeSwitch = getActiveServerSnapshot();
+                        if (
+                            currentBeforeSwitch.generation !== priorServer.generation
+                            || currentBeforeSwitch.serverId !== priorServer.serverId
+                            || normalizeServerUrl(currentBeforeSwitch.serverUrl) !== activeServerUrl
+                        ) {
+                            setPhase('idle');
+                            return;
+                        }
+
+                        const secretString = encodeBase64(credentials.secret, 'base64url');
+                        const credentialsStored = await TokenStorage.setCredentialsForServerUrl(
+                            { token: credentials.token, secret: secretString },
+                            claimTargetUrl,
+                        );
+                        if (!credentialsStored) {
+                            throw new Error('Failed to store claim credentials for the target server');
+                        }
+                        if (!isCurrentOperation()) return;
+
+                        const currentAfterCredentialStore = getActiveServerSnapshot();
+                        if (
+                            currentAfterCredentialStore.generation !== priorServer.generation
+                            || currentAfterCredentialStore.serverId !== priorServer.serverId
+                            || normalizeServerUrl(currentAfterCredentialStore.serverUrl) !== activeServerUrl
+                        ) {
+                            setPhase('idle');
+                            return;
+                        }
+
+                        if (normalizePairingClaimOriginV1(currentAfterCredentialStore.serverUrl) !== claimTargetUrl) {
+                            const switchPromise = upsertActivateAndSwitchServer({
+                                serverUrl: claimTargetUrl,
+                                source: 'url',
+                                scope: 'device',
+                                refreshAuth: null,
+                            });
+                            const operationTarget = getActiveServerSnapshot();
+                            if (
+                                normalizePairingClaimOriginV1(operationTarget.serverUrl) === claimTargetUrl
+                                && (
+                                    operationTarget.serverId !== priorServer.serverId
+                                    || operationTarget.generation !== priorServer.generation
+                                )
+                            ) {
+                                ownedClaimServerSwitchRef.current = {
+                                    operationGeneration,
+                                    priorServerId: priorServer.serverId,
+                                    targetServerId: operationTarget.serverId,
+                                    targetGeneration: operationTarget.generation,
+                                };
+                            }
+                            try {
+                                await switchPromise;
+                            } catch (error) {
+                                await rollbackOwnedClaimServerSwitch(operationGeneration);
+                                throw error;
+                            }
+                        }
+                        if (!isCurrentOperation()) {
+                            await rollbackOwnedClaimServerSwitch(operationGeneration);
+                            return;
+                        }
+
+                        const targetSnapshot = getActiveServerSnapshot();
+                        if (normalizePairingClaimOriginV1(targetSnapshot.serverUrl) !== claimTargetUrl) {
+                            throw new Error('Claim target switch did not reach the requested origin');
+                        }
+
+                        await auth.refreshFromActiveServer();
+                        const currentAfterLogin = getActiveServerSnapshot();
+                        if (
+                            !isCurrentOperation()
+                            || currentAfterLogin.generation !== targetSnapshot.generation
+                            || currentAfterLogin.serverId !== targetSnapshot.serverId
+                        ) {
+                            await rollbackOwnedClaimServerSwitch(operationGeneration);
+                            return;
+                        }
+                        if (ownedClaimServerSwitchRef.current?.operationGeneration === operationGeneration) {
+                            ownedClaimServerSwitchRef.current = null;
+                        }
+                    } else {
+                        const secretString = encodeBase64(credentials.secret, 'base64url');
+                        await auth.login(credentials.token, secretString);
                     }
-                } else if (!isCancelledRef.current) {
+                    if (!isCurrentOperation()) return;
+                    router.replace('/');
+                } else if (isCurrentOperation()) {
                     await Modal.alertAsync(t('common.error'), t('errors.authenticationFailed'));
-                    setPhase('idle');
+                    if (isCurrentOperation()) setPhase('idle');
                 }
             } catch {
-                if (!isCancelledRef.current) {
+                await rollbackOwnedClaimServerSwitch(operationGeneration).catch(() => {});
+                if (isCurrentOperation()) {
                     await Modal.alertAsync(t('common.error'), t('errors.authenticationFailed'));
+                    if (isCurrentOperation()) setPhase('idle');
                 }
-                setPhase('idle');
+            } finally {
+                await rollbackOwnedClaimServerSwitch(operationGeneration).catch(() => {});
+                if (activeOperationRef.current === operationGeneration) {
+                    activeOperationRef.current = null;
+                }
             }
         },
-        [auth, router],
+        [auth, rollbackOwnedClaimServerSwitch, router],
     );
 
     React.useEffect(() => {
+        if (isFocused) return;
+        const activeOperationGeneration = activeOperationRef.current;
+        operationGenerationRef.current += 1;
+        activeOperationRef.current = null;
+        setPhase('idle');
+        setConfirmCode(null);
+        if (activeOperationGeneration !== null) {
+            void rollbackOwnedClaimServerSwitch(activeOperationGeneration).catch(() => {});
+        }
+    }, [isFocused, rollbackOwnedClaimServerSwitch]);
+
+    React.useEffect(() => {
+        mountedRef.current = true;
         return () => {
-            isCancelledRef.current = true;
+            mountedRef.current = false;
+            const activeOperationGeneration = activeOperationRef.current;
+            operationGenerationRef.current += 1;
+            activeOperationRef.current = null;
+            if (activeOperationGeneration !== null) {
+                void rollbackOwnedClaimServerSwitch(activeOperationGeneration).catch(() => {});
+            }
         };
-    }, []);
+    }, [rollbackOwnedClaimServerSwitch]);
 
     const waitingSuffix = phase === 'waiting' ? '.'.repeat(waitingDots % 4) : '';
     const statusText =

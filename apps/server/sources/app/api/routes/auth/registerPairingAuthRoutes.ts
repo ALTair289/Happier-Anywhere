@@ -1,7 +1,16 @@
 import { z } from "zod";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import tweetnacl from "tweetnacl";
 import * as privacyKit from "privacy-kit";
+import {
+    PAIRING_CLAIM_V1_MAX_TTL_MS,
+    PairingClaimConsumeRequestV1Schema,
+    PairingClaimConsumeResponseV1Schema,
+    PairingClaimInvalidPublicKeyResponseV1Schema,
+    PairingClaimNotFoundResponseV1Schema,
+    PairingClaimStartRequestV1Schema,
+    PairingClaimStartResponseV1Schema,
+} from "@happier-dev/protocol";
 
 import { db } from "@/storage/db";
 import { type Fastify } from "../../types";
@@ -16,6 +25,15 @@ import {
 
 function computeSecretHash(secret: string): string {
     return createHash("sha256").update(secret, "utf8").digest("base64url");
+}
+
+function computeClaimOriginMarker(claimId: string, origin: string): string {
+    return `claim-v1:${createHash("sha256").update(`claim-v1\0${claimId}\0${origin}`, "utf8").digest("base64url")}`;
+}
+
+function createClaimId(): string {
+    const random = privacyKit.encodeBase64(new Uint8Array(randomBytes(32)));
+    return `claim_${random.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
 }
 
 function safeEqualString(a: string, b: string): boolean {
@@ -86,6 +104,112 @@ export function registerPairingAuthRoutes(app: Fastify): void {
         },
     );
 
+    gated.post(
+        "/v1/auth/pairing/claim/start",
+        {
+            config: { rateLimit: pairingAuthRateLimitStartPerUser() },
+            preHandler: app.authenticate,
+            schema: {
+                body: PairingClaimStartRequestV1Schema,
+                response: {
+                    200: PairingClaimStartResponseV1Schema,
+                },
+            },
+        },
+        async (request: any, reply: any) => {
+            const now = new Date();
+            const origin = String(request.body.origin);
+            await db.authPairingSession
+                .deleteMany({
+                    where: {
+                        OR: [{ accountId: request.userId }, { expiresAt: { lt: now } }],
+                    },
+                })
+                .catch(() => {});
+
+            const expiresAt = new Date(now.getTime() + Math.min(policy.ttlMs, PAIRING_CLAIM_V1_MAX_TTL_MS));
+            const claimId = createClaimId();
+            const row = await db.authPairingSession.create({
+                data: {
+                    id: claimId,
+                    accountId: request.userId,
+                    secretHash: computeClaimOriginMarker(claimId, origin),
+                    expiresAt,
+                },
+                select: { id: true, expiresAt: true },
+            });
+            return reply.send({
+                protocol: "claim-v1",
+                claimId: row.id,
+                origin,
+                expiresAt: row.expiresAt.toISOString(),
+            });
+        },
+    );
+
+    gated.post(
+        "/v1/auth/pairing/claim/consume",
+        {
+            config: { rateLimit: pairingAuthRateLimitRequestPerIp() },
+            schema: {
+                body: PairingClaimConsumeRequestV1Schema,
+                response: {
+                    200: PairingClaimConsumeResponseV1Schema,
+                    401: PairingClaimInvalidPublicKeyResponseV1Schema,
+                    404: PairingClaimNotFoundResponseV1Schema,
+                },
+            },
+        },
+        async (request: any, reply: any) => {
+            const publicKeyRaw = String(request.body.publicKey);
+            let publicKeyBytes: Uint8Array;
+            try {
+                publicKeyBytes = privacyKit.decodeBase64(publicKeyRaw);
+            } catch {
+                return reply.code(401).send({ error: "Invalid public key" });
+            }
+            if (publicKeyBytes.length !== tweetnacl.box.publicKeyLength) {
+                return reply.code(401).send({ error: "Invalid public key" });
+            }
+
+            const now = new Date();
+            const claimId = String(request.body.claimId);
+            const originMarker = computeClaimOriginMarker(claimId, String(request.body.origin));
+            const updated = await db.authPairingSession.updateMany({
+                where: {
+                    id: claimId,
+                    secretHash: originMarker,
+                    requestedPublicKey: null,
+                    expiresAt: { gt: now },
+                },
+                data: {
+                    requestedPublicKey: publicKeyRaw,
+                    requestedDeviceLabel: sanitizeDeviceLabel(request.body.deviceLabel),
+                    requestedAt: now,
+                },
+            });
+            if (updated.count !== 1) {
+                const existingWinner = await db.authPairingSession.findFirst({
+                    where: {
+                        id: claimId,
+                        secretHash: originMarker,
+                        requestedPublicKey: publicKeyRaw,
+                        expiresAt: { gt: now },
+                    },
+                    select: { id: true },
+                });
+                if (!existingWinner) {
+                    return reply.code(404).send({ error: "not_found" });
+                }
+            }
+
+            return reply.send({
+                state: "requested",
+                confirmCode: computeConfirmCode(originMarker, publicKeyRaw),
+            });
+        },
+    );
+
     const requestBody = z.object({
         pairId: z.string().min(1).max(128),
         secret: z.string().min(1).max(256),
@@ -147,14 +271,47 @@ export function registerPairingAuthRoutes(app: Fastify): void {
 
             const deviceLabel = sanitizeDeviceLabel(request.body.deviceLabel);
 
-            await db.authPairingSession.update({
-                where: { id: session.id },
-                data: {
-                    requestedPublicKey: publicKeyRaw,
-                    requestedDeviceLabel: deviceLabel,
-                    requestedAt: session.requestedAt ?? now,
-                },
-            });
+            if (session.requestedPublicKey === publicKeyRaw) {
+                const refreshed = await db.authPairingSession.updateMany({
+                    where: {
+                        id: session.id,
+                        requestedPublicKey: publicKeyRaw,
+                        expiresAt: { gt: now },
+                    },
+                    data: {
+                        requestedDeviceLabel: deviceLabel,
+                        requestedAt: session.requestedAt ?? now,
+                    },
+                });
+                if (refreshed.count !== 1) {
+                    return reply.code(404).send({ error: "not_found" });
+                }
+            } else {
+                const claimed = await db.authPairingSession.updateMany({
+                    where: {
+                        id: session.id,
+                        requestedPublicKey: null,
+                        expiresAt: { gt: now },
+                    },
+                    data: {
+                        requestedPublicKey: publicKeyRaw,
+                        requestedDeviceLabel: deviceLabel,
+                        requestedAt: now,
+                    },
+                });
+                if (claimed.count !== 1) {
+                    const current = await db.authPairingSession.findUnique({
+                        where: { id: session.id },
+                        select: { requestedPublicKey: true, expiresAt: true },
+                    });
+                    if (!current || current.expiresAt.getTime() <= Date.now()) {
+                        return reply.code(404).send({ error: "not_found" });
+                    }
+                    if (current.requestedPublicKey !== publicKeyRaw) {
+                        return reply.code(401).send({ error: "already_requested" });
+                    }
+                }
+            }
 
             return reply.send({ state: "requested", confirmCode: computeConfirmCode(session.secretHash, publicKeyRaw) });
         },
@@ -198,7 +355,7 @@ export function registerPairingAuthRoutes(app: Fastify): void {
             if (session.accountId !== request.userId) return reply.code(404).send({ error: "not_found" });
 
             const now = new Date();
-            if (session.expiresAt.getTime() < now.getTime()) {
+            if (session.expiresAt.getTime() <= now.getTime()) {
                 await db.authPairingSession.delete({ where: { id: session.id } }).catch(() => {});
                 return reply.code(404).send({ error: "not_found" });
             }

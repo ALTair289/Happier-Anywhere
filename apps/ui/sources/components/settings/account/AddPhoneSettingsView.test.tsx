@@ -10,7 +10,7 @@ vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
 vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => {});
 
 const clipboardMocks = vi.hoisted(() => ({
-    setStringAsync: vi.fn(async () => {}),
+    setStringAsync: vi.fn(async (_value: string) => {}),
 }));
 const modalMocks = vi.hoisted(() => ({
     alertAsync: vi.fn(async () => undefined),
@@ -75,12 +75,27 @@ vi.mock('@/sync/api/capabilities/serverFeaturesClient', () => ({
     getCachedServerFeaturesSnapshot: () => null,
 }));
 
-const serverFetchSpy = vi.fn(async (path: string, _init?: any, _options?: any) => {
+const CLAIM_ID = `claim_${'a'.repeat(43)}`;
+const futureExpiresAt = () => new Date(Date.now() + 60_000).toISOString();
+const serverFetchSpy = vi.fn(async (path: string, init?: any, _options?: any) => {
+    if (path === '/v1/auth/pairing/claim/start') {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+                protocol: 'claim-v1',
+                claimId: CLAIM_ID,
+                origin: body.origin,
+                expiresAt: futureExpiresAt(),
+            }),
+        } as any;
+    }
     if (path === '/v1/auth/pairing/start') {
         return {
             ok: true,
             status: 200,
-            json: async () => ({ pairId: 'pair_123', expiresAt: '2026-02-23T00:00:00.000Z' }),
+            json: async () => ({ pairId: 'pair_123', expiresAt: futureExpiresAt() }),
         } as any;
     }
     if (path.startsWith('/v1/auth/pairing/status')) {
@@ -92,7 +107,7 @@ const serverFetchSpy = vi.fn(async (path: string, _init?: any, _options?: any) =
 let pairingStatusResponse: any = {
     ok: true,
     status: 200,
-    json: async () => ({ state: 'pending', pairId: 'pair_123', expiresAt: '2026-02-23T00:00:00.000Z' }),
+    json: async () => ({ state: 'pending', pairId: 'pair_123', expiresAt: futureExpiresAt() }),
 } as any;
 
 vi.mock('@/sync/http/client', () => ({
@@ -106,7 +121,7 @@ describe('AddPhoneSettingsView', () => {
         pairingStatusResponse = {
             ok: true,
             status: 200,
-            json: async () => ({ state: 'pending', pairId: 'pair_123', expiresAt: '2026-02-23T00:00:00.000Z' }),
+            json: async () => ({ state: 'pending', pairId: 'pair_123', expiresAt: futureExpiresAt() }),
         } as any;
         const { AddPhoneSettingsView } = await import('./AddPhoneSettingsView');
 
@@ -114,8 +129,10 @@ describe('AddPhoneSettingsView', () => {
         const qrContainer = screen.findByTestId('add-phone-qr');
         if (!qrContainer) throw new Error('Expected QR container');
         const qr = qrContainer.findByType('QRCode');
-        expect(String(qr.props.data)).toContain('happier:///pair?v=1');
-        expect(String(qr.props.data)).toContain('pairId=pair_123');
+        expect(String(qr.props.data)).toContain('happier:///pair?v=claim-v1');
+        expect(String(qr.props.data)).toContain(`claimId=${CLAIM_ID}`);
+        expect(String(qr.props.data)).toContain('origin=https%3A%2F%2Fstack.example.test');
+        expect(String(qr.props.data)).not.toContain('secret=');
     });
 
     it('copies the pairing deep link with inline feedback', async () => {
@@ -124,7 +141,7 @@ describe('AddPhoneSettingsView', () => {
         pairingStatusResponse = {
             ok: true,
             status: 200,
-            json: async () => ({ state: 'pending', pairId: 'pair_123', expiresAt: '2026-02-23T00:00:00.000Z' }),
+            json: async () => ({ state: 'pending', pairId: 'pair_123', expiresAt: futureExpiresAt() }),
         } as any;
         clipboardMocks.setStringAsync.mockClear();
         modalMocks.alertAsync.mockClear();
@@ -134,7 +151,8 @@ describe('AddPhoneSettingsView', () => {
         const screen = await renderScreen(<AddPhoneSettingsView />);
         await screen.pressByTestIdAsync('add-phone-pairing-link');
 
-        expect(clipboardMocks.setStringAsync).toHaveBeenCalledWith(expect.stringContaining('happier:///pair?v=1'));
+        expect(clipboardMocks.setStringAsync).toHaveBeenCalledWith(expect.stringContaining('happier:///pair?v=claim-v1'));
+        expect(clipboardMocks.setStringAsync.mock.calls.at(-1)?.[0]).not.toContain('secret=');
         expect(modalMocks.alertAsync).not.toHaveBeenCalledWith('common.success', 'common.copied');
         expect(screen.findByTestId('add-phone-pairing-link-copied')).toBeTruthy();
     });
@@ -165,7 +183,7 @@ describe('AddPhoneSettingsView', () => {
         pairingStatusResponse = {
             ok: true,
             status: 200,
-            json: async () => ({ state: 'pending', pairId: 'pair_123', expiresAt: '2026-02-23T00:00:00.000Z' }),
+            json: async () => ({ state: 'pending', pairId: 'pair_123', expiresAt: futureExpiresAt() }),
         } as any;
         const { AddPhoneSettingsView } = await import('./AddPhoneSettingsView');
 
@@ -182,7 +200,7 @@ describe('AddPhoneSettingsView', () => {
         pairingStatusResponse = {
             ok: true,
             status: 200,
-            json: async () => ({ state: 'pending', pairId: 'pair_123', expiresAt: '2026-02-23T00:00:00.000Z' }),
+            json: async () => ({ state: 'pending', pairId: 'pair_123', expiresAt: futureExpiresAt() }),
         } as any;
         const { AddPhoneSettingsView } = await import('./AddPhoneSettingsView');
 

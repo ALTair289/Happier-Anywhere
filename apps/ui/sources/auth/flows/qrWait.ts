@@ -6,14 +6,35 @@ import { getActiveServerSnapshot } from '@/sync/domains/server/serverRuntime';
 import { setServerProfileIdentityForUrl } from '@/sync/domains/server/serverProfiles';
 import { isRuntimeActive } from '@/utils/runtime/isRuntimeActive';
 import { delay } from '@/utils/timing/time';
+import { pairingClaimFetch, type PairingClaimEndpointPath } from '@/sync/api/account/pairingClaimTransport';
+import { normalizePairingClaimOriginV1 } from '@happier-dev/protocol';
 
 export interface AuthCredentials {
     secret: Uint8Array;
     token: string;
 }
 
-export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: number) => void, shouldCancel?: () => boolean): Promise<AuthCredentials | null> {
+export type AuthQRWaitOptions = Readonly<{
+    serverUrl?: string;
+}>;
+
+export async function authQRWait(
+    keypair: QRAuthKeyPair,
+    onProgress?: (dots: number) => void,
+    shouldCancel?: () => boolean,
+    options: AuthQRWaitOptions = {},
+): Promise<AuthCredentials | null> {
     let dots = 0;
+    const explicitServerUrl = options.serverUrl === undefined
+        ? null
+        : normalizePairingClaimOriginV1(options.serverUrl);
+    if (options.serverUrl !== undefined && !explicitServerUrl) return null;
+    const fetchAuthRequest = (
+        path: Extract<PairingClaimEndpointPath, '/v1/auth/account/request' | '/v2/auth/account/request'>,
+        init: RequestInit,
+    ) => explicitServerUrl
+        ? pairingClaimFetch(explicitServerUrl, path, init)
+        : serverFetch(path, init, { includeAuth: false });
 
     type Requested = { state: 'requested' };
     type AuthorizedV1 = { state: 'authorized'; token: string; response: string; serverIdentityId?: string | null };
@@ -31,7 +52,7 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
         }
 
         try {
-            let response = await serverFetch('/v2/auth/account/request', {
+            let response = await fetchAuthRequest('/v2/auth/account/request', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -39,9 +60,9 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
                 body: JSON.stringify({
                     publicKey: encodeBase64(keypair.publicKey),
                 }),
-            }, { includeAuth: false });
+            });
             if (response.status === 404) {
-                response = await serverFetch('/v1/auth/account/request', {
+                response = await fetchAuthRequest('/v1/auth/account/request', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -49,12 +70,13 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
                     body: JSON.stringify({
                         publicKey: encodeBase64(keypair.publicKey),
                     }),
-                }, { includeAuth: false });
+                });
             }
             if (!response.ok) {
                 throw new Error(`Failed to poll auth request: ${response.status}`);
             }
             const data = await response.json() as AuthPollResponse;
+            if (shouldCancel?.()) return null;
 
             if (data.state === 'authorized') {
                 const token =
@@ -73,7 +95,8 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
                 }
 
                 if (data.serverIdentityId) {
-                    setServerProfileIdentityForUrl(getActiveServerSnapshot().serverUrl, data.serverIdentityId);
+                    const identityServerUrl = explicitServerUrl ?? getActiveServerSnapshot().serverUrl;
+                    setServerProfileIdentityForUrl(identityServerUrl, data.serverIdentityId);
                 }
 
                 const encryptedResponse = decodeBase64(data.response);

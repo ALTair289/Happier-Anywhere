@@ -172,6 +172,7 @@ export const AddPhoneSettingsView = React.memo(function AddPhoneSettingsView() {
         if (!deepLink) return false;
         const parsed = parsePairingDeepLink(deepLink);
         if (!parsed) return false;
+        if ('claimId' in parsed) return false;
         if (parsed.serverUrl) return false;
 
         const active = canonicalizeServerUrl(getActiveServerUrl());

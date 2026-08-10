@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import sodium from '@/encryption/libsodium.lib';
 import { encodeBase64 } from '@/encryption/base64';
@@ -14,9 +14,15 @@ const activeServerSnapshot = vi.hoisted(() => ({
 }));
 
 const setServerProfileIdentityForUrlMock = vi.hoisted(() => vi.fn());
+const pairingClaimFetchMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/sync/http/client', () => ({
     serverFetch: vi.fn(),
+}));
+
+vi.mock('@/sync/api/account/pairingClaimTransport', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/sync/api/account/pairingClaimTransport')>()),
+    pairingClaimFetch: pairingClaimFetchMock,
 }));
 
 vi.mock('@/sync/domains/server/serverRuntime', () => ({
@@ -44,6 +50,11 @@ function makeJsonResponse(status: number, payload: any): StubResponse {
 describe('authQRWait v2 fallback', () => {
     beforeAll(async () => {
         await sodium.ready;
+    });
+
+    beforeEach(() => {
+        pairingClaimFetchMock.mockReset();
+        vi.mocked(serverFetch).mockReset();
     });
 
     it('uses /v2/auth/account/request when available', async () => {
@@ -115,6 +126,37 @@ describe('authQRWait v2 fallback', () => {
         expect(setServerProfileIdentityForUrlMock).toHaveBeenCalledWith(
             'https://relay.example.test',
             'srv_auth_identity',
+        );
+    });
+
+    it('pins polling and identity storage to an explicit server URL', async () => {
+        const keypair = generateAuthKeyPair();
+        const responseEncrypted = encodeBase64(encryptBox(new Uint8Array([7, 8, 9]), keypair.publicKey));
+
+        setServerProfileIdentityForUrlMock.mockClear();
+        pairingClaimFetchMock.mockResolvedValueOnce(
+            makeJsonResponse(200, {
+                state: 'authorized',
+                token: 'target-token',
+                response: responseEncrypted,
+                serverIdentityId: 'srv_target_identity',
+            }) as any,
+        );
+
+        const out = await authQRWait(keypair, undefined, undefined, {
+            serverUrl: 'https://target.example.test',
+        });
+
+        expect(out?.token).toBe('target-token');
+        expect(pairingClaimFetchMock).toHaveBeenCalledWith(
+            'https://target.example.test',
+            '/v2/auth/account/request',
+            expect.objectContaining({ method: 'POST' }),
+        );
+        expect(vi.mocked(serverFetch)).not.toHaveBeenCalled();
+        expect(setServerProfileIdentityForUrlMock).toHaveBeenCalledWith(
+            'https://target.example.test',
+            'srv_target_identity',
         );
     });
 });
