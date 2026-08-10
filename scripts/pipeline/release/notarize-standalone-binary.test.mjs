@@ -193,15 +193,40 @@ test('Darwin payload notarization signs and strictly verifies every Mach-O leaf 
   assert.equal(Object.values(commands).flat(Infinity).includes('stapler'), false);
 });
 
-test('Gatekeeper assessment only tolerates the raw-tool non-app classification', () => {
+test('Gatekeeper assessment retries only transient online-ticket propagation failures', () => {
+  const command = ['spctl', ['--assess', '--type', 'execute', '/tmp/happier']];
+  const retryDelays = [];
+  let attempts = 0;
+  const ticketPropagationError = new Error('spctl rejected the payload');
+  ticketPropagationError.stderr = 'source=Unnotarized Developer ID\n';
+
+  assert.equal(
+    runGatekeeperAssessment(command, {
+      attempts: 4,
+      retryDelayMs: 10,
+      runCommand: () => {
+        attempts += 1;
+        if (attempts < 3) throw ticketPropagationError;
+      },
+      sleep: (delayMs) => retryDelays.push(delayMs),
+      logger: { warn: () => {} },
+    }),
+    true,
+  );
+  assert.equal(attempts, 3);
+  assert.deepEqual(retryDelays, [10, 20]);
+
   const policyError = new Error('spctl rejected the payload');
-  policyError.stderr = 'source=Unnotarized Developer ID\n';
+  policyError.stderr = 'source=Insufficient Context\n';
 
   assert.throws(
-    () => runGatekeeperAssessment(
-      ['spctl', ['--assess', '--type', 'execute', '/tmp/happier']],
-      { runCommand: () => { throw policyError; }, logger: { warn: () => {} } },
-    ),
+    () => runGatekeeperAssessment(command, {
+      attempts: 4,
+      retryDelayMs: 10,
+      runCommand: () => { throw policyError; },
+      sleep: () => assert.fail('non-transient Gatekeeper errors must not sleep'),
+      logger: { warn: () => {} },
+    }),
     /spctl rejected the payload/iu,
   );
 });

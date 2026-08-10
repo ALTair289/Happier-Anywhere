@@ -32,6 +32,8 @@ const PRESERVED_CODESIGN_METADATA = [
 ].join(',');
 const DEFAULT_CODESIGN_ATTEMPTS = 4;
 const DEFAULT_CODESIGN_RETRY_DELAY_MS = 15_000;
+const DEFAULT_GATEKEEPER_ATTEMPTS = 5;
+const DEFAULT_GATEKEEPER_RETRY_DELAY_MS = 15_000;
 
 function isDeveloperIdApplicationSigningSelector(value) {
   const selector = String(value ?? '').trim();
@@ -357,21 +359,41 @@ export function runCodesignWithRetry(
 
 export function runGatekeeperAssessment(
   command,
-  { runCommand = run, logger = console } = {},
+  {
+    attempts = DEFAULT_GATEKEEPER_ATTEMPTS,
+    retryDelayMs = DEFAULT_GATEKEEPER_RETRY_DELAY_MS,
+    runCommand = run,
+    sleep = sleepSync,
+    logger = console,
+  } = {},
 ) {
-  try {
-    runCommand(command, { capture: true });
-    return true;
-  } catch (error) {
-    if (!/does not seem to be an app/iu.test(commandFailureOutput(error))) {
-      throw error;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      runCommand(command, { capture: true });
+      return true;
+    } catch (error) {
+      const failureOutput = commandFailureOutput(error);
+      if (/does not seem to be an app/iu.test(failureOutput)) {
+        logger.warn?.(
+          '[release] spctl cannot assess this raw command-line Mach-O as an app; '
+          + 'accepted notarization and strict code-signature verification remain authoritative.',
+        );
+        return false;
+      }
+      const onlineTicketPending = /source\s*=\s*Unnotarized Developer ID/iu.test(failureOutput);
+      if (!onlineTicketPending || attempt >= attempts) {
+        throw error;
+      }
+      const nextAttempt = attempt + 1;
+      const delayMs = retryDelayMs * (2 ** (attempt - 1));
+      logger.warn?.(
+        `[release] accepted notarization ticket is not visible to Gatekeeper yet; `
+        + `retrying spctl (${nextAttempt}/${attempts})`,
+      );
+      sleep(delayMs);
     }
-    logger.warn?.(
-      '[release] spctl cannot assess this raw command-line Mach-O as an app; '
-      + 'accepted notarization and strict code-signature verification remain authoritative.',
-    );
-    return false;
   }
+  throw new Error('[release] Gatekeeper assessment retry loop exhausted unexpectedly');
 }
 
 export function repairAdHocDarwinPayloadSignatures(
