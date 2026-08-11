@@ -4,6 +4,18 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, 
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+import cliDistBuildManifest from '../cliDistBuildManifest.cjs';
+
+function writeCliDistFixture(cliDistDir, entrypointSource, additionalFiles = {}) {
+  mkdirSync(cliDistDir, { recursive: true });
+  const entrypoint = join(cliDistDir, 'index.mjs');
+  writeFileSync(entrypoint, entrypointSource, 'utf8');
+  for (const [relativePath, content] of Object.entries(additionalFiles)) {
+    writeFileSync(join(cliDistDir, relativePath), content, 'utf8');
+  }
+  cliDistBuildManifest.writeCliDistBuildManifest(entrypoint);
+}
+
 async function acceptWorkspacePackageFixtures(_repoRoot, packageNames) {
   return { ok: true, built: [], skipped: [...packageNames] };
 }
@@ -615,7 +627,7 @@ test('buildCliBinaryArtifactPayload compiles the local CLI binary into the paylo
     mkdirSync(homebridgePtyDir, { recursive: true });
     writeFileSync(join(repoRoot, 'package.json'), JSON.stringify({ name: 'repo', private: true }, null, 2));
     writeCliRuntimePackageFixture(repoRoot);
-    writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+    writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
     writeFileSync(join(cliScriptsDir, 'childProcessOptions.cjs'), 'module.exports = { withWindowsHide: (input) => input };\n', 'utf8');
     writeFileSync(join(cliScriptsDir, 'claude_launcher_runtime.cjs'), 'module.exports = { getClaudeCliPath: () => "claude", runClaudeCli: () => {} };\n', 'utf8');
     writeFileSync(join(cliScriptsDir, 'claude_local_launcher.cjs'), 'require("./claude_launcher_runtime.cjs");\n', 'utf8');
@@ -676,8 +688,7 @@ test('buildCliBinaryArtifactPayload compiles the local CLI binary into the paylo
       commandProbe: () => true,
       runCommand: (cmd, args) => {
         runCalls.push({ cmd, args });
-        mkdirSync(cliDistDir, { recursive: true });
-        writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+        writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
       },
       compileBinary: async ({ outfile, externals }) => {
         compileCalls.push({ outfile, externals });
@@ -797,7 +808,7 @@ test('buildCliBinaryArtifactPayload removes compile-generated node_modules befor
       ),
       'utf8',
     );
-    writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+    writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
     writeFileSync(join(cliScriptsDir, 'childProcessOptions.cjs'), 'module.exports = { withWindowsHide: (input) => input };\n', 'utf8');
     writeFileSync(join(cliScriptsDir, 'claude_launcher_runtime.cjs'), 'module.exports = { getClaudeCliPath: () => "claude", runClaudeCli: () => {} };\n', 'utf8');
     writeFileSync(join(cliScriptsDir, 'claude_local_launcher.cjs'), 'require("./claude_launcher_runtime.cjs");\n', 'utf8');
@@ -855,8 +866,7 @@ test('buildCliBinaryArtifactPayload removes compile-generated node_modules befor
       }),
       commandProbe: () => true,
       runCommand: () => {
-        mkdirSync(cliDistDir, { recursive: true });
-        writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+        writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
       },
       compileBinary: async ({ outfile }) => {
         const compileChownrDir = join(payloadDir, 'node_modules', 'chownr');
@@ -967,9 +977,11 @@ test('buildCliBinaryArtifactPayload snapshots CLI dist before compile/copy so la
       }),
       commandProbe: () => true,
       runCommand: async () => {
-        mkdirSync(cliDistDir, { recursive: true });
-        writeFileSync(join(cliDistDir, 'index.mjs'), 'export { detect } from "./detect-BwxnBwvx.mjs";\n', 'utf8');
-        writeFileSync(join(cliDistDir, 'detect-BwxnBwvx.mjs'), 'export const detect = true;\n', 'utf8');
+        writeCliDistFixture(
+          cliDistDir,
+          'export { detect } from "./detect-BwxnBwvx.mjs";\n',
+          { 'detect-BwxnBwvx.mjs': 'export const detect = true;\n' },
+        );
       },
       compileBinary: async ({ outfile }) => {
         rmSync(cliDistDir, { recursive: true, force: true });
@@ -1009,7 +1021,7 @@ test('buildCliBinaryArtifactPayload derives bundled workspace packages from apps
       '@happier-dev/protocol',
       '@happier-dev/release-runtime',
     ]);
-    writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+    writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
     writeFileSync(join(cliScriptsDir, 'childProcessOptions.cjs'), 'module.exports = { withWindowsHide: (input) => input };\n', 'utf8');
     writeFileSync(join(cliScriptsDir, 'claude_launcher_runtime.cjs'), 'module.exports = { getClaudeCliPath: () => "claude", runClaudeCli: () => {} };\n', 'utf8');
     writeFileSync(join(cliScriptsDir, 'claude_local_launcher.cjs'), 'require("./claude_launcher_runtime.cjs");\n', 'utf8');
@@ -1052,8 +1064,7 @@ test('buildCliBinaryArtifactPayload derives bundled workspace packages from apps
       }),
       commandProbe: () => true,
       runCommand: () => {
-        mkdirSync(cliDistDir, { recursive: true });
-        writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+        writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
       },
       compileBinary: async ({ outfile }) => {
         writeFileSync(outfile, '#!/bin/sh\necho happier\n', 'utf8');
@@ -1089,7 +1100,7 @@ test('buildCliBinaryArtifactPayload restores runtime sidecars after compile rewr
     mkdirSync(homebridgePtyDir, { recursive: true });
     writeFileSync(join(repoRoot, 'package.json'), JSON.stringify({ name: 'repo', private: true }, null, 2));
     writeCliRuntimePackageFixture(repoRoot);
-    writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+    writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
     writeFileSync(join(cliScriptsDir, 'childProcessOptions.cjs'), 'module.exports = { withWindowsHide: (input) => input };\n', 'utf8');
     writeFileSync(join(cliScriptsDir, 'claude_launcher_runtime.cjs'), 'module.exports = { getClaudeCliPath: () => "claude", runClaudeCli: () => {} };\n', 'utf8');
     writeFileSync(join(cliScriptsDir, 'claude_local_launcher.cjs'), 'require("./claude_launcher_runtime.cjs");\n', 'utf8');
@@ -1135,8 +1146,7 @@ test('buildCliBinaryArtifactPayload restores runtime sidecars after compile rewr
       }),
       commandProbe: () => true,
       runCommand: () => {
-        mkdirSync(cliDistDir, { recursive: true });
-        writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+        writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
       },
       compileBinary: async ({ outfile }) => {
         rmSync(payloadDir, { recursive: true, force: true });
@@ -1181,7 +1191,7 @@ test('buildCliBinaryArtifactPayload stages embeddings runtime packages and exter
     mkdirSync(homebridgePtyDir, { recursive: true });
     writeFileSync(join(repoRoot, 'package.json'), JSON.stringify({ name: 'repo', private: true }, null, 2));
     writeCliRuntimePackageFixture(repoRoot);
-    writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+    writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
     writeFileSync(join(cliScriptsDir, 'childProcessOptions.cjs'), 'module.exports = { withWindowsHide: (input) => input };\n', 'utf8');
     writeFileSync(join(cliScriptsDir, 'claude_launcher_runtime.cjs'), 'module.exports = { getClaudeCliPath: () => "claude", runClaudeCli: () => {} };\n', 'utf8');
     writeFileSync(join(cliScriptsDir, 'claude_local_launcher.cjs'), 'require("./claude_launcher_runtime.cjs");\n', 'utf8');
@@ -1233,8 +1243,7 @@ test('buildCliBinaryArtifactPayload stages embeddings runtime packages and exter
       }),
       commandProbe: () => true,
       runCommand: () => {
-        mkdirSync(cliDistDir, { recursive: true });
-        writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+        writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
       },
       compileBinary: async (args) => {
         compileCalls.push(args);
@@ -1688,7 +1697,12 @@ test('buildServerBinaryArtifactPayload stages sharp native runtime sidecars for 
         runCommand: () => {},
         compileBinary: async ({ outfile }) => writeFileSync(outfile, '#!/bin/sh\necho happier-server\n', 'utf8'),
       }),
-      /missing runtime package @img\/sharp-libvips-darwin-arm64/u,
+      (error) => error?.name === 'ServerArtifactRuntimeDependenciesBlockedError'
+        && error?.report?.status === 'BLOCKED'
+        && error?.report?.targets?.[0]?.failures?.some((failure) => (
+          failure.packageName === '@img/sharp-libvips-darwin-arm64'
+          && failure.reason === 'missing-package'
+        )),
     );
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });

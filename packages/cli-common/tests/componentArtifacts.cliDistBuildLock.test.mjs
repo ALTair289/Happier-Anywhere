@@ -6,7 +6,15 @@ import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { withBuildSharedDepsLock } from '../../../apps/cli/scripts/buildSharedDeps.mjs';
+import cliDistBuildManifest from '../cliDistBuildManifest.cjs';
 import { withWorkspaceBundleLock } from '../workspaceBundleLock.mjs';
+
+function writeCliDistFixture(cliDistDir, entrypointSource) {
+  mkdirSync(cliDistDir, { recursive: true });
+  const entrypoint = join(cliDistDir, 'index.mjs');
+  writeFileSync(entrypoint, entrypointSource, 'utf8');
+  cliDistBuildManifest.writeCliDistBuildManifest(entrypoint);
+}
 
 async function admitExistingWorkspaceBundles(_repoRoot, packageNames) {
   return { ok: true, built: [], skipped: packageNames };
@@ -172,7 +180,7 @@ test('buildCliBinaryArtifactPayload rebuilds a fresh-looking cli dist when reuse
     mkdirSync(join(repoRoot, 'apps', 'cli', 'src'), { recursive: true });
     mkdirSync(cliDistDir, { recursive: true });
     writeFileSync(join(repoRoot, 'apps', 'cli', 'src', 'index.ts'), 'console.log("source");\n', 'utf8');
-    writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("stale-dist");\n', 'utf8');
+    writeCliDistFixture(cliDistDir, 'console.log("stale-dist");\n');
 
     const artifacts = await import('../dist/componentArtifacts/index.js');
     const runCalls = [];
@@ -189,8 +197,7 @@ test('buildCliBinaryArtifactPayload rebuilds a fresh-looking cli dist when reuse
       ensureWorkspacePackagesBuiltByName: admitExistingWorkspaceBundles,
       runCommand: (cmd, args) => {
         runCalls.push({ cmd, args });
-        mkdirSync(cliDistDir, { recursive: true });
-        writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("rebuilt-from-source");\n', 'utf8');
+        writeCliDistFixture(cliDistDir, 'console.log("rebuilt-from-source");\n');
       },
       compileBinary: async ({ outfile }) => {
         writeFileSync(outfile, '#!/bin/sh\necho happier\n', 'utf8');
@@ -234,8 +241,7 @@ test('buildCliBinaryArtifactPayload reuses the first completed dist build across
       runCalls.push({ cmd, args });
       assert.equal(runCalls.length, 1, 'concurrent artifact requests should not trigger a second CLI dist build');
       await firstBuildRelease;
-      mkdirSync(cliDistDir, { recursive: true });
-      writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+      writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
     };
 
     const compileBinary = async ({ outfile }) => {
@@ -296,8 +302,7 @@ test('buildCliBinaryArtifactPayload propagates its current owner lease to the re
 
     const runCommand = async (_cmd, _args, options) => {
       await withBuildSharedDepsLock(async () => {
-        mkdirSync(cliDistDir, { recursive: true });
-        writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli");\n', 'utf8');
+        writeCliDistFixture(cliDistDir, 'console.log("cli");\n');
       }, {
         lockPath,
         env: options?.env,
@@ -361,8 +366,7 @@ test('buildCliBinaryArtifactPayload keeps workspace payload copies in the snapsh
       target,
       commandProbe: () => true,
       runCommand: async () => {
-        mkdirSync(cliDistDir, { recursive: true });
-        writeFileSync(join(cliDistDir, 'index.mjs'), 'console.log("cli generation a");\n', 'utf8');
+        writeCliDistFixture(cliDistDir, 'console.log("cli generation a");\n');
       },
       ensureWorkspacePackagesBuiltByName: admitExistingWorkspaceBundles,
       compileBinary: async ({ outfile }) => {

@@ -433,7 +433,9 @@ describe('getSessionStatus', () => {
     });
 
     it('does not return action_required when transcript marks the same request as canceled', async () => {
-        const { getSessionStatus } = await import('./sessionUtils');
+        const { registerStorageStateReader } = await import('@/sync/domains/state/storageStateReaderBridge');
+        const { getSessionStatus, listPendingUserActionRequests } = await import('./sessionUtils');
+        registerStorageStateReader(readMockStorageState);
         const session = createBaseSession({
             id: 's-transcript-canceled',
             agentState: {
@@ -477,6 +479,8 @@ describe('getSessionStatus', () => {
                 messagesVersion: 1,
             },
         };
+
+        expect(listPendingUserActionRequests(session)).toEqual([]);
 
         const status = getSessionStatus(session, 1_000, 0);
         expect(status.state).toBe('waiting');
@@ -1154,7 +1158,9 @@ describe('listPendingPermissionRequests', () => {
     });
 
     it('reads pending transcript tool-call permissions from normalized stored session messages when no messages are passed', async () => {
+        const { registerStorageStateReader } = await import('@/sync/domains/state/storageStateReaderBridge');
         const { listPendingPermissionRequests } = await import('./sessionUtils');
+        registerStorageStateReader(readMockStorageState);
         const session = createBaseSession({
             id: 's-transcript-perm-normalized',
             agentState: null,
@@ -1561,7 +1567,9 @@ describe('getSessionStatus', () => {
                 },
             },
         }));
+        const { registerStorageStateReader } = await import('@/sync/domains/state/storageStateReaderBridge');
         const { getSessionStatus } = await import('./sessionUtils');
+        registerStorageStateReader(readMockStorageState);
         const session = createBaseSession({
             id: 's-transcript-status',
             agentState: null,

@@ -22,20 +22,28 @@ vi.mock('@happier-dev/cli-common/firstPartyRuntime', async () => {
   return {
     ...actual,
     extractReleasePayloadRootFromArchive: async ({ extractDir }: { extractDir: string }) => {
-    const binaryName = process.platform === 'win32' ? 'gh.exe' : 'gh';
-    const extractedBinPath = join(extractDir, 'gh-release', 'bin', binaryName);
-    await mkdir(dirname(extractedBinPath), { recursive: true });
-    await writeFile(extractedBinPath, process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\necho gh\n', { encoding: 'utf8', mode: 0o755 });
-    if (process.platform !== 'win32') await chmod(extractedBinPath, 0o755);
-    return join(extractDir, 'gh-release');
+      const binaryName = process.platform === 'win32' ? 'gh.exe' : 'gh';
+      const extractedBinPath = join(extractDir, 'gh-release', 'bin', binaryName);
+      await mkdir(dirname(extractedBinPath), { recursive: true });
+      await writeFile(extractedBinPath, process.platform === 'win32' ? '@echo off\r\necho gh\r\n' : '#!/bin/sh\necho gh\n', { encoding: 'utf8', mode: 0o755 });
+      if (process.platform !== 'win32') await chmod(extractedBinPath, 0o755);
+      return join(extractDir, 'gh-release');
     },
   };
-}));
+});
 
 const ORIGINAL_HOME = process.env.HAPPIER_HOME_DIR;
 const envKeys = ['HAPPIER_HOME_DIR', 'PATH', 'PATHEXT'] as const;
 const tempDirs = new Set<string>();
 let envScope = createEnvKeyScope(envKeys);
+
+function expectSameExecutablePath(actual: string, expected: string): void {
+  if (process.platform === 'win32') {
+    expect(actual.toLowerCase()).toBe(expected.toLowerCase());
+    return;
+  }
+  expect(actual).toBe(expected);
+}
 
 async function createFakeSystemGhBinary(): Promise<{ dir: string; binPath: string }> {
   const dir = await mkdtemp(join(tmpdir(), 'happier-gh-path-'));
@@ -99,7 +107,7 @@ describe('gh release-binary installer', () => {
     await writeFile(ghBinPath(), '#!/bin/sh\necho gh\n', { encoding: 'utf8', mode: 0o755 });
     if (process.platform !== 'win32') await chmod(ghBinPath(), 0o755);
 
-    expect(resolveGithubCliCommandPath()).toBe(systemGhPath);
+    expectSameExecutablePath(resolveGithubCliCommandPath(), systemGhPath);
   });
 
   it('reports a system GitHub CLI on PATH as installed without a managed binary', async () => {
@@ -111,11 +119,13 @@ describe('gh release-binary installer', () => {
     const { getGhDepStatus, resolveExistingGhManagedBinPath } = await import('./gh');
 
     expect(resolveExistingGhManagedBinPath()).toBeNull();
-    await expect(getGhDepStatus()).resolves.toMatchObject({
+    const status = await getGhDepStatus();
+    expect(status).toMatchObject({
       installed: true,
-      binPath: systemGhPath,
       sourceKind: 'github_release_binary',
     });
+    expect(status.binPath).not.toBeNull();
+    expectSameExecutablePath(status.binPath!, systemGhPath);
   });
 
   it('installs GitHub CLI from a release archive by copying the extracted bin/gh payload', async () => {
@@ -148,6 +158,8 @@ describe('gh release-binary installer', () => {
     expect(ghInstallDir()).toContain(home);
 
     await expect(installGh()).resolves.toEqual(expect.objectContaining({ ok: true }));
-    await expect(readFile(ghBinPath(), 'utf8')).resolves.toContain('gh');
+    await expect(readFile(ghBinPath(), 'utf8')).resolves.toBe(
+      process.platform === 'win32' ? '@echo off\r\necho gh\r\n' : '#!/bin/sh\necho gh\n',
+    );
   });
 });

@@ -12,6 +12,7 @@ import { initEncrypt } from "@/modules/encrypt";
 import { initFilesLocalFromEnv, loadFiles } from "@/storage/blob/files";
 import { db, initDbSqlite } from "@/storage/db";
 import { applyEnvValues, restoreEnv as restoreSnapshotEnv, snapshotEnv, type EnvValues } from "./env";
+import { resolveServerScriptCommandInvocation } from "../../scripts/runCommand";
 
 export type LightSqliteHarness = {
     readonly baseDir: string;
@@ -33,14 +34,22 @@ export type LightSqliteHarnessOptions = Readonly<{
 }>;
 
 function runSqliteMigrations(params: { cwd: string; env: NodeJS.ProcessEnv }): void {
-    const res = spawnSync(
+    const invocation = resolveServerScriptCommandInvocation(
         "yarn",
         ["-s", "migrate:sqlite:deploy"],
+        params.env,
+    );
+    const res = spawnSync(
+        invocation.command,
+        invocation.args,
         {
             cwd: params.cwd,
             env: { ...(params.env as Record<string, string>), RUST_LOG: "info" },
             encoding: "utf8",
             stdio: ["ignore", "pipe", "pipe"],
+            ...(invocation.windowsVerbatimArguments
+                ? { windowsVerbatimArguments: invocation.windowsVerbatimArguments }
+                : {}),
         },
     );
     if (res.status !== 0) {

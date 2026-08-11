@@ -249,7 +249,7 @@ describe('createTmuxTerminalHostAdapter', () => {
 
   it('submits after a successful native paste without requiring pre-submit screen capture', async () => {
     const tmux = new TmuxUtilities();
-    vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => ({
+    const executeTmuxCommand = vi.spyOn(tmux, 'executeTmuxCommand').mockImplementation(async (args) => ({
       returncode: 0,
       stdout: args[0] === 'display-message' ? '0\t12345\tclaude\n' : '',
       stderr: '',
@@ -273,7 +273,7 @@ describe('createTmuxTerminalHostAdapter', () => {
       duplicateRisk: 'likely',
     });
 
-    expect(tmux.executeTmuxCommand.mock.calls.map((call) => call[0]).filter((args) => args[0] === 'send-keys')).toEqual([
+    expect(executeTmuxCommand.mock.calls.map((call) => call[0]).filter((args) => args[0] === 'send-keys')).toEqual([
       ['send-keys', '-t', 'happy:claude.1', 'C-m'],
     ]);
   });
