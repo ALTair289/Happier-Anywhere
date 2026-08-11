@@ -1,7 +1,9 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import {
+  bindSystemTaskSshEndpoint,
   extractFirstScannedSshKnownHostLine,
   resolveSshKnownHostTrust,
+  resolveSystemTaskSshEndpoint,
   RemoteBootstrapMachineParams,
   RemoteHostTrustResolution,
   SystemTaskSshConnectionConfig,
@@ -9,7 +11,7 @@ import {
 
 import { runLocalHappierJsonCommand } from './happierCli.js';
 import { buildSshCommand, redactSshText } from '../ssh/index.js';
-import { extractSshHost, normalizeBootstrapChannel, parseFirstJsonObject, resolveDefaultKnownHostsPath, runCommandCapture } from './taskRuntime.js';
+import { normalizeBootstrapChannel, parseFirstJsonObject, resolveDefaultKnownHostsPath, runCommandCapture } from './taskRuntime.js';
 import { installOrUpdateRelayRuntimeDefault } from './relayRuntimeTasks.js';
 import { installRemoteFirstPartyComponent, resolveRemoteInstalledFirstPartyBinaryPath } from './remoteFirstPartyPayloadInstaller.js';
 
@@ -41,21 +43,26 @@ async function writeKnownHostsText(path: string, text: string): Promise<void> {
 export async function resolveRemoteSshHostTrustDefault(params: Readonly<{
   ssh: SshConnectionConfig;
   knownHostsMode: 'app' | 'system';
-}>): Promise<RemoteHostTrustResolution> {
+}>, deps: Readonly<{
+  runCommandCapture?: typeof runCommandCapture;
+}> = {}): Promise<RemoteHostTrustResolution> {
   if (params.knownHostsMode === 'system') {
     return { status: 'trusted' };
   }
 
   const knownHostsPath = params.ssh.knownHostsPath || resolveDefaultKnownHostsPath();
-  const host = extractSshHost(params.ssh.target);
+  const endpoint = resolveSystemTaskSshEndpoint({ ssh: params.ssh });
+  endpoint.assertKeyscanSupported();
+  endpoint.assertConfigUnchanged();
+  const host = endpoint.keyscanHost;
   const existingText = await readFile(knownHostsPath, 'utf8').catch(() => '');
 
-  const keyscan = await runCommandCapture({
+  const keyscan = await (deps.runCommandCapture ?? runCommandCapture)({
     command: 'ssh-keyscan',
     args: [
       '-T',
       '5',
-      ...(params.ssh.port ? ['-p', String(params.ssh.port)] : []),
+      ...(endpoint.ssh.port ? ['-p', String(endpoint.ssh.port)] : []),
       '-t',
       'ed25519',
       host,
@@ -65,7 +72,10 @@ export async function resolveRemoteSshHostTrustDefault(params: Readonly<{
     throw new Error(redactSshText(keyscan.stderr || 'Failed to resolve SSH host key.'));
   }
 
-  const scanned = extractFirstScannedSshKnownHostLine(keyscan.stdout);
+  const scannedRaw = extractFirstScannedSshKnownHostLine(keyscan.stdout);
+  const scanned = extractFirstScannedSshKnownHostLine(
+    `${endpoint.knownHostsHost} ${scannedRaw.keyType} ${scannedRaw.key}`,
+  );
   const trust = resolveSshKnownHostTrust({
     knownHostsText: existingText,
     scannedHostKeyLine: scanned.line,
@@ -110,14 +120,16 @@ export async function installRemoteCliDefault(params: Readonly<{
 }>, deps: Readonly<{
   installRemoteFirstPartyComponent?: typeof installRemoteFirstPartyComponent;
 }> = {}): Promise<void> {
+  const endpoint = resolveSystemTaskSshEndpoint({ ssh: params.parsed.ssh });
+  const ssh = bindSystemTaskSshEndpoint(endpoint, {
+    ...endpoint.ssh,
+    auth: params.auth.mode === 'keyFile' ? 'keyfile' : 'agent',
+    ...(params.auth.mode === 'keyFile' ? { identityFile: params.auth.privateKeyPath } : {}),
+  });
   await (deps.installRemoteFirstPartyComponent ?? installRemoteFirstPartyComponent)({
     componentId: 'happier-cli',
     channel: params.parsed.channel,
-    ssh: {
-      ...params.parsed.ssh,
-      auth: params.auth.mode === 'keyFile' ? 'keyfile' : 'agent',
-      ...(params.auth.mode === 'keyFile' ? { identityFile: params.auth.privateKeyPath } : {}),
-    },
+    ssh,
     knownHostsMode: params.knownHostsMode,
   });
 }
@@ -151,12 +163,15 @@ export async function runRemoteBootstrapCommandDefault(params: Readonly<{
   auth: Readonly<{ mode: 'agent' } | { mode: 'keyFile'; privateKeyPath: string }>;
   knownHostsMode: 'app' | 'system';
   data?: Record<string, unknown>;
-}>): Promise<Readonly<{ ok: boolean; data: Record<string, unknown> }>> {
-  const ssh: SshConnectionConfig = {
-    ...params.parsed.ssh,
+}>, deps: Readonly<{
+  runCommandCapture?: typeof runCommandCapture;
+}> = {}): Promise<Readonly<{ ok: boolean; data: Record<string, unknown> }>> {
+  const endpoint = resolveSystemTaskSshEndpoint({ ssh: params.parsed.ssh });
+  const ssh = bindSystemTaskSshEndpoint(endpoint, {
+    ...endpoint.ssh,
     auth: params.auth.mode === 'keyFile' ? 'keyfile' : 'agent',
     ...(params.auth.mode === 'keyFile' ? { identityFile: params.auth.privateKeyPath } : {}),
-  };
+  });
   const happier = resolveRemoteInstalledFirstPartyBinaryPath({
     componentId: 'happier-cli',
     channel: params.parsed.channel,
@@ -207,7 +222,7 @@ export async function runRemoteBootstrapCommandDefault(params: Readonly<{
     };
   }
 
-  const result = await runRemoteJson(ssh, command, params.knownHostsMode) as null | Readonly<{
+  const result = await runRemoteJson(ssh, command, params.knownHostsMode, deps) as null | Readonly<{
     ok?: boolean;
     data?: Record<string, unknown>;
   }>;
@@ -243,8 +258,9 @@ async function runRemoteJson(
   ssh: SshConnectionConfig,
   remoteCommand: string,
   knownHostsMode: 'app' | 'system',
+  deps: Readonly<{ runCommandCapture?: typeof runCommandCapture }> = {},
 ): Promise<unknown> {
-  const result = await runRemoteText(ssh, remoteCommand, knownHostsMode);
+  const result = await runRemoteText(ssh, remoteCommand, knownHostsMode, deps);
   return parseFirstJsonObject(result.stdout);
 }
 
@@ -252,10 +268,14 @@ async function runRemoteText(
   ssh: SshConnectionConfig,
   remoteCommand: string,
   knownHostsMode: 'app' | 'system',
+  deps: Readonly<{ runCommandCapture?: typeof runCommandCapture }> = {},
 ): Promise<Readonly<{ status: number; stdout: string; stderr: string }>> {
+  const endpoint = resolveSystemTaskSshEndpoint({ ssh });
+  endpoint.assertConfigUnchanged();
   const invocation = buildSshCommand({
-    target: ssh.target,
-    port: ssh.port,
+    target: endpoint.ssh.target,
+    port: endpoint.ssh.port,
+    sshConfigFile: endpoint.ssh.sshConfigFile,
     auth: {
       kind: ssh.auth,
       identityFile: ssh.identityFile,
@@ -265,7 +285,7 @@ async function runRemoteText(
       : { mode: 'system' },
     remoteCommand,
   });
-  const result = await runCommandCapture({
+  const result = await (deps.runCommandCapture ?? runCommandCapture)({
     command: invocation.command,
     args: invocation.args,
   });

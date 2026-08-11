@@ -29,6 +29,7 @@ import {
   assertDeploymentKitManifestSchema,
   HAPPIER_DEPLOYMENT_KIT_TARGETS,
 } from './deployment-kit-schema.mjs';
+import { assertCompleteDeploymentKitArtifactCoverage } from './deployment-kit-manifest.mjs';
 
 export const HAPPIER_DEPLOYMENT_CATALOG_SCHEMA_VERSION = 'happier-deployment-catalog/v1';
 export const HAPPIER_DEPLOYMENT_REPOSITORY_AVAILABILITIES = Object.freeze([
@@ -148,11 +149,62 @@ const catalogValidator = new Ajv2020({ allErrors: true, strict: true })
   .compile(deploymentGitHubCatalogJsonSchema);
 
 export function assertDeploymentGitHubCatalogSchema(catalog) {
-  if (catalogValidator(catalog)) return catalog;
+  if (catalogValidator(catalog)) {
+    assertDeploymentGitHubCatalogSemantics(catalog);
+    return catalog;
+  }
   const failures = (catalogValidator.errors ?? [])
     .map((error) => `${error.instancePath || '/'}:${error.keyword}`)
     .join(', ');
   throw new Error(`[deployment-kit] GitHub catalog does not satisfy the v1 JSON Schema${failures ? ` (${failures})` : ''}`);
+}
+
+function assertExactCatalogStringArray(actual, expected, label) {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(`[deployment-kit] GitHub catalog ${label} must match the canonical artifact inventory`);
+  }
+}
+
+export function assertDeploymentGitHubCatalogSemantics(catalog) {
+  assertCompleteDeploymentKitArtifactCoverage(catalog.artifacts);
+  const ids = new Set();
+  const identities = new Set();
+  for (const artifact of catalog.artifacts) {
+    const expectedTargetId = targetId(artifact.target);
+    if (artifact.targetId !== expectedTargetId) {
+      throw new Error(`[deployment-kit] GitHub catalog artifact targetId mismatch: ${artifact.id}`);
+    }
+    if (ids.has(artifact.id)) {
+      throw new Error(`[deployment-kit] duplicate GitHub catalog artifact id: ${artifact.id}`);
+    }
+    ids.add(artifact.id);
+    const identity = `${artifact.role}/${expectedTargetId}/${artifact.variant}`;
+    if (identities.has(identity)) {
+      throw new Error(`[deployment-kit] duplicate GitHub catalog artifact role/target/variant: ${identity}`);
+    }
+    identities.add(identity);
+  }
+
+  const targetIds = [...new Set(HAPPIER_DEPLOYMENT_KIT_TARGETS.map((target) => targetId(target)))].sort();
+  const sshTargetIds = targetIds.filter((id) => !id.startsWith('windows-'));
+  const expectedProfiles = {
+    agent: { requiredRoles: PROFILE_REQUIRED_ROLES.agent, allowedTargetIds: targetIds },
+    controller: { requiredRoles: PROFILE_REQUIRED_ROLES.controller, allowedTargetIds: targetIds },
+    'ssh-agent': { requiredRoles: PROFILE_REQUIRED_ROLES['ssh-agent'], allowedTargetIds: sshTargetIds },
+  };
+  for (const [profile, expected] of Object.entries(expectedProfiles)) {
+    assertExactCatalogStringArray(
+      catalog.profiles[profile].requiredRoles,
+      expected.requiredRoles,
+      `${profile} requiredRoles`,
+    );
+    assertExactCatalogStringArray(
+      catalog.profiles[profile].allowedTargetIds,
+      expected.allowedTargetIds,
+      `${profile} allowedTargetIds`,
+    );
+  }
+  return catalog;
 }
 
 function requireRepositorySlug(value) {
@@ -224,6 +276,7 @@ export function createDeploymentGitHubCatalog({
   repositoryAvailability = 'not-verified',
 }) {
   const normalizedManifest = assertDeploymentKitManifestSchema(structuredClone(manifest));
+  assertCompleteDeploymentKitArtifactCoverage(normalizedManifest.artifacts);
   const repositorySlug = requireRepositorySlug(repository);
   const normalizedRepositoryAvailability = requireRepositoryAvailability(repositoryAvailability);
   const sourcesById = requireVerifiedSources(normalizedManifest, verifiedSources);

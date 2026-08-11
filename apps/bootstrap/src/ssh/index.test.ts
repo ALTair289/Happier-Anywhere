@@ -164,6 +164,32 @@ describe('buildScpCommand', () => {
   });
 });
 
+describe('SSH endpoint transport consistency', () => {
+  it('passes the same selected config, normalized target, and port to ssh and scp', () => {
+    const common = {
+      target: 'ops@edge-alias',
+      port: 2205,
+      sshConfigFile: '/tmp/happier-ssh.config',
+      auth: { kind: 'agent' as const },
+      knownHosts: { mode: 'system' as const },
+    };
+    const ssh = buildSshCommand({
+      ...common,
+      remoteCommand: 'echo ok',
+    });
+    const scp = buildScpCommand({
+      ...common,
+      localPath: '/tmp/payload',
+      remotePath: '$HOME/.happier/bootstrap-staging',
+    });
+
+    expect(ssh.args.slice(0, 4)).toEqual(['-F', '/tmp/happier-ssh.config', '-p', '2205']);
+    expect(scp.args.slice(0, 4)).toEqual(['-F', '/tmp/happier-ssh.config', '-P', '2205']);
+    expect(ssh.args).toContain('ops@edge-alias');
+    expect(scp.args.at(-1)).toBe('ops@edge-alias:$HOME/.happier/bootstrap-staging');
+  });
+});
+
 describe('redactSshText', () => {
   it('removes private key paths and password fragments from surfaced text', () => {
     const redacted = redactSshText(

@@ -4,6 +4,7 @@ import {
   installRemoteFirstPartyComponent as installRemoteFirstPartyComponentShared,
   normalizeRemoteReleaseArch,
   normalizeRemoteReleaseOs,
+  resolveSystemTaskSshEndpoint,
   type RelayHostEngineDeps,
   type RelayRuntimeStatusSnapshot,
   type RelayRuntimeTaskParams,
@@ -133,9 +134,12 @@ function resolveKnownHostsConfig(ssh: SshConnectionConfig, knownHostsMode?: 'app
 }
 
 async function runRemoteTextCapture(ssh: SshConnectionConfig, remoteCommand: string, knownHostsMode?: 'app' | 'system'): Promise<CommandExecutionResult> {
+  const endpoint = resolveSystemTaskSshEndpoint({ ssh });
+  endpoint.assertConfigUnchanged();
   const invocation = buildSshCommand({
-    target: ssh.target,
-    port: ssh.port,
+    target: endpoint.ssh.target,
+    port: endpoint.ssh.port,
+    sshConfigFile: endpoint.ssh.sshConfigFile,
     auth: {
       kind: ssh.auth,
       identityFile: ssh.identityFile,
@@ -156,11 +160,14 @@ async function copyLocalDirectoryToRemoteCapture(params: Readonly<{
   remotePath: string;
   knownHostsMode?: 'app' | 'system';
 }>): Promise<void> {
+  const endpoint = resolveSystemTaskSshEndpoint({ ssh: params.ssh });
+  endpoint.assertConfigUnchanged();
   const invocation = buildScpCommand({
-    target: params.ssh.target,
+    target: endpoint.ssh.target,
     remotePath: params.remotePath,
     localPath: params.localPath,
-    port: params.ssh.port,
+    port: endpoint.ssh.port,
+    sshConfigFile: endpoint.ssh.sshConfigFile,
     auth: {
       kind: params.ssh.auth,
       identityFile: params.ssh.identityFile,

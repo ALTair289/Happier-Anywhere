@@ -35,6 +35,12 @@ export {
   type ParsedSshKnownHostLine,
   type ResolvedSshHostTrust,
 } from './sshHostTrust.js';
+export {
+  bindSystemTaskSshEndpoint,
+  resolveSystemTaskSshEndpoint,
+  type ResolvedSystemTaskSshEndpoint,
+  type ResolveSystemTaskSshEndpointDeps,
+} from './sshEndpoint.js';
 
 export {
   createRelayHostEngine,

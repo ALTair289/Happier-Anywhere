@@ -11,6 +11,7 @@ import { createDeploymentKitManifest } from '../pipeline/deployment-kit/lib/depl
 import { runGitHubProjectCli } from '../pipeline/deployment-kit/assemble-github-project.mjs';
 import {
   createDeploymentGitHubCatalog,
+  materializeDeploymentGitHubProject,
   selectDeploymentGitHubAssets,
 } from '../pipeline/deployment-kit/lib/deployment-kit-github-project.mjs';
 import { assembleDeploymentGitHubProjectFromSpec } from '../pipeline/deployment-kit/lib/deployment-kit-github-project-assembly.mjs';
@@ -29,6 +30,26 @@ const PROJECT_RELEASE_PUBLIC_KEY = [
   'RWQBAQEBAQEBAQICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIC',
   '',
 ].join('\n');
+const TARGETS = [
+  { os: 'windows', arch: 'x64' },
+  { os: 'linux', arch: 'x64', libc: 'glibc' },
+  { os: 'linux', arch: 'arm64', libc: 'glibc' },
+  { os: 'darwin', arch: 'x64' },
+  { os: 'darwin', arch: 'arm64' },
+];
+
+function artifactId(role, target) {
+  return `${role}-${target.os}-${target.arch}`;
+}
+
+function archiveName(role, target) {
+  const product = role === 'controller' ? 'happier-server' : 'happier';
+  return `${product}-v0.2.10-${target.os}-${target.arch}.tar.gz`;
+}
+
+function checksumsName(role) {
+  return role === 'controller' ? CONTROLLER_CHECKSUMS : AGENT_CHECKSUMS;
+}
 
 function mobileInput() {
   return {
@@ -69,47 +90,35 @@ function manifestFor(agentBytes, controllerBytes) {
       androidApp: '0.2.10',
       iosApp: '0.2.10',
     },
-    artifacts: [
-      {
-        id: 'agent-linux-x64',
-        role: 'agent',
-        target: { os: 'linux', arch: 'x64', libc: 'glibc' },
+    artifacts: TARGETS.flatMap((target) => ['agent', 'controller'].map((role) => {
+      const bytes = role === 'controller' ? controllerBytes : agentBytes;
+      const id = artifactId(role, target);
+      return {
+        id,
+        role,
+        target,
         format: 'tar.gz',
-        path: 'packs/agent/agent-linux-x64.tar.gz',
-        sha256: sha256(agentBytes),
-        size: agentBytes.length,
-      },
-      {
-        id: 'controller-linux-x64',
-        role: 'controller',
-        target: { os: 'linux', arch: 'x64', libc: 'glibc' },
-        format: 'tar.gz',
-        path: 'packs/controller/controller-linux-x64.tar.gz',
-        sha256: sha256(controllerBytes),
-        size: controllerBytes.length,
-      },
-    ],
+        path: `packs/${role}/${id}.tar.gz`,
+        sha256: sha256(bytes),
+        size: bytes.length,
+      };
+    })),
     mobile: mobileInput(),
   });
 }
 
-function verifiedSources(root, agentBytes, controllerBytes) {
-  return [
-    {
-      artifactId: 'agent-linux-x64',
-      archivePath: join(root, 'artifacts', AGENT_NAME),
-      archiveName: AGENT_NAME,
-      checksumsPath: join(root, 'artifacts', AGENT_CHECKSUMS),
-      checksumsName: AGENT_CHECKSUMS,
-    },
-    {
-      artifactId: 'controller-linux-x64',
-      archivePath: join(root, 'artifacts', CONTROLLER_NAME),
-      archiveName: CONTROLLER_NAME,
-      checksumsPath: join(root, 'artifacts', CONTROLLER_CHECKSUMS),
-      checksumsName: CONTROLLER_CHECKSUMS,
-    },
-  ];
+function verifiedSources(root) {
+  return TARGETS.flatMap((target) => ['agent', 'controller'].map((role) => {
+    const name = archiveName(role, target);
+    const receipt = checksumsName(role);
+    return {
+      artifactId: artifactId(role, target),
+      archivePath: join(root, 'artifacts', name),
+      archiveName: name,
+      checksumsPath: join(root, 'artifacts', receipt),
+      checksumsName: receipt,
+    };
+  }));
 }
 
 function localSpec(agentBytes, controllerBytes) {
@@ -133,26 +142,31 @@ function localSpec(agentBytes, controllerBytes) {
       artifacts: manifest.artifacts,
       mobile: mobileInput(),
     },
-    sources: {
-      'agent-linux-x64': {
-        archive: `artifacts/${AGENT_NAME}`,
-        checksums: `artifacts/${AGENT_CHECKSUMS}`,
+    sources: Object.fromEntries(manifest.artifacts.map((entry) => [
+      entry.id,
+      {
+        archive: `artifacts/${archiveName(entry.role, entry.target)}`,
+        checksums: `artifacts/${checksumsName(entry.role)}`,
       },
-      'controller-linux-x64': {
-        archive: `artifacts/${CONTROLLER_NAME}`,
-        checksums: `artifacts/${CONTROLLER_CHECKSUMS}`,
-      },
-    },
+    ])),
   };
 }
 
 async function writeSources(root, agentBytes, controllerBytes) {
   const artifacts = join(root, 'artifacts');
   await mkdir(artifacts, { recursive: true });
-  await writeFile(join(artifacts, AGENT_NAME), agentBytes);
-  await writeFile(join(artifacts, CONTROLLER_NAME), controllerBytes);
-  await writeFile(join(artifacts, AGENT_CHECKSUMS), `${sha256(agentBytes)}  ${AGENT_NAME}\n`);
-  await writeFile(join(artifacts, CONTROLLER_CHECKSUMS), `${sha256(controllerBytes)}  ${CONTROLLER_NAME}\n`);
+  for (const target of TARGETS) {
+    await writeFile(join(artifacts, archiveName('agent', target)), agentBytes);
+    await writeFile(join(artifacts, archiveName('controller', target)), controllerBytes);
+  }
+  await writeFile(
+    join(artifacts, AGENT_CHECKSUMS),
+    TARGETS.map((target) => `${sha256(agentBytes)}  ${archiveName('agent', target)}`).join('\n') + '\n',
+  );
+  await writeFile(
+    join(artifacts, CONTROLLER_CHECKSUMS),
+    TARGETS.map((target) => `${sha256(controllerBytes)}  ${archiveName('controller', target)}`).join('\n') + '\n',
+  );
 }
 
 async function listFiles(root, relative = '') {
@@ -170,7 +184,7 @@ test('GitHub catalog pins versioned component release contents and selects only 
   const controllerBytes = Buffer.from('controller\n');
   const catalog = createDeploymentGitHubCatalog({
     manifest: manifestFor(agentBytes, controllerBytes),
-    verifiedSources: verifiedSources('C:/verified', agentBytes, controllerBytes),
+    verifiedSources: verifiedSources('C:/verified'),
     repository: 'soul667/Happier',
   });
 
@@ -179,7 +193,12 @@ test('GitHub catalog pins versioned component release contents and selects only 
   assert.equal(catalog.repository.availability, 'not-verified');
   assert.deepEqual(catalog.profiles.controller.requiredRoles, ['agent', 'controller']);
   assert.deepEqual(catalog.profiles.agent.requiredRoles, ['agent']);
-  assert.deepEqual(catalog.profiles['ssh-agent'].allowedTargetIds, ['linux-x64-glibc']);
+  assert.deepEqual(catalog.profiles['ssh-agent'].allowedTargetIds, [
+    'darwin-arm64',
+    'darwin-x64',
+    'linux-arm64-glibc',
+    'linux-x64-glibc',
+  ]);
 
   const agent = catalog.artifacts.find((entry) => entry.id === 'agent-linux-x64');
   const controller = catalog.artifacts.find((entry) => entry.id === 'controller-linux-x64');
@@ -208,9 +227,120 @@ test('GitHub catalog pins versioned component release contents and selects only 
     ['agent-linux-x64'],
   );
   assert.throws(
-    () => selectDeploymentGitHubAssets(catalog, { profile: 'agent', targetId: 'windows-x64' }),
+    () => selectDeploymentGitHubAssets(catalog, { profile: 'agent', targetId: 'windows-arm64' }),
     /target.*not available/i,
   );
+});
+
+test('verified GitHub catalog rejects a manifest missing an entire canonical target', () => {
+  const bytes = Buffer.from('payload\n');
+  const manifest = structuredClone(manifestFor(bytes, bytes));
+  manifest.artifacts = manifest.artifacts.filter((entry) => (
+    [entry.target.os, entry.target.arch, entry.target.libc].filter(Boolean).join('-') !== 'darwin-arm64'
+  ));
+  const sources = verifiedSources('C:/verified')
+    .filter((entry) => !entry.artifactId.endsWith('darwin-arm64'));
+
+  assert.throws(
+    () => createDeploymentGitHubCatalog({
+      manifest,
+      verifiedSources: sources,
+      repository: 'soul667/Happier',
+      repositoryAvailability: 'verified',
+    }),
+    /missing artifacts for canonical target.*darwin-arm64/i,
+  );
+});
+
+test('GitHub project materialization rejects a verified catalog missing an entire canonical target', async () => {
+  const bytes = Buffer.from('payload\n');
+  const catalog = createDeploymentGitHubCatalog({
+    manifest: manifestFor(bytes, bytes),
+    verifiedSources: verifiedSources('C:/verified'),
+    repository: 'soul667/Happier',
+    repositoryAvailability: 'verified',
+  });
+  catalog.artifacts = catalog.artifacts.filter((entry) => (
+    [entry.target.os, entry.target.arch, entry.target.libc].filter(Boolean).join('-') !== 'darwin-arm64'
+  ));
+
+  await assert.rejects(
+    () => materializeDeploymentGitHubProject({
+      catalog,
+      outDir: 'C:/not-created/partial-project',
+      releasePublicKey: PROJECT_RELEASE_PUBLIC_KEY,
+      licenseText: 'MIT License\n',
+    }),
+    /missing artifacts for canonical target.*darwin-arm64/i,
+  );
+});
+
+test('catalog selection rejects targetId swaps and duplicate role-target artifacts', () => {
+  const bytes = Buffer.from('payload\n');
+  const original = createDeploymentGitHubCatalog({
+    manifest: manifestFor(bytes, bytes),
+    verifiedSources: verifiedSources('C:/verified'),
+    repository: 'soul667/Happier',
+    repositoryAvailability: 'verified',
+  });
+  const swapped = structuredClone(original);
+  const windows = swapped.artifacts.find((entry) => entry.id === 'agent-windows-x64');
+  const linux = swapped.artifacts.find((entry) => entry.id === 'agent-linux-x64');
+  [windows.targetId, linux.targetId] = [linux.targetId, windows.targetId];
+  assert.throws(
+    () => selectDeploymentGitHubAssets(swapped, { profile: 'agent', targetId: 'windows-x64' }),
+    /artifact targetId mismatch/i,
+  );
+
+  const duplicated = structuredClone(original);
+  duplicated.artifacts.push({
+    ...structuredClone(duplicated.artifacts.find((entry) => entry.id === 'agent-windows-x64')),
+    id: 'agent-windows-x64-copy',
+  });
+  assert.throws(
+    () => selectDeploymentGitHubAssets(duplicated, { profile: 'agent', targetId: 'windows-x64' }),
+    /duplicate.*role\/target\/variant/i,
+  );
+});
+
+test('GitHub project materialization rejects verified catalog profile downgrades and incomplete roles', async () => {
+  const bytes = Buffer.from('payload\n');
+  const original = createDeploymentGitHubCatalog({
+    manifest: manifestFor(bytes, bytes),
+    verifiedSources: verifiedSources('C:/verified'),
+    repository: 'soul667/Happier',
+    repositoryAvailability: 'verified',
+  });
+  const attempts = [
+    {
+      label: 'profile-downgrade',
+      catalog: structuredClone(original),
+      mutate(catalog) { catalog.profiles.controller.requiredRoles = ['agent']; },
+      pattern: /controller requiredRoles must match/i,
+    },
+    {
+      label: 'missing-role',
+      catalog: structuredClone(original),
+      mutate(catalog) {
+        catalog.artifacts = catalog.artifacts.filter((entry) => !(
+          entry.role === 'controller' && entry.target.os === 'darwin' && entry.target.arch === 'arm64'
+        ));
+      },
+      pattern: /missing controller artifact for darwin-arm64/i,
+    },
+  ];
+  for (const attempt of attempts) {
+    attempt.mutate(attempt.catalog);
+    await assert.rejects(
+      () => materializeDeploymentGitHubProject({
+        catalog: attempt.catalog,
+        outDir: `C:/not-created/${attempt.label}`,
+        releasePublicKey: PROJECT_RELEASE_PUBLIC_KEY,
+        licenseText: 'MIT License\n',
+      }),
+      attempt.pattern,
+    );
+  }
 });
 
 test('GitHub project assembly verifies local source receipts but emits a small source project with no binary archives', async () => {
@@ -238,8 +368,8 @@ test('GitHub project assembly verifies local source receipts but emits a small s
       stdout: { write() {} },
     });
 
-    assert.equal(result.artifactCount, 2);
-    assert.equal(result.referencedArtifactBytes, agentBytes.length + controllerBytes.length);
+    assert.equal(result.artifactCount, TARGETS.length * 2);
+    assert.equal(result.referencedArtifactBytes, TARGETS.length * (agentBytes.length + controllerBytes.length));
     assert.equal(result.embeddedArtifactBytes, 0);
     assert.match(result.projectTreeSha256, /^[a-f0-9]{64}$/);
 
@@ -274,7 +404,7 @@ test('GitHub project assembly verifies local source receipts but emits a small s
     assert.equal(result.projectFileCount, files.length);
 
     const catalog = JSON.parse(await readFile(join(outDir, 'catalog.json'), 'utf8'));
-    assert.equal(catalog.artifacts.length, 2);
+    assert.equal(catalog.artifacts.length, TARGETS.length * 2);
     assert.equal(catalog.repository.availability, 'verified');
     assert.equal(catalog.artifacts.reduce((sum, entry) => sum + entry.size, 0), result.referencedArtifactBytes);
     const licenceContent = await readFile(join(outDir, 'LICENCE'), 'utf8');
@@ -313,7 +443,7 @@ test('GitHub project assembly verifies local source receipts but emits a small s
     assert.match(readme, /\[Supported platforms\]\(#supported-platforms\)/);
     assert.match(readme, /docs\/DEPLOYMENT\.md#security-checklist/);
     assert.match(readme, /linux-x64-glibc/);
-    assert.doesNotMatch(readme, /windows-x64/);
+    assert.match(readme, /windows-x64/);
     assert.ok(readme.split(/\r?\n/).length < 220, 'English landing README should stay scannable');
     assert.doesNotMatch(readme, /session list --active|service status --mode user --json/);
     // It may say that no PWA is required, but must not claim PWA/offline support.
@@ -330,7 +460,7 @@ test('GitHub project assembly verifies local source receipts but emits a small s
     assert.match(readmeZh, /\[支持的平台\]\(#支持的平台\)/);
     assert.match(readmeZh, /docs\/DEPLOYMENT\.zh-CN\.md#安全检查表/);
     assert.match(readmeZh, /linux-x64-glibc/);
-    assert.doesNotMatch(readmeZh, /windows-x64/);
+    assert.match(readmeZh, /windows-x64/);
     assert.ok(readmeZh.split(/\r?\n/).length < 220, 'Chinese landing README should stay scannable');
     assert.doesNotMatch(readmeZh, /session list --active|service status --mode user --json/);
     assert.match(readmeZh, /[\u3400-\u9fff]/u);
@@ -546,7 +676,7 @@ test('GitHub project assembly requires an explicit valid Minisign project public
 test('GitHub catalog rejects malformed repository slugs instead of generating arbitrary download origins', () => {
   const bytes = Buffer.from('payload\n');
   const manifest = manifestFor(bytes, bytes);
-  const sources = verifiedSources('C:/verified', bytes, bytes);
+  const sources = verifiedSources('C:/verified');
   assert.throws(
     () => createDeploymentGitHubCatalog({ manifest, verifiedSources: sources, repository: 'https://evil.example/repo' }),
     /repository slug/i,

@@ -16,6 +16,25 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+const TARGETS = [
+  { os: 'windows', arch: 'x64' },
+  { os: 'linux', arch: 'x64', libc: 'glibc' },
+  { os: 'linux', arch: 'arm64', libc: 'glibc' },
+  { os: 'darwin', arch: 'x64' },
+  { os: 'darwin', arch: 'arm64' },
+];
+
+function artifactId(role, target) {
+  return `${role}-${target.os}-${target.arch}`;
+}
+
+function sourceArtifactsFor(agentSource, controllerSource) {
+  return Object.fromEntries(TARGETS.flatMap((target) => ['agent', 'controller'].map((role) => [
+    artifactId(role, target),
+    role === 'controller' ? controllerSource : agentSource,
+  ])));
+}
+
 function manifestForFiles(agentBytes, controllerBytes) {
   return createDeploymentKitManifest({
     kitVersion: '0.2.10-local.1',
@@ -32,26 +51,19 @@ function manifestForFiles(agentBytes, controllerBytes) {
       androidApp: '0.2.10',
       iosApp: '0.2.10',
     },
-    artifacts: [
-      {
-        id: 'agent-windows-x64',
-        role: 'agent',
-        target: { os: 'windows', arch: 'x64' },
+    artifacts: TARGETS.flatMap((target) => ['agent', 'controller'].map((role) => {
+      const bytes = role === 'controller' ? controllerBytes : agentBytes;
+      const id = artifactId(role, target);
+      return {
+        id,
+        role,
+        target,
         format: 'tar.gz',
-        path: 'packs/agent/agent-windows-x64.tar.gz',
-        sha256: sha256(agentBytes),
-        size: agentBytes.length,
-      },
-      {
-        id: 'controller-windows-x64',
-        role: 'controller',
-        target: { os: 'windows', arch: 'x64' },
-        format: 'tar.gz',
-        path: 'packs/controller/controller-windows-x64.tar.gz',
-        sha256: sha256(controllerBytes),
-        size: controllerBytes.length,
-      },
-    ],
+        path: `packs/${role}/${id}.tar.gz`,
+        sha256: sha256(bytes),
+        size: bytes.length,
+      };
+    })),
     mobile: {
       supportedProtocolVersions: ['1'],
       preferredProtocolVersion: '1',
@@ -87,13 +99,19 @@ async function materializeSampleKit(root) {
   await writeFile(controllerSource, controllerBytes);
   const result = await materializeDeploymentKit({
     manifest: manifestForFiles(agentBytes, controllerBytes),
-    sourceArtifacts: {
-      'agent-windows-x64': agentSource,
-      'controller-windows-x64': controllerSource,
-    },
+    sourceArtifacts: sourceArtifactsFor(agentSource, controllerSource),
     outDir,
   });
   return { outDir, result };
+}
+
+function withoutCanonicalCoverage(manifest, kind) {
+  const clone = structuredClone(manifest);
+  clone.artifacts = clone.artifacts.filter((entry) => {
+    const isDarwinArm64 = entry.target.os === 'darwin' && entry.target.arch === 'arm64';
+    return kind === 'target' ? !isDarwinArm64 : !(isDarwinArm64 && entry.role === 'controller');
+  });
+  return clone;
 }
 
 test('materializeDeploymentKit copies verified artifacts and verifyDeploymentKit closes the final directory', async () => {
@@ -110,10 +128,7 @@ test('materializeDeploymentKit copies verified artifacts and verifyDeploymentKit
 
     const result = await materializeDeploymentKit({
       manifest,
-      sourceArtifacts: {
-        'agent-windows-x64': agentSource,
-        'controller-windows-x64': controllerSource,
-      },
+      sourceArtifacts: sourceArtifactsFor(agentSource, controllerSource),
       outDir,
     });
 
@@ -138,6 +153,54 @@ test('materializeDeploymentKit copies verified artifacts and verifyDeploymentKit
     assert.match(await readFile(join(outDir, 'SHA256SUMS'), 'utf8'), /bootstrap\/controller\.sh/);
     const verified = await verifyDeploymentKit({ kitRoot: outDir });
     assert.equal(verified.treeSha256, result.treeSha256);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('materializeDeploymentKit and verifyDeploymentKit reject raw manifests with incomplete canonical coverage', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'happier-deployment-kit-incomplete-'));
+  try {
+    const agentBytes = Buffer.from('agent payload\n');
+    const controllerBytes = Buffer.from('controller payload\n');
+    const agentSource = join(root, 'agent.tar.gz');
+    const controllerSource = join(root, 'controller.tar.gz');
+    await writeFile(agentSource, agentBytes);
+    await writeFile(controllerSource, controllerBytes);
+    const completeManifest = manifestForFiles(agentBytes, controllerBytes);
+    const sources = sourceArtifactsFor(agentSource, controllerSource);
+
+    for (const kind of ['target', 'role']) {
+      const incompleteManifest = withoutCanonicalCoverage(completeManifest, kind);
+      await assert.rejects(
+        () => materializeDeploymentKit({
+          manifest: incompleteManifest,
+          sourceArtifacts: sources,
+          outDir: join(root, `materialize-${kind}`),
+        }),
+        kind === 'target'
+          ? /missing artifacts for canonical target.*darwin-arm64/i
+          : /missing controller artifact for darwin-arm64/i,
+      );
+
+      const verifyRoot = join(root, `verify-${kind}`);
+      await mkdir(verifyRoot);
+      const { outDir } = await materializeSampleKit(verifyRoot);
+      await writeFile(
+        join(outDir, 'manifest.json'),
+        `${JSON.stringify(withoutCanonicalCoverage(completeManifest, kind), null, 2)}\n`,
+        'utf8',
+      );
+      await assert.rejects(
+        () => verifyDeploymentKit({ kitRoot: outDir }),
+        (error) => {
+          assert.match(error.cause?.message ?? '', kind === 'target'
+            ? /missing artifacts for canonical target.*darwin-arm64/i
+            : /missing controller artifact for darwin-arm64/i);
+          return true;
+        },
+      );
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -305,13 +368,10 @@ test('materializeDeploymentKit rejects source bytes that do not match the manife
     await assert.rejects(
       () => materializeDeploymentKit({
         manifest: manifestForFiles(agentBytes, controllerBytes),
-        sourceArtifacts: {
-          'agent-windows-x64': agentSource,
-          'controller-windows-x64': controllerSource,
-        },
+        sourceArtifacts: sourceArtifactsFor(agentSource, controllerSource),
         outDir: join(root, 'kit'),
       }),
-      /source artifact verification failed.*agent-windows-x64/i,
+      /source artifact verification failed.*agent-/i,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -333,10 +393,7 @@ test('materializeDeploymentKit rejects hard-linked source artifacts', async () =
     await assert.rejects(
       () => materializeDeploymentKit({
         manifest: manifestForFiles(agentBytes, controllerBytes),
-        sourceArtifacts: {
-          'agent-windows-x64': agentSource,
-          'controller-windows-x64': controllerSource,
-        },
+        sourceArtifacts: sourceArtifactsFor(agentSource, controllerSource),
         outDir: join(root, 'kit'),
       }),
       /hard.link/i,
@@ -358,10 +415,7 @@ test('verifyDeploymentKit rejects post-materialization tampering', async () => {
     await writeFile(controllerSource, controllerBytes);
     await materializeDeploymentKit({
       manifest: manifestForFiles(agentBytes, controllerBytes),
-      sourceArtifacts: {
-        'agent-windows-x64': agentSource,
-        'controller-windows-x64': controllerSource,
-      },
+      sourceArtifacts: sourceArtifactsFor(agentSource, controllerSource),
       outDir,
     });
 
@@ -404,10 +458,7 @@ test('verifyDeploymentKit rejects an artifact reached through a symlinked direct
     await writeFile(controllerSource, controllerBytes);
     await materializeDeploymentKit({
       manifest: manifestForFiles(agentBytes, controllerBytes),
-      sourceArtifacts: {
-        'agent-windows-x64': agentSource,
-        'controller-windows-x64': controllerSource,
-      },
+      sourceArtifacts: sourceArtifactsFor(agentSource, controllerSource),
       outDir,
     });
 

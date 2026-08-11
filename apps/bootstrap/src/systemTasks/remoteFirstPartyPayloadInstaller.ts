@@ -2,6 +2,7 @@ import {
   installRemoteFirstPartyComponent as installRemoteFirstPartyComponentShared,
   normalizeRemoteReleaseArch,
   normalizeRemoteReleaseOs,
+  resolveSystemTaskSshEndpoint,
   resolveRemoteInstalledFirstPartyBinaryPath,
   type RemoteFirstPartyCommandResult,
   type RemoteFirstPartyInstallDeps,
@@ -31,9 +32,12 @@ async function runRemoteTextDefault(params: Readonly<{
   remoteCommand: string;
   knownHostsMode?: 'app' | 'system';
 }>): Promise<RemoteFirstPartyCommandResult> {
+  const endpoint = resolveSystemTaskSshEndpoint({ ssh: params.ssh });
+  endpoint.assertConfigUnchanged();
   const invocation = buildSshCommand({
-    target: params.ssh.target,
-    port: params.ssh.port,
+    target: endpoint.ssh.target,
+    port: endpoint.ssh.port,
+    sshConfigFile: endpoint.ssh.sshConfigFile,
     auth: {
       kind: params.ssh.auth,
       identityFile: params.ssh.identityFile,
@@ -57,11 +61,14 @@ async function copyLocalDirectoryToRemoteDefault(params: Readonly<{
   remotePath: string;
   knownHostsMode?: 'app' | 'system';
 }>): Promise<void> {
+  const endpoint = resolveSystemTaskSshEndpoint({ ssh: params.ssh });
+  endpoint.assertConfigUnchanged();
   const invocation = buildScpCommand({
-    target: params.ssh.target,
+    target: endpoint.ssh.target,
     remotePath: params.remotePath,
     localPath: params.localPath,
-    port: params.ssh.port,
+    port: endpoint.ssh.port,
+    sshConfigFile: endpoint.ssh.sshConfigFile,
     auth: {
       kind: params.ssh.auth,
       identityFile: params.ssh.identityFile,

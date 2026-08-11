@@ -8,6 +8,7 @@ import {
   installRemoteFirstPartyComponent,
   normalizeRemoteReleaseArch,
   normalizeRemoteReleaseOs,
+  resolveSystemTaskSshEndpoint,
   resolveSshKnownHostTrust,
   SystemTaskExecutionError,
   type RemoteFirstPartyCommandResult,
@@ -65,86 +66,6 @@ function writeKnownHostsText(knownHostsPath: string | undefined, text: string): 
   writeFileSync(knownHostsPath, text ? `${text}\n` : '', 'utf8');
 }
 
-function parseSshTarget(target: string): Readonly<{ target: string; host: string; port?: number }> {
-  const raw = String(target ?? '').trim();
-  const userSeparatorIndex = raw.lastIndexOf('@');
-  const userPrefix = userSeparatorIndex >= 0 ? raw.slice(0, userSeparatorIndex + 1) : '';
-  const withoutUser = userSeparatorIndex >= 0 ? raw.slice(userSeparatorIndex + 1) : raw;
-  const bracketMatch = /^\[(.+)\](?::(\d+))?$/u.exec(withoutUser);
-  if (bracketMatch) {
-    return {
-      target: `${userPrefix}[${bracketMatch[1]}]`,
-      host: bracketMatch[1],
-      ...(bracketMatch[2] ? { port: Number(bracketMatch[2]) } : {}),
-    };
-  }
-  const colonParts = withoutUser.split(':');
-  if (colonParts.length === 2 && /^\d+$/u.test(colonParts[1] ?? '')) {
-    const host = colonParts[0] ?? withoutUser;
-    return {
-      target: `${userPrefix}${host}`,
-      host,
-      port: Number(colonParts[1]),
-    };
-  }
-  return { target: raw, host: withoutUser };
-}
-
-function resolveSshEndpoint(params: Readonly<{
-  ssh: SystemTaskSshConnectionConfig;
-}>): Readonly<{
-  ssh: SystemTaskSshConnectionConfig;
-  keyscanHost: string;
-}> {
-  const parsedTarget = parseSshTarget(params.ssh.target);
-  const { port: _inputPort, ...sshWithoutPort } = params.ssh;
-  const buildEndpoint = (keyscanHost: string, port?: number) => ({
-    ssh: {
-      ...sshWithoutPort,
-      target: parsedTarget.target,
-      ...(typeof port === 'number' ? { port } : {}),
-    },
-    keyscanHost,
-  });
-  const sshConfigFile = String(params.ssh.sshConfigFile ?? '').trim();
-  if (!sshConfigFile) {
-    return buildEndpoint(parsedTarget.host, params.ssh.port ?? parsedTarget.port);
-  }
-
-  const result = spawnSync('ssh', ['-G', '-F', sshConfigFile, parsedTarget.target], {
-    encoding: 'utf8',
-    windowsHide: true,
-  });
-  if (result.error) {
-    throw result.error;
-  }
-  if ((result.status ?? 1) !== 0) {
-    const stderr = String(result.stderr ?? '').trim();
-    throw new Error(stderr ? `SSH config resolution failed: ${stderr}` : 'SSH config resolution failed');
-  }
-
-  const values = new Map<string, string>();
-  for (const line of String(result.stdout ?? '').split(/\r?\n/u)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const splitIndex = trimmed.indexOf(' ');
-    if (splitIndex < 0) continue;
-    const key = trimmed.slice(0, splitIndex).trim().toLowerCase();
-    const value = trimmed.slice(splitIndex + 1).trim();
-    if (key && value) {
-      values.set(key, value);
-    }
-  }
-
-  const resolvedPort = Number(values.get('port') ?? '');
-  const finalPort = typeof params.ssh.port === 'number'
-    ? params.ssh.port
-    : Number.isFinite(resolvedPort) && resolvedPort > 0
-      ? Math.floor(resolvedPort)
-      : parsedTarget.port;
-  return buildEndpoint(values.get('hostname')?.trim() || parsedTarget.host, finalPort);
-}
-
 function runCommandSync(params: Readonly<{
   command: string;
   args: readonly string[];
@@ -172,6 +93,7 @@ function runSshCommand(params: Readonly<{
   knownHostsMode?: 'app' | 'system';
   remoteCommand: readonly string[];
 }>): string {
+  resolveSystemTaskSshEndpoint({ ssh: params.ssh }).assertConfigUnchanged();
   if ((params.knownHostsMode ?? 'app') === 'app' && params.knownHostsPath) {
     mkdirSync(dirname(params.knownHostsPath), { recursive: true });
   }
@@ -203,6 +125,7 @@ function runSshCommandResult(params: Readonly<{
   knownHostsMode?: 'app' | 'system';
   remoteCommand: readonly string[];
 }>): RemoteCommandResult {
+  resolveSystemTaskSshEndpoint({ ssh: params.ssh }).assertConfigUnchanged();
   if ((params.knownHostsMode ?? 'app') === 'app' && params.knownHostsPath) {
     mkdirSync(dirname(params.knownHostsPath), { recursive: true });
   }
@@ -315,6 +238,7 @@ function copyLocalDirectoryToRemote(params: Readonly<{
   localPath: string;
   remotePath: string;
 }>): void {
+  resolveSystemTaskSshEndpoint({ ssh: params.ssh }).assertConfigUnchanged();
   const invocation = buildScpCommand({
     scpBin: 'scp',
     target: params.ssh.target,
@@ -482,11 +406,11 @@ async function installRemoteRelayRuntimeUsingSharedEngine(params: Readonly<{
 }
 
 export function createLiveRemoteSshBootstrapTaskKind() {
-  const endpointCache = new WeakMap<SystemTaskSshConnectionConfig, ReturnType<typeof resolveSshEndpoint>>();
-  const resolveEndpoint = (ssh: SystemTaskSshConnectionConfig): ReturnType<typeof resolveSshEndpoint> => {
+  const endpointCache = new WeakMap<SystemTaskSshConnectionConfig, ReturnType<typeof resolveSystemTaskSshEndpoint>>();
+  const resolveEndpoint = (ssh: SystemTaskSshConnectionConfig): ReturnType<typeof resolveSystemTaskSshEndpoint> => {
     const cached = endpointCache.get(ssh);
     if (cached) return cached;
-    const resolved = resolveSshEndpoint({ ssh });
+    const resolved = resolveSystemTaskSshEndpoint({ ssh });
     endpointCache.set(ssh, resolved);
     return resolved;
   };
@@ -497,6 +421,8 @@ export function createLiveRemoteSshBootstrapTaskKind() {
       }
 
       const endpoint = resolveEndpoint(ssh);
+      endpoint.assertKeyscanSupported();
+      endpoint.assertConfigUnchanged();
       const knownHostsPath = resolveKnownHostsPath(endpoint.ssh, knownHostsMode);
       const existingKnownHostsText = readKnownHostsText(knownHostsPath);
       const keyscanOutput = runCommandSync({
@@ -511,7 +437,10 @@ export function createLiveRemoteSshBootstrapTaskKind() {
         ],
         errorPrefix: 'ssh-keyscan failed',
       });
-      const scanned = extractFirstScannedSshKnownHostLine(keyscanOutput);
+      const scannedRaw = extractFirstScannedSshKnownHostLine(keyscanOutput);
+      const scanned = extractFirstScannedSshKnownHostLine(
+        `${endpoint.knownHostsHost} ${scannedRaw.keyType} ${scannedRaw.key}`,
+      );
       const trust = resolveSshKnownHostTrust({
         knownHostsText: existingKnownHostsText,
         scannedHostKeyLine: scanned.line,

@@ -16,6 +16,7 @@ export interface SshKnownHostsConfig {
 export interface BuildSshCommandParams {
   target: string;
   port?: number;
+  sshConfigFile?: string;
   auth: SshAuthConfig;
   knownHosts: SshKnownHostsConfig;
   remoteCommand: string;
@@ -32,6 +33,7 @@ export interface BuildScpCommandParams {
   remotePath: string;
   localPath: string;
   port?: number;
+  sshConfigFile?: string;
   auth: SshAuthConfig;
   knownHosts: SshKnownHostsConfig;
   connectTimeoutSeconds?: number;
@@ -50,6 +52,7 @@ function quoteForRemoteBash(command: string): string {
 
 function resolveCommonSshArgs(params: Readonly<{
   port?: number;
+  sshConfigFile?: string;
   auth: SshAuthConfig;
   knownHosts: SshKnownHostsConfig;
   connectTimeoutSeconds?: number;
@@ -66,6 +69,7 @@ function resolveCommonSshArgs(params: Readonly<{
     : 10;
 
   const args = [
+    ...(String(params.sshConfigFile ?? '').trim() ? ['-F', String(params.sshConfigFile).trim()] : []),
     ...(port !== undefined ? [params.portFlag, String(port)] : []),
     '-o',
     'BatchMode=yes',
@@ -108,6 +112,7 @@ export function buildSshCommand(params: BuildSshCommandParams): SshCommandInvoca
   const target = normalizeSystemTaskSshTarget(params.target);
   const args = resolveCommonSshArgs({
     port: params.port,
+    sshConfigFile: params.sshConfigFile,
     auth: params.auth,
     knownHosts: params.knownHosts,
     connectTimeoutSeconds: params.connectTimeoutSeconds,
@@ -135,6 +140,7 @@ export function buildScpCommand(params: BuildScpCommandParams): ScpCommandInvoca
 
   const args = resolveCommonSshArgs({
     port: params.port,
+    sshConfigFile: params.sshConfigFile,
     auth: params.auth,
     knownHosts: params.knownHosts,
     connectTimeoutSeconds: params.connectTimeoutSeconds,

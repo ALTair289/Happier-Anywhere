@@ -15,19 +15,45 @@ const AGENT_ARCHIVE_NAME = 'happier-v0.2.10-linux-x64.tar.gz';
 const AGENT_CHECKSUMS_NAME = 'checksums-happier-v0.2.10.txt';
 const CONTROLLER_ARCHIVE_NAME = 'happier-server-v0.2.10-linux-x64.tar.gz';
 const CONTROLLER_CHECKSUMS_NAME = 'checksums-happier-server-v0.2.10.txt';
+const TARGETS = [
+  { os: 'windows', arch: 'x64' },
+  { os: 'linux', arch: 'x64', libc: 'glibc' },
+  { os: 'linux', arch: 'arm64', libc: 'glibc' },
+  { os: 'darwin', arch: 'x64' },
+  { os: 'darwin', arch: 'arm64' },
+];
+
+function artifactId(role, target) {
+  return `${role}-${target.os}-${target.arch}`;
+}
+
+function archiveName(role, target) {
+  const product = role === 'controller' ? 'happier-server' : 'happier';
+  return `${product}-v0.2.10-${target.os}-${target.arch}.tar.gz`;
+}
+
+function checksumsName(role) {
+  return role === 'controller' ? CONTROLLER_CHECKSUMS_NAME : AGENT_CHECKSUMS_NAME;
+}
+
+function checksumReceipt(role, bytes, lineEnding = '\n') {
+  return `${TARGETS.map((target) => `${sha256(bytes)}  ${archiveName(role, target)}`).join(lineEnding)}${lineEnding}`;
+}
 
 async function writeCanonicalSources(sourceDir, agentBytes, controllerBytes) {
   await mkdir(sourceDir, { recursive: true });
-  await writeFile(join(sourceDir, AGENT_ARCHIVE_NAME), agentBytes);
-  await writeFile(join(sourceDir, CONTROLLER_ARCHIVE_NAME), controllerBytes);
+  for (const target of TARGETS) {
+    await writeFile(join(sourceDir, archiveName('agent', target)), agentBytes);
+    await writeFile(join(sourceDir, archiveName('controller', target)), controllerBytes);
+  }
   await writeFile(
     join(sourceDir, AGENT_CHECKSUMS_NAME),
-    `${sha256(agentBytes)}  ${AGENT_ARCHIVE_NAME}\n`,
+    checksumReceipt('agent', agentBytes),
     'utf8',
   );
   await writeFile(
     join(sourceDir, CONTROLLER_CHECKSUMS_NAME),
-    `${sha256(controllerBytes)}  ${CONTROLLER_ARCHIVE_NAME}\n`,
+    checksumReceipt('controller', controllerBytes),
     'utf8',
   );
 }
@@ -49,26 +75,19 @@ function localSpec(agentBytes, controllerBytes) {
         androidApp: '0.2.10',
         iosApp: '0.2.10',
       },
-      artifacts: [
-        {
-          id: 'agent-linux-x64',
-          role: 'agent',
-          target: { os: 'linux', arch: 'x64', libc: 'glibc' },
+      artifacts: TARGETS.flatMap((target) => ['agent', 'controller'].map((role) => {
+        const bytes = role === 'controller' ? controllerBytes : agentBytes;
+        const id = artifactId(role, target);
+        return {
+          id,
+          role,
+          target,
           format: 'tar.gz',
-          path: 'packs/agent/agent-linux-x64.tar.gz',
-          sha256: sha256(agentBytes),
-          size: agentBytes.length,
-        },
-        {
-          id: 'controller-linux-x64',
-          role: 'controller',
-          target: { os: 'linux', arch: 'x64', libc: 'glibc' },
-          format: 'tar.gz',
-          path: 'packs/controller/controller-linux-x64.tar.gz',
-          sha256: sha256(controllerBytes),
-          size: controllerBytes.length,
-        },
-      ],
+          path: `packs/${role}/${id}.tar.gz`,
+          sha256: sha256(bytes),
+          size: bytes.length,
+        };
+      })),
       mobile: {
         supportedProtocolVersions: ['1'],
         preferredProtocolVersion: '1',
@@ -93,16 +112,13 @@ function localSpec(agentBytes, controllerBytes) {
         push: { mode: 'private' },
       },
     },
-    sources: {
-      'agent-linux-x64': {
-        archive: `artifacts/${AGENT_ARCHIVE_NAME}`,
-        checksums: `artifacts/${AGENT_CHECKSUMS_NAME}`,
+    sources: Object.fromEntries(TARGETS.flatMap((target) => ['agent', 'controller'].map((role) => [
+      artifactId(role, target),
+      {
+        archive: `artifacts/${archiveName(role, target)}`,
+        checksums: `artifacts/${checksumsName(role)}`,
       },
-      'controller-linux-x64': {
-        archive: `artifacts/${CONTROLLER_ARCHIVE_NAME}`,
-        checksums: `artifacts/${CONTROLLER_CHECKSUMS_NAME}`,
-      },
-    },
+    ]))),
   };
 }
 
@@ -122,7 +138,7 @@ test('assembleDeploymentKitFromSpec produces a verified local kit from spec-root
     });
 
     assert.equal(result.channel, 'local');
-    assert.equal(result.artifactCount, 2);
+    assert.equal(result.artifactCount, TARGETS.length * 2);
     assert.match(result.treeSha256, /^[a-f0-9]{64}$/);
     const manifest = JSON.parse(await readFile(join(outDir, 'manifest.json'), 'utf8'));
     assert.equal(manifest.source.reproducibility, 'not-verified');
@@ -249,10 +265,10 @@ test('assembly rejects self-declared arbitrary files without canonical archive c
     await writeFile(join(specRoot, 'artifacts', 'controller.tar.gz'), controllerBytes);
 
     const spec = localSpec(agentBytes, controllerBytes);
-    spec.sources = {
-      'agent-linux-x64': 'artifacts/agent.tar.gz',
-      'controller-linux-x64': 'artifacts/controller.tar.gz',
-    };
+    spec.sources = Object.fromEntries(Object.keys(spec.sources).map((id) => [
+      id,
+      id.startsWith('controller-') ? 'artifacts/controller.tar.gz' : 'artifacts/agent.tar.gz',
+    ]));
 
     await assert.rejects(
       () => assembleDeploymentKitFromSpec({
@@ -329,12 +345,12 @@ test('assembly accepts canonical checksum receipts with CRLF line endings', asyn
     await writeCanonicalSources(join(specRoot, 'artifacts'), agentBytes, controllerBytes);
     await writeFile(
       join(specRoot, 'artifacts', AGENT_CHECKSUMS_NAME),
-      `${sha256(agentBytes)}  ${AGENT_ARCHIVE_NAME}\r\n`,
+      checksumReceipt('agent', agentBytes, '\r\n'),
       'utf8',
     );
     await writeFile(
       join(specRoot, 'artifacts', CONTROLLER_CHECKSUMS_NAME),
-      `${sha256(controllerBytes)}  ${CONTROLLER_ARCHIVE_NAME}\r\n`,
+      checksumReceipt('controller', controllerBytes, '\r\n'),
       'utf8',
     );
 
@@ -343,7 +359,7 @@ test('assembly accepts canonical checksum receipts with CRLF line endings', asyn
       specRoot,
       outDir: join(root, 'kit'),
     });
-    assert.equal(result.artifactCount, 2);
+    assert.equal(result.artifactCount, TARGETS.length * 2);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

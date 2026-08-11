@@ -138,7 +138,7 @@ function normalizeArtifacts(artifacts) {
   }).sort((left, right) => left.id.localeCompare(right.id, 'en'));
 }
 
-function assertCompleteRoleCoverage(artifacts) {
+export function assertCompleteDeploymentKitArtifactCoverage(artifacts) {
   const targets = new Map();
   for (const artifact of artifacts) {
     const key = targetKey(artifact.target);
@@ -146,7 +146,9 @@ function assertCompleteRoleCoverage(artifacts) {
     record.add(artifact.role);
     targets.set(key, record);
   }
-  for (const [key, roles] of targets) {
+  for (const key of CANONICAL_ARTIFACT_TARGET_KEYS) {
+    const roles = targets.get(key);
+    if (!roles) throw new Error(`[deployment-kit] missing artifacts for canonical target: ${key}`);
     for (const role of ['agent', 'controller']) {
       if (!roles.has(role)) throw new Error(`[deployment-kit] missing ${role} artifact for ${key}`);
     }
@@ -159,7 +161,7 @@ export function createDeploymentKitManifest(input) {
   if (!CHANNELS.has(channel)) throw new Error(`[deployment-kit] unsupported channel: ${channel}`);
   const source = normalizeSource(input?.source, channel);
   const artifacts = normalizeArtifacts(input?.artifacts);
-  assertCompleteRoleCoverage(artifacts);
+  assertCompleteDeploymentKitArtifactCoverage(artifacts);
   const versions = {
     cli: requireSafeSegment(input?.versions?.cli, 'CLI version'),
     relay: requireSafeSegment(input?.versions?.relay, 'Relay version'),

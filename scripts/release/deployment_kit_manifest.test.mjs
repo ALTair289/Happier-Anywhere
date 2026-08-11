@@ -207,6 +207,19 @@ test('createDeploymentKitManifest requires complete agent and controller coverag
   );
 });
 
+test('createDeploymentKitManifest requires every canonical target even when both roles are absent', () => {
+  const input = createInput();
+  assert.throws(
+    () => createDeploymentKitManifest({
+      ...input,
+      artifacts: input.artifacts.filter((entry) => (
+        [entry.target.os, entry.target.arch, entry.target.libc].filter(Boolean).join('-') !== 'darwin-arm64'
+      )),
+    }),
+    /missing artifacts for canonical target.*darwin-arm64/i,
+  );
+});
+
 test('createDeploymentKitManifest accepts only the canonical five native target combinations', () => {
   const input = createInput();
   assert.throws(

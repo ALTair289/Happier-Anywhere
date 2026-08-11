@@ -15,7 +15,10 @@ import {
 } from 'node:fs/promises';
 import { dirname, isAbsolute, posix, resolve, sep } from 'node:path';
 
-import { HAPPIER_DEPLOYMENT_KIT_SCHEMA_VERSION } from './deployment-kit-manifest.mjs';
+import {
+  assertCompleteDeploymentKitArtifactCoverage,
+  HAPPIER_DEPLOYMENT_KIT_SCHEMA_VERSION,
+} from './deployment-kit-manifest.mjs';
 import {
   assertDeploymentKitManifestSchema,
   deploymentKitJsonSchema,
@@ -220,7 +223,9 @@ function validateManifestShape(manifest) {
       throw new Error(`[deployment-kit] invalid size for artifact ${artifact.id}`);
     }
   }
-  return assertDeploymentKitManifestSchema(manifest);
+  const normalizedManifest = assertDeploymentKitManifestSchema(manifest);
+  assertCompleteDeploymentKitArtifactCoverage(normalizedManifest.artifacts);
+  return normalizedManifest;
 }
 
 function createInventory(manifest) {
