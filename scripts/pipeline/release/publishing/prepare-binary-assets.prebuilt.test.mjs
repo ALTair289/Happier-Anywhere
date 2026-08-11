@@ -105,7 +105,7 @@ test('finalizePreparedBinaryArtifacts covers the five-platform SBOM/provenance c
       version,
       targets: CLI_TARGETS.map(([os, arch]) => ({ os, arch })),
       attestation: {
-        sourceRepository: 'https://github.com/ALTair289/Happier-Anywhere-Source',
+        sourceRepository: 'https://github.com/ALTair289/Happier-Anywhere',
         sourceCommitSha: '1'.repeat(40),
         sourceWorkspaceDirty: false,
         lockfilePath,

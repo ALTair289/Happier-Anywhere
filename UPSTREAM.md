@@ -3,7 +3,7 @@
 Happier Anywhere Source is a full-history GitHub fork of Happier. The source
 relationship is intentionally explicit:
 
-- downstream fork: https://github.com/ALTair289/Happier-Anywhere-Source
+- downstream fork: https://github.com/ALTair289/Happier-Anywhere
 - official upstream: https://github.com/happier-dev/happier
 - upstream default branch: `dev`
 - initial downstream base: `4b76fc8c60fffeb1c08a26ef05d0ffe22684168e`
@@ -16,7 +16,7 @@ the downstream identity without changing upstream authorship.
 Use `origin` for the downstream fork and `upstream` for the official project:
 
 ```text
-origin   https://github.com/ALTair289/Happier-Anywhere-Source.git
+origin   https://github.com/ALTair289/Happier-Anywhere.git
 upstream https://github.com/happier-dev/happier.git
 ```
 

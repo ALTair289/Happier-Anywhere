@@ -8,10 +8,10 @@ license text is preserved in the root LICENCE file, including the copyright
 notice for Happy Coder Contributors.
 
 Downstream modifications for Happier Anywhere are maintained at:
-https://github.com/ALTair289/Happier-Anywhere-Source
+https://github.com/ALTair289/Happier-Anywhere
 
 The lightweight installer and distribution project is maintained separately:
-https://github.com/ALTair289/Happier-Anywhere
+https://github.com/ALTair289/Happier-Anywhere-Deploy
 
 Happier Anywhere is not represented as an official upstream release. Files or
 dependencies that carry their own notices or licenses remain subject to those

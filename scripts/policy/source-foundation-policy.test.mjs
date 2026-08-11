@@ -101,13 +101,13 @@ function topLevelPermissionsFinding(path) {
 test('source provenance binds the full fork to the approved upstream base', () => {
     const manifest = JSON.parse(readRepositoryFile('SOURCE_PROVENANCE.json'));
     assert.equal(manifest.schemaVersion, 1);
-    assert.equal(manifest.sourceRepository, 'https://github.com/ALTair289/Happier-Anywhere-Source');
+    assert.equal(manifest.sourceRepository, 'https://github.com/ALTair289/Happier-Anywhere');
     assert.equal(manifest.upstream.repository, 'https://github.com/happier-dev/happier');
     assert.equal(manifest.upstream.defaultBranch, 'dev');
     assert.equal(manifest.upstream.baseCommit, '4b76fc8c60fffeb1c08a26ef05d0ffe22684168e');
     assert.equal(manifest.history, 'full');
     assert.deepEqual(manifest.license, { file: 'LICENCE', spdx: 'MIT' });
-    assert.equal(manifest.distributionRepository, 'https://github.com/ALTair289/Happier-Anywhere');
+    assert.equal(manifest.distributionRepository, 'https://github.com/ALTair289/Happier-Anywhere-Deploy');
 
     execFileSync('git', ['cat-file', '-e', `${manifest.upstream.baseCommit}^{commit}`], {
         cwd: repositoryRoot,

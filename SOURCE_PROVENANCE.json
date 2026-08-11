@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "project": "Happier Anywhere Source",
-  "sourceRepository": "https://github.com/ALTair289/Happier-Anywhere-Source",
+  "sourceRepository": "https://github.com/ALTair289/Happier-Anywhere",
   "upstream": {
     "repository": "https://github.com/happier-dev/happier",
     "defaultBranch": "dev",
@@ -12,7 +12,7 @@
     "file": "LICENCE",
     "spdx": "MIT"
   },
-  "distributionRepository": "https://github.com/ALTair289/Happier-Anywhere",
+  "distributionRepository": "https://github.com/ALTair289/Happier-Anywhere-Deploy",
   "sourceCommit": {
     "resolution": "git rev-parse HEAD",
     "releaseBinding": "release metadata, provenance, checksums, SBOM, and signatures"

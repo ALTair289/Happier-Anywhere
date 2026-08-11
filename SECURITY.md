@@ -16,7 +16,7 @@ Do not include exploit details, credentials, private keys, access tokens,
 personal data, or unredacted logs in a public issue.
 
 Use GitHub private vulnerability reporting when it is available:
-https://github.com/ALTair289/Happier-Anywhere-Source/security/advisories/new
+https://github.com/ALTair289/Happier-Anywhere/security/advisories/new
 
 If that entry point is unavailable, open a minimal public issue that asks the
 maintainer to establish a private contact channel. Include no sensitive detail

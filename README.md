@@ -1,6 +1,6 @@
 # Happier Anywhere
 
-[简体中文](README.zh-CN.md) · [Upstream Happier](https://github.com/happier-dev/happier) · [Deployment repository](https://github.com/ALTair289/Happier-Anywhere)
+[简体中文](README.zh-CN.md) · [Upstream Happier](https://github.com/happier-dev/happier) · [Deployment repository](https://github.com/ALTair289/Happier-Anywhere-Deploy)
 
 Happier Anywhere is a multi-platform source and deployment project for using your coding agents from wherever you are. It connects local and SSH-hosted Codex, Claude Code, and other supported agents to the Happier Web, Desktop, and mobile applications, so you can inspect work, send instructions, approve actions, interrupt or resume a task, and take control of an existing session without staying in front of the original terminal.
 
@@ -10,8 +10,8 @@ Happier Anywhere is built on [Happier](https://github.com/happier-dev/happier). 
 
 | Repository | Purpose |
 | --- | --- |
-| [Happier Anywhere Source](https://github.com/ALTair289/Happier-Anywhere-Source) | Full source, tests, build scripts, protocol, CLI, server, UI, and deployment pipeline |
-| [Happier Anywhere](https://github.com/ALTair289/Happier-Anywhere) | Lightweight installation project, release manifests, checksums, signatures, and operator documentation |
+| [Happier Anywhere](https://github.com/ALTair289/Happier-Anywhere) | Full source, tests, build scripts, protocol, CLI, server, UI, and deployment pipeline |
+| [Happier Anywhere Deploy](https://github.com/ALTair289/Happier-Anywhere-Deploy) | Lightweight installation project, release manifests, checksums, signatures, and operator documentation |
 | [happier-dev/happier](https://github.com/happier-dev/happier) | Upstream Happier project and application ecosystem |
 
 ## What it provides
@@ -46,7 +46,7 @@ Local coding agents    SSH-connected machines
 
 ## Project status
 
-The active reviewed integration candidate is the `codex/ha-integration` branch. Use signed release artifacts for stable deployments when they are published. Until that branch is merged, source users should explicitly select it rather than assuming that `dev` contains the same changes.
+The active reviewed integration candidate is the `integration` branch. Use signed release artifacts for stable deployments when they are published. Until that branch is merged, source users should explicitly select it rather than assuming that `dev` contains the same changes.
 
 ## Quick start from source
 
@@ -62,9 +62,9 @@ The active reviewed integration candidate is the `codex/ha-integration` branch. 
 ### Clone and build
 
 ```bash
-git clone https://github.com/ALTair289/Happier-Anywhere-Source.git
-cd Happier-Anywhere-Source
-git switch codex/ha-integration
+git clone https://github.com/ALTair289/Happier-Anywhere.git
+cd Happier-Anywhere
+git switch integration
 
 corepack enable
 corepack prepare yarn@1.22.22 --activate
@@ -170,7 +170,7 @@ The deployment kit currently defines these canonical targets:
 - `darwin-x64`
 - `darwin-arm64`
 
-Use [Happier Anywhere](https://github.com/ALTair289/Happier-Anywhere) for the lightweight installer and signed release workflow. Use this source repository when developing, auditing, or producing your own verified build.
+Use [Happier Anywhere Deploy](https://github.com/ALTair289/Happier-Anywhere-Deploy) for the lightweight installer and signed release workflow. Use this source repository when developing, auditing, or producing your own verified build.
 
 ## Connecting SSH machines
 

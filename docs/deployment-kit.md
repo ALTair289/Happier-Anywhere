@@ -130,7 +130,7 @@ copying any native archive into the project:
 node scripts/pipeline/deployment-kit/assemble-github-project.mjs \
   --kit <verified-kit-directory> \
   --out <new-empty-project-directory> \
-  --repository ALTair289/Happier-Anywhere \
+  --repository ALTair289/Happier-Anywhere-Deploy \
   --repository-availability not-verified \
   --release-public-key <project-minisign-public-key>
 ```

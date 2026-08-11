@@ -1,6 +1,6 @@
 # Happier Anywhere
 
-[English](README.md) · [Happier 上游仓库](https://github.com/happier-dev/happier) · [轻量部署仓库](https://github.com/ALTair289/Happier-Anywhere)
+[English](README.md) · [Happier 上游仓库](https://github.com/happier-dev/happier) · [轻量部署仓库](https://github.com/ALTair289/Happier-Anywhere-Deploy)
 
 Happier Anywhere 是一个面向多平台的源码与部署项目，让你不必一直守在原始终端前，也能使用手机、桌面客户端或浏览器管理正在运行的编程智能体。它可以把本机或 SSH 远端的 Codex、Claude Code 及其他受支持智能体接入 Happier，用于查看任务、发送指令、审批操作、中断或恢复运行，并在安全边界内接管已经存在的会话。
 
@@ -10,8 +10,8 @@ Happier Anywhere 基于 [Happier](https://github.com/happier-dev/happier) 构建
 
 | 仓库 | 用途 |
 | --- | --- |
-| [Happier Anywhere Source](https://github.com/ALTair289/Happier-Anywhere-Source) | 完整源码、测试、构建脚本、协议、CLI、服务端、客户端和部署流水线 |
-| [Happier Anywhere](https://github.com/ALTair289/Happier-Anywhere) | 轻量安装项目、发布清单、校验和、签名和运维文档 |
+| [Happier Anywhere](https://github.com/ALTair289/Happier-Anywhere) | 完整源码、测试、构建脚本、协议、CLI、服务端、客户端和部署流水线 |
+| [Happier Anywhere Deploy](https://github.com/ALTair289/Happier-Anywhere-Deploy) | 轻量安装项目、发布清单、校验和、签名和运维文档 |
 | [happier-dev/happier](https://github.com/happier-dev/happier) | Happier 上游项目及其客户端生态 |
 
 ## 它解决什么问题
@@ -46,7 +46,7 @@ Relay：127.0.0.1:3005
 
 ## 当前状态
 
-当前经过审查的集成候选位于 `codex/ha-integration` 分支。稳定部署应优先使用已经发布且签名完整的构件。在该分支合并前，从源码使用时应明确切换到它，不要默认认为 `dev` 已包含同样的改动。
+当前经过审查的集成候选位于 `integration` 分支。稳定部署应优先使用已经发布且签名完整的构件。在该分支合并前，从源码使用时应明确切换到它，不要默认认为 `dev` 已包含同样的改动。
 
 ## 从源码快速开始
 
@@ -62,9 +62,9 @@ Relay：127.0.0.1:3005
 ### 克隆与构建
 
 ```bash
-git clone https://github.com/ALTair289/Happier-Anywhere-Source.git
-cd Happier-Anywhere-Source
-git switch codex/ha-integration
+git clone https://github.com/ALTair289/Happier-Anywhere.git
+cd Happier-Anywhere
+git switch integration
 
 corepack enable
 corepack prepare yarn@1.22.22 --activate
@@ -170,7 +170,7 @@ Agent 机器运行 Happier CLI/daemon，并连接控制端的 Relay。Windows、
 - `darwin-x64`
 - `darwin-arm64`
 
-日常安装和签名发布流程使用 [Happier Anywhere](https://github.com/ALTair289/Happier-Anywhere) 轻量仓库；开发、审计或自行生成可信构建时使用本源码仓库。
+日常安装和签名发布流程使用 [Happier Anywhere Deploy](https://github.com/ALTair289/Happier-Anywhere-Deploy) 轻量仓库；开发、审计或自行生成可信构建时使用本源码仓库。
 
 ## 连接 SSH 机器
 
