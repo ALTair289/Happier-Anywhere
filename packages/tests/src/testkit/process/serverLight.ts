@@ -230,8 +230,6 @@ type BuildLockOwner = {
 
 let sharedDepsReady = false;
 let sharedDepsBuildPromise: Promise<void> | null = null;
-let sharedGeneratedProvidersReady = false;
-let sharedGenerateProvidersPromise: Promise<void> | null = null;
 
 export function resolveTestDbProvider(env: NodeJS.ProcessEnv): TestDbProvider {
   const raw = (env.HAPPIER_E2E_DB_PROVIDER ?? env.HAPPY_E2E_DB_PROVIDER ?? '').toString().trim().toLowerCase();
@@ -252,7 +250,7 @@ export function resolveServerLightSqliteDatabaseUrl(params: Readonly<{
   platform?: string;
 }>): string {
   const explicitDatabaseUrl = params.env.DATABASE_URL?.toString().trim();
-  if (explicitDatabaseUrl) return explicitDatabaseUrl;
+  if (explicitDatabaseUrl?.toLowerCase().startsWith('file:')) return explicitDatabaseUrl;
   return renderPrismaCompatibleSqliteDatabaseUrl({
     dbPath: join(params.dataDir, 'happier-server-light.sqlite'),
     platform: params.platform ?? process.platform,
@@ -308,16 +306,19 @@ function isRunningPid(pid: number): boolean {
   }
 }
 
-export async function withServerSharedDepsBuildLock<T>(
+type ServerBuildLockOptions = Readonly<{
+  lockPath?: string;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  staleAfterMs?: number;
+}>;
+
+async function withServerBuildLock<T>(
   fn: () => Promise<T>,
-  options?: {
-    lockPath?: string;
-    timeoutMs?: number;
-    pollIntervalMs?: number;
-    staleAfterMs?: number;
-  },
+  defaults: Readonly<{ lockPath: string; description: string }>,
+  options?: ServerBuildLockOptions,
 ): Promise<T> {
-  const lockPath = options?.lockPath ?? resolve(repoRootDir(), '.project', 'tmp', 'server-shared-deps-build.lock');
+  const lockPath = options?.lockPath ?? defaults.lockPath;
   mkdirSync(dirname(lockPath), { recursive: true });
 
   const timeoutMs = options?.timeoutMs ?? 240_000;
@@ -355,7 +356,7 @@ export async function withServerSharedDepsBuildLock<T>(
       }
 
       if (Date.now() - startedAt > timeoutMs) {
-        throw new Error(`Timed out waiting for server shared deps build lock: ${lockPath}`);
+        throw new Error(`Timed out waiting for ${defaults.description} lock: ${lockPath}`);
       }
       await sleep(pollIntervalMs);
     }
@@ -390,6 +391,34 @@ export async function withServerSharedDepsBuildLock<T>(
       // ignore
     }
   }
+}
+
+export async function withServerSharedDepsBuildLock<T>(
+  fn: () => Promise<T>,
+  options?: ServerBuildLockOptions,
+): Promise<T> {
+  return await withServerBuildLock(
+    fn,
+    {
+      lockPath: resolve(repoRootDir(), '.project', 'tmp', 'server-shared-deps-build.lock'),
+      description: 'server shared deps build',
+    },
+    options,
+  );
+}
+
+export async function withServerGeneratedProvidersBuildLock<T>(
+  fn: () => Promise<T>,
+  options?: ServerBuildLockOptions,
+): Promise<T> {
+  return await withServerBuildLock(
+    fn,
+    {
+      lockPath: resolve(repoRootDir(), '.project', 'tmp', 'server-generated-providers-build.lock'),
+      description: 'server generated providers build',
+    },
+    options,
+  );
 }
 
 function resolveServerGenerateProvidersSourcePaths(rootDir: string): Readonly<{
@@ -812,41 +841,34 @@ async function ensureServerGeneratedProviders(params: { testDir: string; env: No
   if (shouldSkipServerGenerateProviders(params.env)) return;
   const rootDir = repoRootDir();
   if (hasServerGeneratedProviderOutputs(rootDir, params.dbProvider)) {
-    sharedGeneratedProvidersReady = true;
-    return;
-  }
-  if (sharedGeneratedProvidersReady) sharedGeneratedProvidersReady = false;
-  if (sharedGenerateProvidersPromise) {
-    await sharedGenerateProvidersPromise;
     return;
   }
 
-  sharedGenerateProvidersPromise = runLoggedCommand({
-    command: yarnCommand(),
-    args: ['-s', 'workspace', resolveServerAppWorkspaceName(), 'generate:providers'],
-    cwd: rootDir,
-    env: {
-      ...params.env,
-      PORT: '0',
-      PUBLIC_URL: 'http://127.0.0.1:0',
-      DATABASE_URL: 'postgresql://postgres@127.0.0.1:5432/postgres?sslmode=disable',
-      HAPPIER_BUILD_DB_PROVIDERS: params.dbProvider,
-    },
-    stdoutPath: resolve(params.testDir, 'server.generate.stdout.log'),
-    stderrPath: resolve(params.testDir, 'server.generate.stderr.log'),
-    timeoutMs: 300_000,
-  }).then(() => {
+  await withServerGeneratedProvidersBuildLock(async () => {
+    if (hasServerGeneratedProviderOutputs(rootDir, params.dbProvider)) {
+      return;
+    }
+
+    await runLoggedCommand({
+      command: yarnCommand(),
+      args: ['-s', 'workspace', resolveServerAppWorkspaceName(), 'generate:providers'],
+      cwd: rootDir,
+      env: {
+        ...params.env,
+        PORT: '0',
+        PUBLIC_URL: 'http://127.0.0.1:0',
+        DATABASE_URL: 'postgresql://postgres@127.0.0.1:5432/postgres?sslmode=disable',
+        HAPPIER_BUILD_DB_PROVIDERS: params.dbProvider,
+      },
+      stdoutPath: resolve(params.testDir, 'server.generate.stdout.log'),
+      stderrPath: resolve(params.testDir, 'server.generate.stderr.log'),
+      timeoutMs: 300_000,
+    });
+
     if (!hasServerGeneratedProviderOutputs(rootDir, params.dbProvider)) {
       throw new Error(`Generated server provider outputs missing or stale after generate:providers: ${rootDir}`);
     }
-    sharedGeneratedProvidersReady = true;
   });
-
-  try {
-    await sharedGenerateProvidersPromise;
-  } finally {
-    sharedGenerateProvidersPromise = null;
-  }
 }
 
 export async function startServerLight(params: {

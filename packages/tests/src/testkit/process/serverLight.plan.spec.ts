@@ -15,6 +15,7 @@ import {
   resolveMigrateCommandArgs,
   resolveStartCommandArgs,
   shouldUseServerSourceEntrypoint,
+  withServerGeneratedProvidersBuildLock,
   withServerSharedDepsBuildLock,
   type TestDbProvider,
 } from "./serverLight";
@@ -96,7 +97,9 @@ describe("startServerLight planning helpers", () => {
       env: {},
       platform: "linux",
     });
-    expect(generated).toBe("file:///tmp/happier-e2e/happier-server-light.sqlite?socket_timeout=30&connection_limit=1");
+    expect(normalizeForPathAssertions(generated)).toMatch(
+      /^file:\/\/\/(?:[A-Z]:)?\/tmp\/happier-e2e\/happier-server-light\.sqlite\?socket_timeout=30&connection_limit=1$/,
+    );
 
     const explicitDatabaseUrl = "file:/tmp/custom-happier.sqlite?mode=rw";
     expect(resolveServerLightSqliteDatabaseUrl({
@@ -104,6 +107,20 @@ describe("startServerLight planning helpers", () => {
       env: { DATABASE_URL: explicitDatabaseUrl },
       platform: "linux",
     })).toBe(explicitDatabaseUrl);
+  });
+
+  it("does not reuse an external provider DATABASE_URL for an explicitly SQLite server", () => {
+    expect(normalizeForPathAssertions(resolveServerLightSqliteDatabaseUrl({
+      dataDir: "/tmp/happier-e2e",
+      env: { DATABASE_URL: "mysql://root@127.0.0.1:3306/happier" },
+      platform: "linux",
+    }))).toMatch(/^file:\/\/\/(?:[A-Z]:)?\/tmp\/happier-e2e\/happier-server-light\.sqlite\?socket_timeout=30&connection_limit=1$/);
+
+    expect(normalizeForPathAssertions(resolveServerLightSqliteDatabaseUrl({
+      dataDir: "/tmp/happier-e2e",
+      env: { DATABASE_URL: "postgresql://happier@127.0.0.1:5432/happier" },
+      platform: "linux",
+    }))).toMatch(/^file:\/\/\/(?:[A-Z]:)?\/tmp\/happier-e2e\/happier-server-light\.sqlite\?socket_timeout=30&connection_limit=1$/);
   });
 
   it("serializes shared deps builds across concurrent callers", async () => {
@@ -126,6 +143,45 @@ describe("startServerLight planning helpers", () => {
     );
 
     const second = withServerSharedDepsBuildLock(
+      async () => {
+        secondEntered = true;
+      },
+      {
+        lockPath,
+        timeoutMs: 5_000,
+        pollIntervalMs: 10,
+        staleAfterMs: 5_000,
+      },
+    );
+
+    await sleep(50);
+    expect(secondEntered).toBe(false);
+    releaseFirst();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    expect(secondEntered).toBe(true);
+  });
+
+  it("serializes generated provider builds through the repository lock", async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), "happier-server-generated-providers-lock-"));
+    const lockPath = resolve(rootDir, "server-generated-providers-build.lock");
+    let releaseFirst = () => {};
+    let secondEntered = false;
+
+    const first = withServerGeneratedProvidersBuildLock(
+      async () =>
+        await new Promise<void>((resolveFirst) => {
+          releaseFirst = resolveFirst;
+        }),
+      {
+        lockPath,
+        timeoutMs: 5_000,
+        pollIntervalMs: 10,
+        staleAfterMs: 5_000,
+      },
+    );
+
+    const second = withServerGeneratedProvidersBuildLock(
       async () => {
         secondEntered = true;
       },
