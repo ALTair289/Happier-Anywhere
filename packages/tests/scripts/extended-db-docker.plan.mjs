@@ -134,7 +134,7 @@ export function buildExtendedDbCommandPlan({ db, mode, databaseUrl }) {
   const e2eStep = {
     kind: 'e2e',
     command: 'yarn',
-    args: ['test:e2e'],
+    args: ['test:e2e:core:fast'],
     env: {
       HAPPIER_E2E_DB_PROVIDER: db,
       DATABASE_URL: String(databaseUrl),

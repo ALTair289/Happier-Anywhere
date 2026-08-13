@@ -132,10 +132,12 @@ By default, core e2e runs against embedded Postgres via `pglite`, but you can op
 - `HAPPIER_E2E_DB_PROVIDER=pglite yarn workspace @happier-dev/tests test`
 - `HAPPIER_E2E_DB_PROVIDER=sqlite yarn workspace @happier-dev/tests test`
 
-Extended (requires an external DB URL):
+Extended database fast lane (requires an external DB URL):
 
-- `HAPPIER_E2E_DB_PROVIDER=postgres DATABASE_URL='postgresql://...' yarn workspace @happier-dev/tests test`
-- `HAPPIER_E2E_DB_PROVIDER=mysql DATABASE_URL='mysql://...' yarn workspace @happier-dev/tests test`
+- `HAPPIER_E2E_DB_PROVIDER=postgres DATABASE_URL='postgresql://...' yarn workspace @happier-dev/tests test:core:fast`
+- `HAPPIER_E2E_DB_PROVIDER=mysql DATABASE_URL='mysql://...' yarn workspace @happier-dev/tests test:core:fast`
+
+External database validation combines this bounded fast E2E lane with the provider-specific DB contract suite. The process-heavy slow E2E lane remains a separate SQLite job so one external-database job does not mix unrelated provider coverage with long-running daemon and compatibility scenarios.
 
 Local convenience (auto-provision Docker DB):
 

@@ -63,6 +63,7 @@ describe('extended db docker plan', () => {
     expect(e2e[0].kind).toBe('prebuild-cli-shared');
     expect(e2e[1].kind).toBe('prebuild-cli');
     expect(e2e[2].kind).toBe('e2e');
+    expect(e2e[2].args).toEqual(['test:e2e:core:fast']);
     expect(e2e[2].env.HAPPIER_E2E_DB_PROVIDER).toBe('postgres');
     expect(e2e[2].env.DATABASE_URL).toBe(databaseUrl);
 
@@ -80,6 +81,7 @@ describe('extended db docker plan', () => {
     expect(extended[0].kind).toBe('prebuild-cli-shared');
     expect(extended[1].kind).toBe('prebuild-cli');
     expect(extended[2].kind).toBe('e2e');
+    expect(extended[2].args).toEqual(['test:e2e:core:fast']);
     expect(extended[2].env.HAPPIER_E2E_DB_PROVIDER).toBe('postgres');
     expect(extended[2].env.DATABASE_URL).toBe(databaseUrl);
     expect(extended[3].kind).toBe('migrate');

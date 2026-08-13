@@ -20,3 +20,25 @@ test('nightly dev schedule avoids top-of-hour GitHub Actions load', () => {
     assert.notEqual(minute, '0', `scheduled workflow cron should avoid minute 0: ${cron}`);
   }
 });
+
+test('extended DB matrix runs the bounded fast E2E lane for each external database', () => {
+  const workflow = parse(readFileSync('.github/workflows/extended-db-tests.yml', 'utf8')) as {
+    jobs?: Record<string, { steps?: Array<{ run?: string }> }>;
+  };
+
+  const runCommands = Object.values(workflow.jobs ?? {})
+    .flatMap((job) => job.steps ?? [])
+    .map((step) => String(step.run ?? '').trim())
+    .filter(Boolean);
+
+  assert.equal(
+    runCommands.filter((command) => command === 'yarn test:e2e:core:fast').length,
+    2,
+    'Postgres and MySQL must each run the bounded fast E2E lane',
+  );
+  assert.equal(
+    runCommands.filter((command) => command === 'yarn test:e2e').length,
+    0,
+    'the full fast+slow+testkit suite cannot fit safely in one external-DB job',
+  );
+});

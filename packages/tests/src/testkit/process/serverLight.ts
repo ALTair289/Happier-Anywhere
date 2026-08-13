@@ -535,6 +535,7 @@ function normalizeGeneratedSchemaForFreshnessCheck(input: string): string {
     .replace(/\r\n/g, '\n')
     .split('\n')
     .map((line) => normalizePrismaFieldAttributeOrder(line.trim().replace(/\s+/g, ' ')))
+    .filter((line) => line.length > 0)
     .join('\n')
     .trim();
 }

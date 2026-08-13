@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   e2e-postgres:
-    name: Core E2E (Postgres)
+    name: Core E2E fast (Postgres)
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     services:
@@ -70,13 +70,13 @@ jobs:
         with:
           args: --frozen-lockfile --ignore-engines
 
-      - name: Run core e2e suite (Postgres)
+      - name: Run core fast e2e suite (Postgres)
         env:
           CI: "1"
           HAPPIER_E2E_SAVE_ARTIFACTS: "0"
           HAPPIER_E2E_DB_PROVIDER: postgres
           DATABASE_URL: postgresql://happier:happier@127.0.0.1:${{ job.services.postgres.ports[5432] }}/happier?sslmode=disable
-        run: yarn test:e2e
+        run: yarn test:e2e:core:fast
 
       - name: Upload e2e artifacts (on failure)
         if: failure()
@@ -86,7 +86,7 @@ jobs:
           path: .project/logs/e2e
 
   e2e-mysql:
-    name: Core E2E (MySQL)
+    name: Core E2E fast (MySQL)
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     services:
@@ -140,13 +140,13 @@ jobs:
         with:
           args: --frozen-lockfile --ignore-engines
 
-      - name: Run core e2e suite (MySQL)
+      - name: Run core fast e2e suite (MySQL)
         env:
           CI: "1"
           HAPPIER_E2E_SAVE_ARTIFACTS: "0"
           HAPPIER_E2E_DB_PROVIDER: mysql
           DATABASE_URL: mysql://root:happier@127.0.0.1:${{ job.services.mysql.ports[3306] }}/happier
-        run: yarn test:e2e
+        run: yarn test:e2e:core:fast
 
       - name: Upload e2e artifacts (on failure)
         if: failure()
