@@ -3,6 +3,7 @@ import {
   resolveClaudeSessionTranscriptPath,
 } from '@/backends/claude/utils/claudeCheckSession';
 import { claudeFindLastSession } from '@/backends/claude/utils/claudeFindLastSession';
+import { readExplicitClaudeResumeSessionIdFromArgs } from '@/backends/claude/utils/claudeResumeArgs';
 import { existsSync, statSync } from 'node:fs';
 
 export type ClaudeRemoteSessionStartPlan = {
@@ -70,10 +71,30 @@ export function resolveClaudeRemoteSessionStartPlan(
     logPrefix: deps?.logPrefix ?? 'claudeRemote',
   };
 
-  let startFrom = opts.sessionId;
+  // `sessionId` is the Happier attach identity when a daemon respawns an
+  // existing session, while `--resume` carries the provider-native Claude
+  // session identity.  They are deliberately different namespaces.  When
+  // both are present, the provider-native resume target must win; otherwise
+  // we try to validate a Happier id as a Claude transcript and abort before
+  // the provider is ever launched.
+  const explicitResumeSessionId = readExplicitClaudeResumeSessionIdFromArgs(opts.claudeArgs);
+  let startFrom = explicitResumeSessionId ?? opts.sessionId;
   let shouldContinue = false;
 
-  if (opts.sessionId) {
+  if (explicitResumeSessionId && opts.sessionId) {
+    if (!effectiveDeps.hasMaterializedSessionTranscript(explicitResumeSessionId, opts.path, opts.transcriptPath, opts.claudeConfigDir)) {
+      throw new ClaudeResumeSessionUnavailableError(explicitResumeSessionId);
+    } else if (!effectiveDeps.checkSession(
+      explicitResumeSessionId,
+      opts.path,
+      opts.transcriptPath,
+      opts.claudeConfigDir,
+    )) {
+      effectiveDeps.logDebug(
+        `[${effectiveDeps.logPrefix}] Provider resume session ${explicitResumeSessionId} did not pass transcript validation yet; attempting resume anyway`,
+      );
+    }
+  } else if (opts.sessionId) {
     if (!effectiveDeps.hasMaterializedSessionTranscript(opts.sessionId, opts.path, opts.transcriptPath, opts.claudeConfigDir)) {
       throw new ClaudeResumeSessionUnavailableError(opts.sessionId);
     } else if (!effectiveDeps.checkSession(

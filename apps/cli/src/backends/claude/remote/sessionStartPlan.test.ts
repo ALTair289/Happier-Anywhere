@@ -24,6 +24,32 @@ describe('resolveClaudeRemoteSessionStartPlan', () => {
     expect(result).toEqual({ startFrom: 'session-1', shouldContinue: false });
   });
 
+  it('uses the provider-native --resume id instead of the Happier attach id', () => {
+    const materializedIds: string[] = [];
+    const result = resolveClaudeRemoteSessionStartPlan(
+      {
+        sessionId: 'happier-session-1',
+        transcriptPath: null,
+        path: '/tmp/workspace',
+        claudeConfigDir: null,
+        claudeArgs: ['--resume', 'claude-session-1'],
+      },
+      {
+        hasMaterializedSessionTranscript: (sessionId) => {
+          materializedIds.push(sessionId);
+          return true;
+        },
+        checkSession: () => true,
+        findLastSession: () => null,
+        logDebug: vi.fn(),
+        logPrefix: 'claudeRemote',
+      },
+    );
+
+    expect(result).toEqual({ startFrom: 'claude-session-1', shouldContinue: false });
+    expect(materializedIds).toEqual(['claude-session-1']);
+  });
+
   it('uses --continue when there is no explicit session id', () => {
     const result = resolveClaudeRemoteSessionStartPlan(
       {
