@@ -47,7 +47,7 @@ describe('resolveClaudeRemoteSessionStartPlan', () => {
     );
 
     expect(result).toEqual({ startFrom: 'claude-session-1', shouldContinue: false });
-    expect(materializedIds).toEqual(['claude-session-1']);
+    expect(materializedIds).toEqual([]);
   });
 
   it('uses --continue when there is no explicit session id', () => {

@@ -81,19 +81,11 @@ export function resolveClaudeRemoteSessionStartPlan(
   let startFrom = explicitResumeSessionId ?? opts.sessionId;
   let shouldContinue = false;
 
-  if (explicitResumeSessionId && opts.sessionId) {
-    if (!effectiveDeps.hasMaterializedSessionTranscript(explicitResumeSessionId, opts.path, opts.transcriptPath, opts.claudeConfigDir)) {
-      throw new ClaudeResumeSessionUnavailableError(explicitResumeSessionId);
-    } else if (!effectiveDeps.checkSession(
-      explicitResumeSessionId,
-      opts.path,
-      opts.transcriptPath,
-      opts.claudeConfigDir,
-    )) {
-      effectiveDeps.logDebug(
-        `[${effectiveDeps.logPrefix}] Provider resume session ${explicitResumeSessionId} did not pass transcript validation yet; attempting resume anyway`,
-      );
-    }
+  if (explicitResumeSessionId) {
+    // An explicit provider resume is authoritative.  In particular, direct-session
+    // takeover may point at a provider transcript whose project directory cannot be
+    // reconstructed from the current working directory.  Do not turn that explicit
+    // `--resume` into a local filesystem gate or fall back to a fresh session.
   } else if (opts.sessionId) {
     if (!effectiveDeps.hasMaterializedSessionTranscript(opts.sessionId, opts.path, opts.transcriptPath, opts.claudeConfigDir)) {
       throw new ClaudeResumeSessionUnavailableError(opts.sessionId);
