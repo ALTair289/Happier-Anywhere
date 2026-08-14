@@ -4,8 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { createRunDirs } from '../../src/testkit/runDir';
 import { startServerLight, type StartedServer } from '../../src/testkit/process/serverLight';
 import { createTestAuth } from '../../src/testkit/auth';
-import { createSession } from '../../src/testkit/sessions';
-import { createSessionScopedSocketCollector, createUserScopedSocketCollector } from '../../src/testkit/socketClient';
+import { createSession, fetchSessionV2 } from '../../src/testkit/sessions';
+import { createUserScopedSocketCollector } from '../../src/testkit/socketClient';
+import { createMachineBoundSessionScopedSocketCollector } from '../../src/testkit/sessionSocketBinding';
 import { FailureArtifacts } from '../../src/testkit/failureArtifacts';
 import { envFlag } from '../../src/testkit/env';
 import { writeTestManifestForServer } from '../../src/testkit/manifestForServer';
@@ -125,7 +126,11 @@ describe('core e2e: pending queue v2 emits pending-changed socket updates', () =
     const { sessionId } = await createSession(server.baseUrl, auth.token);
 
     const userSocket = createUserScopedSocketCollector(server.baseUrl, auth.token);
-    const sessionSocket = createSessionScopedSocketCollector(server.baseUrl, auth.token, sessionId);
+    const { socket: sessionSocket } = await createMachineBoundSessionScopedSocketCollector({
+      baseUrl: server.baseUrl,
+      token: auth.token,
+      sessionId,
+    });
 
     writeTestManifestForServer({
       testDir,
@@ -149,6 +154,11 @@ describe('core e2e: pending queue v2 emits pending-changed socket updates', () =
       userSocket.connect();
       sessionSocket.connect();
       await waitFor(() => userSocket.isConnected() && sessionSocket.isConnected(), { timeoutMs: 20_000 });
+      sessionSocket.emit('session-alive', { sid: sessionId, time: Date.now(), thinking: false });
+      await waitFor(
+        async () => (await fetchSessionV2(server.baseUrl, auth.token, sessionId)).active === true,
+        { timeoutMs: 20_000, context: 'machine-bound session publisher registration' },
+      );
 
       const localId = randomUUID();
       const ciphertext = Buffer.from('pending-materialize', 'utf8').toString('base64');
@@ -160,13 +170,33 @@ describe('core e2e: pending queue v2 emits pending-changed socket updates', () =
         return body?.pendingCount === 1;
       }, { timeoutMs: 20_000 });
 
-      const start1 = userSocket.getEvents().length;
-      const ack = await sessionSocket.emitWithAck<any>('pending-materialize-next', { sid: sessionId }, 20_000);
+      const ack = await sessionSocket.emitWithAck<any>('pending-materialize-next', {
+        sid: sessionId,
+        deliveryState: 'provider',
+        deliveryTiming: 'after_foreground_ready',
+        foregroundState: 'ready',
+      }, 20_000);
       expect(ack?.ok).toBe(true);
       expect(ack?.didMaterialize).toBe(true);
+      const accepted = await sessionSocket.emitWithAck<any>('pending-delivery-accepted-v1', {
+        v: 1,
+        sessionId,
+        localId,
+      }, 20_000);
+      expect(accepted).toMatchObject({ ok: true });
       await waitFor(() => {
-        const body = findPendingChangedUpdateAfter({ events: userSocket.getEvents(), sessionId, afterIndex: start1 });
-        return body?.pendingCount === 0;
+        // Settlement and the resolved-message update are published by separate
+        // async tasks. Assert the authoritative pending-changed broadcast without
+        // assuming those two updates arrive in the same array window.
+        return userSocket.getEvents().some((event) => {
+          if (event.kind !== 'update') return false;
+          const body = event.payload?.body;
+          if (!body || typeof body !== 'object') return false;
+          const typedBody = body as { t?: unknown; sid?: unknown; sessionId?: unknown; pendingCount?: unknown };
+          return typedBody.t === 'pending-changed'
+            && (typedBody.sid === sessionId || typedBody.sessionId === sessionId)
+            && typedBody.pendingCount === 0;
+        });
       }, { timeoutMs: 20_000 });
 
       passed = true;

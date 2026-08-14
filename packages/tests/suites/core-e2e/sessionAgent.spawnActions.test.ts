@@ -14,6 +14,7 @@ import {
 import { createRunDirs } from '../../src/testkit/runDir';
 import { repoRootDir } from '../../src/testkit/paths';
 import type { Metadata } from '../../../../apps/cli/src/api/types';
+import { resetActiveAccountSettingsSnapshotForTests } from '../../../../apps/cli/src/settings/accountSettings/activeAccountSettingsSnapshot';
 
 const {
   fetchSessionById,
@@ -142,7 +143,7 @@ async function createSessionAgentMcpScenario(params?: Readonly<{
     },
     {
       credentials: createCredentials(),
-      accountSettings: params?.accountSettings ?? accountSettingsParse({}),
+      getAccountSettings: () => params?.accountSettings ?? accountSettingsParse({}),
     },
   );
   const sdkClientIndexPath = resolve(repoRootDir(), 'apps/cli/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js');
@@ -176,6 +177,7 @@ async function createSessionAgentMcpScenario(params?: Readonly<{
 
 describe('core e2e: session-agent spawn actions', () => {
   beforeEach(() => {
+    resetActiveAccountSettingsSnapshotForTests();
     fetchSessionById.mockReset();
     resolveDaemonSpawnSessionByNonce.mockReset();
     spawnDaemonSession.mockReset();
@@ -258,7 +260,12 @@ describe('core e2e: session-agent spawn actions', () => {
         connectedServices,
         connectedServicesUpdatedAt: 1700000000003,
         mcpSelection,
-        initialPrompt: 'Use inherited parent context.',
+        modelUpdatedAt: 1700000000002,
+        pendingFirstInput: expect.objectContaining({
+          localId: expect.any(String),
+          text: 'Use inherited parent context.',
+        }),
+        spawnNonce: expect.any(String),
       }));
 
       const richConfig = buildAcpConfigOptionOverridesV1({
@@ -297,7 +304,11 @@ describe('core e2e: session-agent spawn actions', () => {
         sessionConfigOptionOverrides: richConfig,
         connectedServices,
         mcpSelection,
-        initialPrompt: 'Use explicit rich options.',
+        pendingFirstInput: expect.objectContaining({
+          localId: expect.any(String),
+          text: 'Use explicit rich options.',
+        }),
+        spawnNonce: expect.any(String),
       }));
 
       const spawnCallsBeforeEscalation = spawnDaemonSession.mock.calls.length;
@@ -332,6 +343,7 @@ describe('core e2e: session-agent spawn actions', () => {
           v: 1,
           actions: {
             'session.spawn_new': {
+              enabled: false,
               disabledSurfaces: ['session_agent'],
             },
           },

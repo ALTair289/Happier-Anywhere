@@ -274,7 +274,12 @@ describe('core e2e: direct Codex app-server sessions browse/link/tail', () => {
         responseItemLine({
           timestamp: '2026-03-11T00:00:01.000Z',
           payload: { type: 'message', role: 'user', content: [{ type: 'text', text: 'rollout arrives after app-server fallback' }] },
-        }),
+        })
+          + jsonlLine({
+            type: 'event_msg',
+            timestamp: '2026-03-11T00:00:02.000Z',
+            payload: { type: 'task_complete', turn_id: 'direct-codex-app-server-appended-turn' },
+          }),
         { encoding: 'utf8', flag: 'a' },
       );
 

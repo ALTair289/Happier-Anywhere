@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import {
@@ -25,49 +25,6 @@ import { postEncryptedUiTextMessage } from '../../src/testkit/uiMessages';
 import { callLegacyEncryptedSessionRpc as callSessionRpc } from '../../src/testkit/sessionRpc';
 
 const run = createRunDirs({ runLabel: 'core' });
-
-type FakeClaudePromptEvent = {
-  type: 'sdk_stdin';
-  hasUserText?: boolean;
-  userTextPreview?: string;
-};
-
-async function waitForFakeClaudeObservedPrompt(
-  logPath: string,
-  predicate: (event: FakeClaudePromptEvent) => boolean,
-  timeoutMs = 30_000,
-): Promise<FakeClaudePromptEvent> {
-  let matched: FakeClaudePromptEvent | null = null;
-
-  await waitFor(async () => {
-    const raw = await readFile(logPath, 'utf8').catch(() => '');
-    const events = raw
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .flatMap((line) => {
-        try {
-          return [JSON.parse(line)];
-        } catch {
-          return [];
-        }
-      }) as FakeClaudePromptEvent[];
-
-    matched =
-      events.find(
-        (event) =>
-          event?.type === 'sdk_stdin' &&
-          event.hasUserText === true &&
-          predicate(event),
-      ) ?? null;
-    return matched !== null;
-  }, { timeoutMs, intervalMs: 100 });
-
-  if (!matched) {
-    throw new Error(`Timed out waiting for fake Claude prompt in ${logPath}`);
-  }
-  return matched;
-}
 
 describe('core e2e: execution runs (review) supports triage updates', () => {
   let server: StartedServer | null = null;
@@ -266,12 +223,10 @@ describe('core e2e: execution runs (review) supports triage updates', () => {
       return Boolean(applyMessage);
     }, { timeoutMs: 30_000, intervalMs: 250 });
 
-    const observedApplyPrompt = await waitForFakeClaudeObservedPrompt(
-      fakeClaudeLog,
-      (event) =>
-        typeof event.userTextPreview === 'string' &&
-        event.userTextPreview.includes('@happier/review.apply_accepted_findings'),
-    );
-    expect(observedApplyPrompt.userTextPreview).toContain('@happier/review.apply_accepted_findings');
+    // The bounded review backend has already completed by this point, so its
+    // provider process is not a live consumer for a later parent-session text
+    // message. The durable message-ingress assertion above is the contract for
+    // this test; live provider delivery is covered by the session transport
+    // suites and must not make review triage depend on a finished backend.
   }, 180_000);
 });

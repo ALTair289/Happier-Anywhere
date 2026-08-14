@@ -9,8 +9,6 @@ import { FailureArtifacts } from '../../src/testkit/failureArtifacts';
 import { envFlag } from '../../src/testkit/env';
 import { writeTestManifestForServer } from '../../src/testkit/manifestForServer';
 import { fetchJson } from '../../src/testkit/http';
-import { createSessionScopedSocketCollector } from '../../src/testkit/socketClient';
-import { waitFor } from '../../src/testkit/timing';
 import { enqueuePendingQueueV2, listPendingQueueV2 } from '../../src/testkit/pendingQueueV2';
 
 const run = createRunDirs({ runLabel: 'core' });
@@ -22,7 +20,7 @@ describe('core e2e: pending queue v2 materialize idempotency', () => {
     await server?.stop();
   });
 
-  it('de-dupes when transcript already contains pending localId (drains pending without duplicating message)', async () => {
+  it('rejects conflicting retries and returns the existing transcript for an exact retry', async () => {
     const testDir = run.testDir('pending-queue-v2-materialize-idempotency');
     const saveArtifactsOnSuccess = envFlag(['HAPPIER_E2E_SAVE_ARTIFACTS', 'HAPPY_E2E_SAVE_ARTIFACTS'], false);
     const startedAt = new Date().toISOString();
@@ -30,8 +28,6 @@ describe('core e2e: pending queue v2 materialize idempotency', () => {
     server = await startServerLight({ testDir });
     const auth = await createTestAuth(server.baseUrl);
     const { sessionId } = await createSession(server.baseUrl, auth.token);
-
-    const socket = createSessionScopedSocketCollector(server.baseUrl, auth.token, sessionId);
 
     writeTestManifestForServer({
       testDir,
@@ -53,9 +49,6 @@ describe('core e2e: pending queue v2 materialize idempotency', () => {
 
     let passed = false;
     try {
-      socket.connect();
-      await waitFor(() => socket.isConnected(), { timeoutMs: 20_000 });
-
       const localId = `local-${randomUUID()}`;
 
       // 1) Commit message into transcript first.
@@ -68,25 +61,33 @@ describe('core e2e: pending queue v2 materialize idempotency', () => {
       });
       expect(writeMsg.status).toBe(200);
 
-      // 2) Enqueue pending with the same localId (simulates crash/retry leaving a stale pending row).
-      const pendingCiphertext = Buffer.from('PENDING_STALE_ROW', 'utf8').toString('base64');
-      const enqueue = await enqueuePendingQueueV2({ baseUrl: server.baseUrl, token: auth.token, sessionId, localId, ciphertext: pendingCiphertext, timeoutMs: 20_000 });
-      expect(enqueue.status).toBe(200);
+      // 2) A retry with the same localId but different content must fail closed;
+      // accepting it would allow a stale queue row to substitute the committed text.
+      const conflictingEnqueue = await enqueuePendingQueueV2({
+        baseUrl: server.baseUrl,
+        token: auth.token,
+        sessionId,
+        localId,
+        ciphertext: Buffer.from('PENDING_STALE_ROW', 'utf8').toString('base64'),
+        timeoutMs: 20_000,
+      });
+      expect(conflictingEnqueue.status).toBe(400);
+      expect(conflictingEnqueue.data?.error).toBe('invalid-params');
 
-      // 3) Materialize-next must not create a duplicate transcript message; it should drain the pending row.
-      const ack = await socket.emitWithAck<any>('pending-materialize-next', { sid: sessionId }, 20_000);
-      expect(ack?.ok).toBe(true);
-      expect(ack?.didMaterialize).toBe(true);
-      expect(ack?.message?.localId).toBe(localId);
+      // 3) An exact retry resolves to the durable transcript, rather than
+      // creating a second pending row or transcript message.
+      const enqueue = await enqueuePendingQueueV2({ baseUrl: server.baseUrl, token: auth.token, sessionId, localId, ciphertext: transcriptCiphertext, timeoutMs: 20_000 });
+      expect(enqueue.status).toBe(200);
+      expect(enqueue.data?.terminal).toBe(true);
+      expect(enqueue.data?.message?.localId).toBe(localId);
 
       const messages = await fetchAllMessages(server.baseUrl, auth.token, sessionId);
       expect(messages.filter((m) => m.localId === localId).length).toBe(1);
       expect(countDuplicateLocalIds(messages)).toBe(0);
 
-      await waitFor(async () => {
-        const pending = await listPendingQueueV2({ baseUrl: server!.baseUrl, token: auth.token, sessionId });
-        return pending.status === 200 && Array.isArray(pending.data?.pending) && pending.data.pending.length === 0;
-      }, { timeoutMs: 20_000 });
+      const pending = await listPendingQueueV2({ baseUrl: server!.baseUrl, token: auth.token, sessionId });
+      expect(pending.status).toBe(200);
+      expect(pending.data?.pending?.length ?? 0).toBe(0);
 
       const snap: any = await fetchSessionV2(server.baseUrl, auth.token, sessionId);
       expect(snap.pendingCount).toBe(0);
@@ -94,7 +95,6 @@ describe('core e2e: pending queue v2 materialize idempotency', () => {
       passed = true;
     } finally {
       await artifacts.dumpAll(testDir, { onlyIf: saveArtifactsOnSuccess || !passed });
-      socket.close();
     }
   });
 });

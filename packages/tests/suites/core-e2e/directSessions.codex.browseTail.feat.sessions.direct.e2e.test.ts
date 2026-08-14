@@ -227,7 +227,12 @@ describe('core e2e: direct Codex sessions browse/link/tail', () => {
       responseItemLine({
         timestamp: '2026-03-06T00:00:03.000Z',
         payload: { type: 'message', role: 'user', content: [{ type: 'text', text: 'appended direct codex message' }] },
-      }),
+      })
+        + jsonlLine({
+          type: 'event_msg',
+          timestamp: '2026-03-06T00:00:04.000Z',
+          payload: { type: 'task_complete', turn_id: 'direct-codex-appended-turn' },
+        }),
       'utf8',
     );
 

@@ -98,7 +98,7 @@ describe("startServerLight planning helpers", () => {
       platform: "linux",
     });
     expect(normalizeForPathAssertions(generated)).toMatch(
-      /^file:\/\/\/(?:[A-Z]:)?\/tmp\/happier-e2e\/happier-server-light\.sqlite\?socket_timeout=30&connection_limit=1$/,
+      /^file:\/\/\/(?:[A-Z]:\/)?tmp\/happier-e2e\/happier-server-light\.sqlite\?socket_timeout=30&connection_limit=1$/,
     );
 
     const explicitDatabaseUrl = "file:/tmp/custom-happier.sqlite?mode=rw";
@@ -114,13 +114,13 @@ describe("startServerLight planning helpers", () => {
       dataDir: "/tmp/happier-e2e",
       env: { DATABASE_URL: "mysql://root@127.0.0.1:3306/happier" },
       platform: "linux",
-    }))).toMatch(/^file:\/\/\/(?:[A-Z]:)?\/tmp\/happier-e2e\/happier-server-light\.sqlite\?socket_timeout=30&connection_limit=1$/);
+    }))).toMatch(/^file:\/\/\/(?:[A-Z]:\/)?tmp\/happier-e2e\/happier-server-light\.sqlite\?socket_timeout=30&connection_limit=1$/);
 
     expect(normalizeForPathAssertions(resolveServerLightSqliteDatabaseUrl({
       dataDir: "/tmp/happier-e2e",
       env: { DATABASE_URL: "postgresql://happier@127.0.0.1:5432/happier" },
       platform: "linux",
-    }))).toMatch(/^file:\/\/\/(?:[A-Z]:)?\/tmp\/happier-e2e\/happier-server-light\.sqlite\?socket_timeout=30&connection_limit=1$/);
+    }))).toMatch(/^file:\/\/\/(?:[A-Z]:\/)?tmp\/happier-e2e\/happier-server-light\.sqlite\?socket_timeout=30&connection_limit=1$/);
   });
 
   it("serializes shared deps builds across concurrent callers", async () => {

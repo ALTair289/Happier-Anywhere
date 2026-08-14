@@ -3,14 +3,20 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createRunDirs } from '../../src/testkit/runDir';
 import { fetchJson } from '../../src/testkit/http';
 import { createTestAuth } from '../../src/testkit/auth';
+import { fetchSessionV2 } from '../../src/testkit/sessions';
 import { startServerLight, type StartedServer } from '../../src/testkit/process/serverLight';
+import { createMachineBoundSessionScopedSocketCollector } from '../../src/testkit/sessionSocketBinding';
+import { waitFor } from '../../src/testkit/timing';
 
 const run = createRunDirs({ runLabel: 'core' });
 
 describe('core e2e: plaintext pending queue v2 materialize-next', () => {
   let server: StartedServer | null = null;
+  let closeSessionSocket: (() => void) | null = null;
 
   afterEach(async () => {
+    closeSessionSocket?.();
+    closeSessionSocket = null;
     await server?.stop();
     server = null;
   });
@@ -24,6 +30,7 @@ describe('core e2e: plaintext pending queue v2 materialize-next', () => {
         HAPPIER_FEATURE_ENCRYPTION__ALLOW_ACCOUNT_OPTOUT: '1',
       },
     });
+    const startedServer = server;
 
     const auth = await createTestAuth(server.baseUrl);
 
@@ -58,6 +65,19 @@ describe('core e2e: plaintext pending queue v2 materialize-next', () => {
     const sessionId = create.data?.session?.id;
     expect(typeof sessionId).toBe('string');
     expect(create.data?.session?.encryptionMode).toBe('plain');
+    const { socket } = await createMachineBoundSessionScopedSocketCollector({
+      baseUrl: server.baseUrl,
+      token: auth.token,
+      sessionId,
+    });
+    closeSessionSocket = () => socket.close();
+    socket.connect();
+    await waitFor(() => socket.isConnected(), { timeoutMs: 20_000 });
+    socket.emit('session-alive', { sid: sessionId, time: Date.now(), thinking: false });
+    await waitFor(
+      async () => (await fetchSessionV2(startedServer.baseUrl, auth.token, sessionId)).active === true,
+      { timeoutMs: 20_000, context: 'machine-bound session publisher registration' },
+    );
 
     const localId = 'pending-local-plain-1';
     const enqueue = await fetchJson<any>(`${server.baseUrl}/v2/sessions/${sessionId}/pending`, {
@@ -91,17 +111,25 @@ describe('core e2e: plaintext pending queue v2 materialize-next', () => {
     expect(list1.data?.pending?.[0]?.content?.t).toBe('plain');
     expect(list1.data?.pending?.[0]?.content?.v?.content?.text).toBe('hello pending plain');
 
-    const materialize = await fetchJson<any>(`${server.baseUrl}/v2/sessions/${sessionId}/pending/materialize-next`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${auth.token}` },
-      timeoutMs: 20_000,
+    const materialize = await socket.emitWithAck<any>('pending-materialize-next', {
+      sid: sessionId,
+      deliveryState: 'provider',
+      deliveryTiming: 'after_foreground_ready',
+      foregroundState: 'ready',
+    }, 20_000);
+    expect(materialize).toMatchObject({
+      ok: true,
+      didMaterialize: true,
+      didWrite: false,
+      message: { localId },
     });
-    expect(materialize.status).toBe(200);
-    expect(materialize.data?.ok).toBe(true);
-    expect(materialize.data?.didMaterialize).toBe(true);
-    expect(materialize.data?.didWriteMessage).toBe(true);
-    expect(materialize.data?.message?.localId).toBe(localId);
-    expect(materialize.data?.message?.messageRole).toBe('user');
+    const accepted = await socket.emitWithAck<any>('pending-delivery-accepted-v1', {
+      v: 1,
+      sessionId,
+      localId,
+    }, 20_000);
+    expect(accepted).toMatchObject({ ok: true });
+    expect(materialize.message?.messageRole).toBe('user');
 
     const list2 = await fetchJson<any>(`${server.baseUrl}/v2/sessions/${sessionId}/pending`, {
       headers: { Authorization: `Bearer ${auth.token}` },
