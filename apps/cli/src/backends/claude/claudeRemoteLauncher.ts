@@ -692,6 +692,16 @@ export async function claudeRemoteLauncher(
         });
     };
     session.addClaudeSessionHookCallback(observeLegacyProviderActivityHook);
+    // A fresh remote runner must declare its provider slot idle before it waits for
+    // the first Pending row.  Otherwise the server correctly withholds that row
+    // while Runtime Activity is unknown, but the Agent SDK cannot install its own
+    // observer until after receiving the very same row.  That circular wait
+    // strands the first prompt of an attached/persisted session (including a
+    // Direct -> persisted takeover).  No provider work exists at this boundary,
+    // so idle is the exact state; later SDK/legacy observations supersede it.
+    await providerTaskRuntimeActivityAdapter?.activateObservation(
+        'claude-remote-input-consumer-ready',
+    );
     const taskOutputCollector = new ClaudeRemoteTaskOutputCollector();
     const subagentFileCollector = new ClaudeRemoteSubagentFileCollector({
         emitImported: (body, meta) => {

@@ -242,6 +242,10 @@ async function runLegacySubscriberScenario(params: Readonly<{
     queryStarted.promise.then(() => ({ type: 'query-started' as const })),
     launchOutcome,
   ])).resolves.toEqual({ type: 'query-started' });
+  expect(observations[0]).toEqual({
+    snapshot: { state: 'idle', activeCount: 0 },
+    reason: 'claude-remote-input-consumer-ready',
+  });
   await vi.waitFor(() => expect(providerInputConsumed).toBe(true));
   await terminalHookConsumed.promise;
   await vi.waitFor(() => {
