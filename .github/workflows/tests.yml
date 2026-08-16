@@ -1167,7 +1167,7 @@ jobs:
             --ref "."
 
   self-host-systemd-e2e:
-    if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.run_self_host_systemd }}
+    if: ${{ inputs.run_self_host_systemd }}
     name: Self-Host E2E (Linux systemd)
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -1206,7 +1206,7 @@ jobs:
           node --test apps/stack/scripts/self_host_systemd.real.integration.test.mjs
 
   self-host-launchd-e2e:
-    if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.run_self_host_launchd }}
+    if: ${{ inputs.run_self_host_launchd }}
     name: Self-Host E2E (macOS launchd)
     runs-on: macos-latest
     timeout-minutes: 120
@@ -1245,7 +1245,7 @@ jobs:
           node --test apps/stack/scripts/self_host_launchd.real.integration.test.mjs
 
   self-host-schtasks-e2e:
-    if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.run_self_host_schtasks }}
+    if: ${{ inputs.run_self_host_schtasks }}
     name: Self-Host E2E (Windows schtasks)
     runs-on: windows-latest
     timeout-minutes: 120
@@ -1282,7 +1282,7 @@ jobs:
         run: node --test apps/stack/scripts/self_host_schtasks.real.integration.test.mjs
 
   self-host-daemon-e2e:
-    if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.run_self_host_daemon }}
+    if: ${{ inputs.run_self_host_daemon }}
     name: Self-Host + Daemon E2E
     strategy:
       fail-fast: false
@@ -1761,7 +1761,8 @@ jobs:
           case "$WORKFLOW_REF" in
             "$WORKFLOW_REPOSITORY/.github/workflows/$WORKFLOW_FILE@refs/heads/dev"|\
             "$WORKFLOW_REPOSITORY/.github/workflows/$WORKFLOW_FILE@refs/heads/preview"|\
-            "$WORKFLOW_REPOSITORY/.github/workflows/$WORKFLOW_FILE@refs/heads/main") ;;
+            "$WORKFLOW_REPOSITORY/.github/workflows/$WORKFLOW_FILE@refs/heads/main"|\
+      "$WORKFLOW_REPOSITORY/.github/workflows/$WORKFLOW_FILE@refs/heads/integration") ;;
             *) echo "Untrusted workflow control ref: $WORKFLOW_REF" >&2; exit 1 ;;
           esac
       - name: Validate exact checkout SHA
