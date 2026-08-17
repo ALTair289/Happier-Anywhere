@@ -79,7 +79,8 @@ jobs:
           case "$WORKFLOW_REF" in
             "$WORKFLOW_REPOSITORY/.github/workflows/publish-server-runtime.yml@refs/heads/dev"|\
             "$WORKFLOW_REPOSITORY/.github/workflows/publish-server-runtime.yml@refs/heads/preview"|\
-            "$WORKFLOW_REPOSITORY/.github/workflows/publish-server-runtime.yml@refs/heads/main") ;;
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-server-runtime.yml@refs/heads/main"|\
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-server-runtime.yml@refs/heads/integration") ;;
             *) echo "Untrusted server-runtime publisher control ref: $WORKFLOW_REF" >&2; exit 1 ;;
           esac
 
