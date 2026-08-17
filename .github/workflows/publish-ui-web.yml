@@ -105,7 +105,8 @@ jobs:
           case "$WORKFLOW_REF" in
             "$WORKFLOW_REPOSITORY/.github/workflows/publish-ui-web.yml@refs/heads/dev"|\
             "$WORKFLOW_REPOSITORY/.github/workflows/publish-ui-web.yml@refs/heads/preview"|\
-            "$WORKFLOW_REPOSITORY/.github/workflows/publish-ui-web.yml@refs/heads/main") ;;
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-ui-web.yml@refs/heads/main"|\
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-ui-web.yml@refs/heads/integration") ;;
             *) echo "Untrusted UI-web publisher control ref: $WORKFLOW_REF" >&2; exit 1 ;;
           esac
 
