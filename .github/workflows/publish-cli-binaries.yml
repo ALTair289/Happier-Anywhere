@@ -106,7 +106,8 @@ jobs:
           case "$WORKFLOW_REF" in
             "$WORKFLOW_REPOSITORY/.github/workflows/publish-cli-binaries.yml@refs/heads/dev"|\
             "$WORKFLOW_REPOSITORY/.github/workflows/publish-cli-binaries.yml@refs/heads/preview"|\
-            "$WORKFLOW_REPOSITORY/.github/workflows/publish-cli-binaries.yml@refs/heads/main") ;;
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-cli-binaries.yml@refs/heads/main"|\
+            "$WORKFLOW_REPOSITORY/.github/workflows/publish-cli-binaries.yml@refs/heads/integration") ;;
             *) echo "Untrusted CLI publisher control ref: $WORKFLOW_REF" >&2; exit 1 ;;
           esac
 
