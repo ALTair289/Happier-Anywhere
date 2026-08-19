@@ -1,5 +1,5 @@
 import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,13 +68,9 @@ async function collectStaticRuntimeScriptAssetSegments(): Promise<string[][]> {
 }
 
 async function writeCliToolUnpackFixture(repoRoot: string, timestamp: Date): Promise<void> {
-    await writeRepoFile(join(repoRoot, 'apps', 'cli', 'tools', 'archives', 'checksums.sha256'), '', timestamp);
-    await writeRepoFile(
-        join(repoRoot, 'apps', 'cli', 'tools', 'archives', 'zellij-no-web-x86_64-unknown-linux-musl.tar.gz'),
-        'fake zellij archive\n',
-        timestamp,
-    );
-    await writeRepoFile(join(repoRoot, 'apps', 'cli', 'tools', 'archives', 'zellij-LICENSE'), 'fake zellij license\n', timestamp);
+    await writeRepoFile(join(repoRoot, 'apps', 'cli', 'tools', 'third-party-assets.json'), '{"schemaVersion":"fixture"}\n', timestamp);
+    await writeRepoFile(join(repoRoot, 'apps', 'cli', 'tools', 'THIRD_PARTY_NOTICES.md'), 'fixture notices\n', timestamp);
+    await writeRepoFile(join(repoRoot, 'apps', 'cli', 'tools', 'licenses', 'zellij-LICENSE'), 'fake zellij license\n', timestamp);
     await writeRepoFile(join(repoRoot, 'apps', 'cli', 'scripts', 'unpack-tools.cjs'), `
 const fs = require('fs');
 const path = require('path');
@@ -246,6 +242,9 @@ describe('buildCliBinaryArtifactPayload bundled workspace sync', () => {
         }
         await expect(readFile(join(payloadDir, 'tools', 'unpacked', '.happier-tools-manifest.json'), 'utf8'))
             .resolves.toContain('"zellij"');
+        await expect(readFile(join(payloadDir, 'tools', 'third-party-assets.json'), 'utf8'))
+            .resolves.toBe('{"schemaVersion":"fixture"}\n');
+        expect(existsSync(join(payloadDir, 'tools', 'archives'))).toBe(false);
     });
 
 });

@@ -82,10 +82,8 @@ async function copyCliRuntimeSidecars(repoRoot: string, payloadDir: string): Pro
 async function copyCliRuntimeTools(repoRoot: string, payloadDir: string, target: BinaryTarget): Promise<void> {
   const sourceToolsDir = join(repoRoot, 'apps', 'cli', 'tools');
   const targetToolsDir = join(payloadDir, 'tools');
-  const targetArchivesDir = join(targetToolsDir, 'archives');
   await rm(targetToolsDir, { recursive: true, force: true });
-  await mkdir(targetToolsDir, { recursive: true });
-  await cp(join(sourceToolsDir, 'archives'), targetArchivesDir, { recursive: true });
+  await cp(sourceToolsDir, targetToolsDir, { recursive: true });
 
   const unpackToolsScript = join(repoRoot, 'apps', 'cli', 'scripts', 'unpack-tools.cjs');
   const requireFromUnpackTools = createRequire(unpackToolsScript);
@@ -98,7 +96,6 @@ async function copyCliRuntimeTools(repoRoot: string, payloadDir: string, target:
     platformDir: resolveCliToolsPlatformDir(target),
     toolsDir: targetToolsDir,
   });
-  await rm(targetArchivesDir, { recursive: true, force: true });
 }
 
 async function copyCliNodeRuntimePayload(

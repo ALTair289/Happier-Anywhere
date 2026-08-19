@@ -711,7 +711,11 @@ jobs:
           fi
 
       - name: Run unit tests and import-cycle guard
-        run: yarn workspace @happier-dev/cli test:unit
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --no-file-parallelism
+          yarn workspace @happier-dev/cli test:import-cycles
 
       - name: Run integration tests
         run: yarn workspace @happier-dev/cli test:integration
@@ -845,6 +849,7 @@ jobs:
       INSTALLERS_SOURCE: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.installers_source || ((github.event_name == 'push' && github.ref_name == 'main') || (github.event_name == 'pull_request' && github.base_ref == 'main')) && 'published-channel' || 'local-build' }}
       INSTALLERS_REF: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.installers_ref != '' && inputs.installers_ref || inputs.installers_channel) || ((github.event_name == 'push' && github.ref_name == 'main') || (github.event_name == 'pull_request' && github.base_ref == 'main')) && 'stable' || '.' }}
       INSTALLERS_RELEASE_CHANNEL: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.installers_channel || ((github.event_name == 'push' && github.ref_name == 'main') || (github.event_name == 'pull_request' && github.base_ref == 'main')) && 'stable' || 'dev' }}
+      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -1330,6 +1335,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -1450,7 +1457,7 @@ jobs:
           set -euo pipefail
           trap 'exit 0' TERM INT
 
-          STUB_BIN_DIR="/tmp/ci-bin"
+          STUB_BIN_DIR="${HOME}/.happier-ci-bin"
           mkdir -p "${STUB_BIN_DIR}"
 
           write_stub() {
@@ -1496,6 +1503,14 @@ jobs:
           command -v codex && codex --version
           command -v gemini && gemini --version
           command -v opencode && opencode --version
+
+      - name: Verify provider CLI stubs for daemon test
+        run: |
+          set -euo pipefail
+          for provider in auggie claude codex gemini opencode; do
+            command -v "${provider}"
+            "${provider}" --version
+          done
 
       - name: Run daemon integration suite (with light server)
         run: |

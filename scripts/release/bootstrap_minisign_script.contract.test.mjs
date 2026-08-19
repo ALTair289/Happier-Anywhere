@@ -155,7 +155,7 @@ chmod +x "$destination/minisign-win/minisign.exe"
   await rm(root, { recursive: true, force: true });
 });
 
-test('bootstrap-minisign script selects the Windows minisign binary that matches the runner architecture', async () => {
+test('bootstrap-minisign script falls back to an executable Windows minisign binary', async () => {
   const root = await mkdtemp(join(tmpdir(), 'bootstrap-minisign-win-arch-'));
   const binDir = join(root, 'bin');
   const runnerTemp = join(root, 'runner-temp');
@@ -179,7 +179,7 @@ if [[ "$1" = "-s" ]]; then
   exit 0
 fi
 if [[ "$1" = "-m" ]]; then
-  echo x86_64
+  echo aarch64
   exit 0
 fi
 echo MINGW64_NT-10.0
@@ -238,7 +238,7 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 mkdir -p "$destination/minisign-win64/aarch64"
-printf '#!/usr/bin/env bash\\nexit 0\\n' > "$destination/minisign-win64/aarch64/minisign.exe"
+printf '#!/usr/bin/env bash\\nexit 1\\n' > "$destination/minisign-win64/aarch64/minisign.exe"
 mkdir -p "$destination/minisign-win64/x64"
 printf '#!/usr/bin/env bash\\nexit 0\\n' > "$destination/minisign-win64/x64/minisign.exe"
 chmod +x "$destination/minisign-win64/aarch64/minisign.exe" "$destination/minisign-win64/x64/minisign.exe"
@@ -262,12 +262,12 @@ chmod +x "$destination/minisign-win64/aarch64/minisign.exe" "$destination/minisi
   assert.equal(
     result.status,
     0,
-    `bootstrap script should select the Windows minisign binary matching the runner architecture:\nstdout=${String(result.stdout ?? '')}\nstderr=${String(result.stderr ?? '')}`,
+    `bootstrap script should fall back to an executable Windows minisign binary:\nstdout=${String(result.stdout ?? '')}\nstderr=${String(result.stderr ?? '')}`,
   );
   assert.match(
     String(result.stdout ?? '').trim(),
     /minisign-win64\/x64$/,
-    'expected stdout to contain the x64 minisign directory on x64 Windows runners',
+    'expected stdout to contain the executable x64 minisign directory',
   );
 
   await rm(root, { recursive: true, force: true });

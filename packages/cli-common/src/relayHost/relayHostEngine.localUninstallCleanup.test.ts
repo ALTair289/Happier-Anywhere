@@ -306,7 +306,7 @@ describe('RelayHostEngine (local uninstall cleanup)', () => {
         const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
         return {
           ...actual,
-          existsSync: () => false,
+          existsSync: (path: string) => path.replaceAll('\\', '/').endsWith('/.happier/services/happier-server.ps1'),
         };
       });
 
@@ -340,8 +340,12 @@ describe('RelayHostEngine (local uninstall cleanup)', () => {
         action: 'uninstall',
       });
 
-      expect(invoked.some((cmd) => cmd.includes('schtasks /End /TN Happier\\happier-server'))).toBe(true);
-      expect(invoked.some((cmd) => cmd.includes('schtasks /Delete /F /TN Happier\\happier-server'))).toBe(true);
+      expect(invoked.some((cmd) => (
+        cmd.includes('Stop-ScheduledTask') && cmd.includes('happier-server')
+      ))).toBe(true);
+      expect(invoked.some((cmd) => (
+        cmd.includes('Unregister-ScheduledTask') && cmd.includes('happier-server')
+      ))).toBe(true);
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform });
       vi.resetModules();

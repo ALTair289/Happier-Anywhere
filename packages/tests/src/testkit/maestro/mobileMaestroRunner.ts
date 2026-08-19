@@ -1,5 +1,5 @@
 import { join as joinPath, resolve as resolvePath } from 'node:path';
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, type WriteStream, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 
 import { createRunDirs } from '../runDir';
@@ -225,6 +225,11 @@ function shouldCaptureIosSimulatorLog(env: NodeJS.ProcessEnv): boolean {
   return true;
 }
 
+function writeCaptureLogSafely(logStream: WriteStream, message: string): void {
+  if (logStream.destroyed || logStream.writableEnded || !logStream.writable) return;
+  logStream.write(message);
+}
+
 function startAndroidLogcatCapture(params: Readonly<{
   cwd: string;
   env: NodeJS.ProcessEnv;
@@ -245,10 +250,10 @@ function startAndroidLogcatCapture(params: Readonly<{
   const logStream = createWriteStream(logPath, { flags: 'a' });
   child.stdout?.pipe(logStream, { end: false });
   child.stderr?.on('data', (chunk: Buffer | string) => {
-    logStream.write(`[logcat-stderr] ${String(chunk)}`);
+    writeCaptureLogSafely(logStream, `[logcat-stderr] ${String(chunk)}`);
   });
   child.on('error', (error) => {
-    logStream.write(`[logcat-error] ${error instanceof Error ? error.message : String(error)}\n`);
+    writeCaptureLogSafely(logStream, `[logcat-error] ${error instanceof Error ? error.message : String(error)}\n`);
   });
 
   let stopped = false;
@@ -316,10 +321,10 @@ function startIosSimulatorLogCapture(params: Readonly<{
   const logStream = createWriteStream(logPath, { flags: 'a' });
   child.stdout?.pipe(logStream, { end: false });
   child.stderr?.on('data', (chunk: Buffer | string) => {
-    logStream.write(`[simulator-log-stderr] ${String(chunk)}`);
+    writeCaptureLogSafely(logStream, `[simulator-log-stderr] ${String(chunk)}`);
   });
   child.on('error', (error) => {
-    logStream.write(`[simulator-log-error] ${error instanceof Error ? error.message : String(error)}\n`);
+    writeCaptureLogSafely(logStream, `[simulator-log-error] ${error instanceof Error ? error.message : String(error)}\n`);
   });
 
   let stopped = false;

@@ -85,6 +85,15 @@ case "${asset}" in
 esac
 
 bin_path=""
+is_usable_minisign() {
+  local candidate="$1"
+  if [[ ! -f "${candidate}" ]]; then
+    return 1
+  fi
+  chmod +x "${candidate}" || true
+  "${candidate}" -v >/dev/null 2>&1
+}
+
 if [[ "${os}" == "linux" ]]; then
   linux_arch=""
   case "${arch}" in
@@ -97,7 +106,7 @@ if [[ "${os}" == "linux" ]]; then
   esac
   if [[ -n "${linux_arch}" ]]; then
     candidate="${extract_dir}/minisign-linux/${linux_arch}/minisign"
-    if [[ -f "${candidate}" ]]; then
+    if is_usable_minisign "${candidate}"; then
       bin_path="${candidate}"
     fi
   fi
@@ -114,20 +123,23 @@ if [[ -z "${bin_path}" && ( "${os}" == msys* || "${os}" == mingw* || "${os}" == 
   esac
   if [[ -n "${windows_arch}" ]]; then
     candidate="${extract_dir}/minisign-win64/${windows_arch}/minisign.exe"
-    if [[ -f "${candidate}" ]]; then
+    if is_usable_minisign "${candidate}"; then
       bin_path="${candidate}"
     fi
   fi
 fi
 if [[ -z "${bin_path}" ]]; then
-  bin_path="$(find "${extract_dir}" -type f \( -name minisign -o -name minisign.exe \) 2>/dev/null | head -n 1 || true)"
+  while IFS= read -r candidate; do
+    if is_usable_minisign "${candidate}"; then
+      bin_path="${candidate}"
+      break
+    fi
+  done < <(find "${extract_dir}" -type f \( -name minisign -o -name minisign.exe \) -print 2>/dev/null)
 fi
 if [[ -z "${bin_path}" ]]; then
   echo "Failed to locate minisign binary in bootstrap archive." >&2
   exit 1
 fi
-chmod +x "${bin_path}" || true
-
 bin_dir="$(dirname "${bin_path}")"
 echo "Bootstrapped minisign: ${bin_path}" >&2
 
