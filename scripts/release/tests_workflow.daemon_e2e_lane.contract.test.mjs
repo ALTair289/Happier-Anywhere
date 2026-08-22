@@ -7,6 +7,17 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 
+test('tests workflow runs for pushes to the integration branch', async () => {
+  const raw = await readFile(join(repoRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
+  const pushTrigger = raw.slice(0, raw.indexOf('  workflow_call:'));
+
+  assert.match(
+    pushTrigger,
+    /^\s*-\s+integration\s*$/m,
+    'tests.yml should validate each integration push instead of waiting for a scheduled or manual run',
+  );
+});
+
 test('tests workflow runs daemon integration suite on the integration lane', async () => {
   const raw = await readFile(join(repoRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
 

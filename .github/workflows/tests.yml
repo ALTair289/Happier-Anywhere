@@ -7,6 +7,7 @@ on:
       - dev
       - preview
       - main
+      - integration
   workflow_call:
     inputs:
       run_ui_e2e:
