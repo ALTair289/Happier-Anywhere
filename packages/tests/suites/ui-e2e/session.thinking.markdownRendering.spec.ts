@@ -12,6 +12,7 @@ import { createSessionFromNewSessionComposer } from '../../src/testkit/uiE2e/cre
 import { fakeClaudeFixturePath } from '../../src/testkit/fakeClaude';
 import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
 import { ensureAccountReadyForConnect } from '../../src/testkit/uiE2e/ensureAccountReadyForConnect';
+import { mutateUiE2eScopedAccountSettings } from '../../src/testkit/uiE2e/scopedAccountSettingsStorage';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 
@@ -120,6 +121,13 @@ test.describe('ui e2e: thinking markdown rendering', () => {
     await gotoDomContentLoadedWithRetries(page, uiBaseUrl);
 
     await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
+    await mutateUiE2eScopedAccountSettings({
+      page,
+      settingsPatch: {
+        sessionThinkingDisplayMode: 'inline',
+        sessionThinkingInlinePresentation: 'full',
+      },
+    });
 
     const testDir = resolve(join(suiteDir, 't1-thinking-markdown'));
     await mkdir(testDir, { recursive: true });
@@ -180,9 +188,6 @@ test.describe('ui e2e: thinking markdown rendering', () => {
 
     const body = page.getByTestId('transcript-thinking-body-markdown').first();
     await expect(page.getByTestId('transcript-thinking-header').first()).toBeVisible({ timeout: 180_000 });
-    if ((await body.count()) === 0) {
-      await page.getByTestId('transcript-thinking-header').first().click();
-    }
     await expect(body).toBeVisible({ timeout: 60_000 });
 
     // Basic sanity: headings/text are present and markdown delimiters are not shown literally.

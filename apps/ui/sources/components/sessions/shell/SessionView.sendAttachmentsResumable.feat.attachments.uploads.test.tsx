@@ -388,7 +388,13 @@ installSessionShellCommonModuleMocks({
                         },
                     },
                     sessionListViewDataByServerId: {},
-                    settings: settingsDefaults,
+                    settings: {
+                        ...settingsDefaults,
+                        // This suite exercises the direct attachment-send path by default.
+                        // Keep the configured mode aligned with its agent_queue delivery mock;
+                        // server_pending intentionally fails closed while queue support is unknown.
+                        sessionMessageSendMode: 'agent_queue',
+                    },
                     deleteWorkspaceReviewCommentDraft: deleteWorkspaceReviewCommentDraftSpy,
             }),
             useSession: () => sessionState.session,
@@ -518,10 +524,9 @@ vi.mock('@/sync/domains/session/control/submitMode', () => ({
         mode: chooseSubmitModeState.mode,
         intent: 'default',
         reason: 'test_decision',
-        // Direct-send cases deliberately model a pre-queue-v2 session. Once
-        // submitSessionUserMessage became the shared delivery boundary, marking an
-        // agent_queue decision as queue-v2 supported correctly routes it through
-        // enqueuePendingMessage instead of the direct send this suite exercises.
+        // Direct-send cases deliberately model a pre-queue-v2 session. The storage
+        // fixture selects agent_queue, so unknown support takes the explicit direct
+        // bypass instead of failing closed as a configured server_pending request.
         pendingSupportState: chooseSubmitModeState.mode === 'server_pending'
             ? 'supported'
             : 'unknown_pending_version',

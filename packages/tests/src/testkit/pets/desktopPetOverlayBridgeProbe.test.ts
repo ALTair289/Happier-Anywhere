@@ -50,12 +50,19 @@ describe('desktop pet overlay bridge probe', () => {
     ]);
   });
 
-  it('provides null for read-window-state when no Tauri invoke exists', async () => {
+  it('provides idle activity for read-window-state when no Tauri invoke exists', async () => {
     const fakeWindow = {} as unknown as DesktopPetOverlayProbeWindow;
     Reflect.set(globalThis, 'window', fakeWindow);
 
     createDesktopPetOverlayBridgeProbeInitScript()();
 
-    await expect(fakeWindow.__TAURI_INTERNALS__?.invoke?.('desktop_pet_overlay_read_window_state')).resolves.toBeNull();
+    await expect(fakeWindow.__TAURI_INTERNALS__?.invoke?.('desktop_pet_overlay_read_window_state')).resolves.toEqual({
+      activity: {
+        state: 'idle',
+        reason: 'idle',
+        sessionId: null,
+        trayItems: [],
+      },
+    });
   });
 });

@@ -1,6 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { readCliAccessKey } from '../cliAccessKey';
+import { fetchMachineIdentities } from '../machineIdentity';
+
 type JsonRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -83,5 +86,49 @@ export async function waitForDaemonMachineIdFromCliSettings(
 
   throw new Error(
     `Timed out waiting for daemon machine id in CLI settings after ${timeoutMs}ms: ${lastError?.message ?? 'unknown error'}`,
+  );
+}
+
+export async function waitForDaemonMachineActive(params: Readonly<{
+  cliHomeDir: string;
+  serverUrl: string;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}>): Promise<string> {
+  const timeoutMs = params.timeoutMs ?? 180_000;
+  const pollIntervalMs = params.pollIntervalMs ?? 500;
+  const startedAt = Date.now();
+  const machineId = await waitForDaemonMachineIdFromCliSettings({
+    cliHomeDir: params.cliHomeDir,
+    timeoutMs,
+    pollIntervalMs,
+  });
+  const accessKey = await readCliAccessKey(params.cliHomeDir);
+  if (!accessKey) {
+    throw new Error(`CLI access key is missing while waiting for daemon machine ${machineId}`);
+  }
+
+  let lastState = 'missing';
+  let lastError: Error | null = null;
+  while (Date.now() - startedAt <= timeoutMs) {
+    try {
+      const machines = await fetchMachineIdentities({
+        baseUrl: params.serverUrl,
+        token: accessKey.token,
+      });
+      const machine = machines.find((candidate) => candidate.id === machineId);
+      if (machine?.active === true) return machineId;
+      lastState = machine ? 'inactive' : 'missing';
+      lastError = null;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+
+    await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  throw new Error(
+    `Timed out waiting for daemon machine ${machineId} to become active after ${timeoutMs}ms ` +
+      `(lastState=${lastState}${lastError ? `, lastError=${lastError.message}` : ''})`,
   );
 }

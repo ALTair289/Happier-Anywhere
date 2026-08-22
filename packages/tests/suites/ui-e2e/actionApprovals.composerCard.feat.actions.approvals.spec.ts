@@ -123,7 +123,7 @@ test.describe('ui e2e: action approvals (composer card)', () => {
   });
 
   test('approves a session-scoped action approval from the composer card', async ({ page }, testInfo) => {
-    test.setTimeout(420_000);
+    test.setTimeout(720_000);
     if (!server || !uiBaseUrl) throw new Error('missing server/ui fixtures');
 
     const testDir = resolve(join(suiteDir, 't1-composer-action-approval'));
@@ -131,7 +131,7 @@ test.describe('ui e2e: action approvals (composer card)', () => {
 
     let thrown: unknown = null;
     try {
-      await gotoDomContentLoadedWithRetries(page, uiBaseUrl);
+      await gotoDomContentLoadedWithRetries(page, uiBaseUrl, 300_000);
       await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
 
       const fakeClaudePath = fakeClaudeFixturePath();

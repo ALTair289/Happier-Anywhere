@@ -31,7 +31,7 @@ test('tests workflow bounds CLI unit test memory with explicit-file shards', asy
   );
   assert.match(
     cliPackage.scripts['test:unit:vitest'],
-    /HAPPIER_CLI_VITEST_SHARDS=96 HAPPIER_CLI_VITEST_MAX_WORKERS=1 node scripts\/runVitestShards\.mjs --config vitest\.config\.ts/,
+    /HAPPIER_CLI_VITEST_SHARDS=400 HAPPIER_CLI_VITEST_MAX_WORKERS=1 node scripts\/runVitestShards\.mjs --config vitest\.config\.ts/,
     'CLI unit tests should run in explicit-file batches small enough to bound collection memory',
   );
   assert.doesNotMatch(

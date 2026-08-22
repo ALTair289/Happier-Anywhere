@@ -189,7 +189,32 @@ test.describe('ui e2e: pets desktop overlay tray session interaction', () => {
       prompt: 'pets overlay tray e2e',
     });
 
-    await installDesktopPetOverlayBridgeProbe(page);
+    const trayItemId = `running:${sessionId}:live`;
+    await installDesktopPetOverlayBridgeProbe(page, {
+      windowState: {
+        activity: {
+          state: 'running',
+          reason: 'running',
+          sessionId,
+          trayItems: [{
+            id: trayItemId,
+            dismissKey: trayItemId,
+            sessionId,
+            status: 'running',
+            priority: 0,
+            title: 'Running session',
+            subtitle: null,
+            activityAtMs: null,
+            expiresAtMs: null,
+            actions: {
+              open: true,
+              dismiss: true,
+              quickReply: true,
+            },
+          }],
+        },
+      },
+    });
     await gotoDomContentLoadedWithRetries(
       page,
       `${uiBaseUrl}/desktop/pet-overlay?happier_hmr=0&desktopPetOverlayWindow=1`,
@@ -198,8 +223,10 @@ test.describe('ui e2e: pets desktop overlay tray session interaction', () => {
     await expect(page.getByTestId('desktop-pet-overlay-root')).toHaveCount(1, { timeout: 120_000 });
     const tray = page.getByTestId('desktop-pet-overlay-tray');
     await expect(tray).toHaveCount(1, { timeout: 120_000 });
+    await page.getByTestId('desktop-pet-overlay-context-toggle').click();
+    await expect(tray).toHaveAttribute('data-pet-tray-open', 'true', { timeout: 60_000 });
     const sessionTrayItem = page.locator(`[data-testid^="desktop-pet-overlay-tray-item-${sessionId}"]`).first();
-    await expect(sessionTrayItem).toHaveCount(1, { timeout: 120_000 });
+    await expect(sessionTrayItem).toBeVisible({ timeout: 120_000 });
     const noDragValue = await sessionTrayItem.getAttribute('data-pet-no-drag');
 
     await sessionTrayItem.click();

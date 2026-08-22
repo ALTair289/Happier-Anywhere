@@ -511,8 +511,11 @@ describe('happier relay --json', () => {
             expect(parsed.ok).toBe(true);
             expect(parsed.kind).toBe('relay_host_install');
 
-            const invocations = fakeSsh.readInvocations().map((invocation) => invocation.join(' '));
-            expect(invocations.some((invocation) => invocation.includes('happier-server-preview.service'))).toBe(true);
+            const remoteCommands = fakeSsh.readInvocations().map((invocation) => invocation.at(-1) ?? '');
+            expect(remoteCommands.some((remoteCommand) => (
+                remoteCommand.includes('relay host install')
+                && /--channel\b.{0,32}\bpreview\b/u.test(remoteCommand)
+            ))).toBe(true);
         } finally {
             output.restore();
             process.exitCode = prevExitCode;

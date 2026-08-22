@@ -60,7 +60,7 @@ installToolCallsGroupViewCommonModuleMocks({
 });
 
 vi.mock('@/components/ui/icons/Icon', () => ({
-    ICON_SIZE: { sm: 16 },
+    ICON_SIZE: { xs: 14, sm: 16, md: 20, lg: 24, xl: 29 },
     Icon: (props: any) => React.createElement('Icon', { ...props, testID: `icon:${props.name}` }),
 }));
 

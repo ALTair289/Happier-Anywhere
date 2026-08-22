@@ -1,12 +1,11 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import {
     buildConnectedServiceCredentialRecord,
-    sealAccountScopedBlobCiphertext,
     type ConnectedServiceId,
     type ConnectedServiceCredentialHealthV1,
     type SessionRuntimeIssueV1,
@@ -317,7 +316,6 @@ async function createProfileBoundPlainSession(params: Readonly<{
 async function createConnectedServiceProfile(params: Readonly<{
     baseUrl: string;
     token: string;
-    secret: Uint8Array;
     serviceId: ConnectedServiceId;
     profileId: string;
     providerEmail: string;
@@ -339,15 +337,8 @@ async function createConnectedServiceProfile(params: Readonly<{
             providerEmail: params.providerEmail,
         },
     });
-    const ciphertext = sealAccountScopedBlobCiphertext({
-        kind: 'connected_service_credential',
-        material: { type: 'legacy', secret: params.secret },
-        payload: record,
-        randomBytes: (length) => randomBytes(length),
-    });
-
     const response = await fetchJson<{ success?: boolean }>(
-        `${params.baseUrl}/v2/connect/${params.serviceId}/profiles/${params.profileId}/credential`,
+        `${params.baseUrl}/v3/connect/${params.serviceId}/profiles/${params.profileId}/credential`,
         {
             method: 'POST',
             headers: {
@@ -355,13 +346,7 @@ async function createConnectedServiceProfile(params: Readonly<{
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                sealed: { format: 'account_scoped_v1', ciphertext },
-                metadata: {
-                    kind: 'oauth',
-                    providerEmail: params.providerEmail,
-                    providerAccountId: `acct-${params.profileId}`,
-                    expiresAt: record.expiresAt,
-                },
+                content: { t: 'plain', v: record },
             }),
             timeoutMs: 20_000,
         },
@@ -739,8 +724,6 @@ test.describe('ui e2e: connected-service quota switch and recovery surfaces', ()
         const serviceId = 'claude-subscription' satisfies ConnectedServiceId;
         const profileId = `work-${run.runId}`;
         const groupId = `work-group-${run.runId}`;
-        const secret = Uint8Array.from(randomBytes(32));
-
         await page.setViewportSize({ width: 1440, height: 900 });
         await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
         await waitForInitialAppUi({ page, timeoutMs: 180_000 });
@@ -751,7 +734,6 @@ test.describe('ui e2e: connected-service quota switch and recovery surfaces', ()
         await createConnectedServiceProfile({
             baseUrl: server.baseUrl,
             token: authToken,
-            secret,
             serviceId,
             profileId,
             providerEmail: 'work@example.test',
@@ -838,8 +820,6 @@ test.describe('ui e2e: connected-service quota switch and recovery surfaces', ()
         const serviceId = 'claude-subscription' satisfies ConnectedServiceId;
         const profileId = `restart-profile-${run.runId}`;
         const groupId = `restart-group-${run.runId}`;
-        const secret = Uint8Array.from(randomBytes(32));
-
         await page.setViewportSize({ width: 1440, height: 900 });
         await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
         await waitForInitialAppUi({ page, timeoutMs: 180_000 });
@@ -850,7 +830,6 @@ test.describe('ui e2e: connected-service quota switch and recovery surfaces', ()
         await createConnectedServiceProfile({
             baseUrl: server.baseUrl,
             token: authToken,
-            secret,
             serviceId,
             profileId,
             providerEmail: 'restart@example.test',
@@ -920,7 +899,6 @@ test.describe('ui e2e: connected-service quota switch and recovery surfaces', ()
         await createConnectedServiceProfile({
             baseUrl: server.baseUrl,
             token: authToken,
-            secret,
             serviceId,
             profileId: primaryProfileId,
             providerEmail: 'primary@example.test',
@@ -928,7 +906,6 @@ test.describe('ui e2e: connected-service quota switch and recovery surfaces', ()
         await createConnectedServiceProfile({
             baseUrl: server.baseUrl,
             token: authToken,
-            secret,
             serviceId,
             profileId: backupProfileId,
             providerEmail: 'backup@example.test',

@@ -206,6 +206,46 @@ describe('waitForNextPermissionModeMessage', () => {
     await expect(resultPromise).resolves.toMatchObject({ message: 'from-session-metadata' });
   });
 
+  it('does not let a false metadata wait suppress a later pending-eligibility wake', async () => {
+    const queue = createQueue();
+    const pendingEligibilityUpdate = createDeferred<boolean>();
+    let pendingText: string | null = null;
+
+    const session: PermissionModeSessionFixture = {
+      async materializeNextPendingMessageSafely() {
+        if (!pendingText) return { type: 'no_pending' };
+        const text = pendingText;
+        pendingText = null;
+        queue.pushImmediate(text, { permissionMode: 'default' });
+        return { type: 'materialized', localId: 'local-pending-wake', seq: 3, content: null };
+      },
+      async popPendingMessage() {
+        return false;
+      },
+      async waitForMetadataUpdate() {
+        return false;
+      },
+      async waitForPendingEligibilityUpdate() {
+        return await pendingEligibilityUpdate.promise;
+      },
+    };
+
+    const resultPromise = waitForNextPermissionModeMessage({
+      messageQueue: queue,
+      abortSignal: new AbortController().signal,
+      session: asSessionClient(session),
+      onMetadataUpdate: () => {
+        pendingText = 'from-pending-after-false-metadata';
+      },
+    });
+
+    pendingEligibilityUpdate.resolve(true);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      message: 'from-pending-after-false-metadata',
+    });
+  });
+
   it('returns a queue message when one arrives while waiting', async () => {
     const queue = createQueue();
     const waitingForMetadata = createDeferred<void>();

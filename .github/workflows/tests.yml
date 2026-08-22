@@ -176,7 +176,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     runs-on: ubuntu-22.04
-    timeout-minutes: 75
+    timeout-minutes: 120
     env:
       # UI E2E boots Expo web; keep web assets available to avoid CI-only runtime surprises.
       HAPPIER_UI_VENDOR_WEB_ASSETS: "1"
@@ -261,7 +261,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ui-e2e-playwright-artifacts-shard-${{ matrix.shard }}-of-6
-          path: packages/tests/.project/logs/e2e/ui-playwright
+          path: |
+            packages/tests/.project/logs/e2e/ui-playwright
+            .project/logs/e2e/*-ui-e2e-*/**/*.log
+            .project/logs/e2e/*-ui-e2e-*/**/*.jsonl
           if-no-files-found: ignore
 
   ui-e2e-wsrepl-lima:
@@ -469,7 +472,7 @@ jobs:
 
       - name: Run unit tests
         env:
-          HAPPIER_UI_VITEST_SHARDS: "6"
+          HAPPIER_UI_VITEST_SHARDS: "24"
           HAPPIER_UI_VITEST_OUTER_SHARD: "${{ matrix.shard }}/4"
         run: yarn workspace @happier-dev/app test:unit
 

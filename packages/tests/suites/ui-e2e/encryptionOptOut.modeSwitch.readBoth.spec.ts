@@ -17,6 +17,7 @@ import { acknowledgeTerminalConnectSuccessIfPresent } from '../../src/testkit/ui
 import { runCliJson } from '../../src/testkit/uiE2e/cliJson';
 import { ensureAccountReadyForConnect } from '../../src/testkit/uiE2e/ensureAccountReadyForConnect';
 import { approveTerminalConnect } from '../../src/testkit/uiE2e/approveTerminalConnect';
+import { waitForDaemonMachineActive } from '../../src/testkit/uiE2e/daemonMachineId';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 
@@ -166,6 +167,11 @@ test.describe('ui e2e: encryption opt-out mode switching', () => {
           HAPPIER_WEBAPP_URL: uiBaseUrl,
           HAPPIER_VARIANT: 'dev',
         },
+      });
+      await waitForDaemonMachineActive({
+        cliHomeDir,
+        serverUrl: server.baseUrl,
+        timeoutMs: 180_000,
       });
 
       const tagA = `ui-e2e-e2ee-a-${run.runId}`;

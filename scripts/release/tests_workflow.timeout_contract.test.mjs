@@ -22,7 +22,7 @@ test('tests workflow keeps slow CI jobs above the observed timeout floor', async
 
   assert.match(
     uiE2eJob,
-    /name:\s*UI E2E \(Playwright\)[\s\S]*?timeout-minutes:\s*75\b/,
+    /name:\s*UI E2E \(Playwright\)[\s\S]*?timeout-minutes:\s*120\b/,
     'UI E2E job should reserve enough time to finish the slow multi-session Playwright scenarios on GitHub-hosted runners',
   );
   assert.match(uiE2eJob, /shard:\s*\[1, 2, 3, 4, 5, 6\]/, 'UI E2E should split the slow suite across six shards');
@@ -31,6 +31,11 @@ test('tests workflow keeps slow CI jobs above the observed timeout floor', async
     uiE2eJob,
     /Upload UI E2E artifacts \(Playwright\)[\s\S]*?if:\s*always\(\)/,
     'UI E2E should retain diagnostics after failures and job cancellation',
+  );
+  assert.match(
+    uiE2eJob,
+    /\.project\/logs\/e2e\/\*-ui-e2e-\*\/\*\*\/\*\.log/,
+    'UI E2E failure artifacts should include daemon, server, and CLI runtime logs',
   );
 
   assert.match(
@@ -41,7 +46,7 @@ test('tests workflow keeps slow CI jobs above the observed timeout floor', async
   assert.match(uiJob, /shard:\s*\[1, 2, 3, 4\]/, 'UI unit tests should fan out across four runner jobs');
   assert.match(
     uiJob,
-    /HAPPIER_UI_VITEST_SHARDS:\s*"6"[\s\S]*?HAPPIER_UI_VITEST_OUTER_SHARD:\s*"\$\{\{ matrix\.shard \}\}\/4"/,
+    /HAPPIER_UI_VITEST_SHARDS:\s*"24"[\s\S]*?HAPPIER_UI_VITEST_OUTER_SHARD:\s*"\$\{\{ matrix\.shard \}\}\/4"/,
     'each UI runner should execute only its quarter of the unit suite in bounded child processes',
   );
 

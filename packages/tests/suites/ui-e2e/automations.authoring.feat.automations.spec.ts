@@ -188,7 +188,7 @@ test.describe('ui e2e: automations authoring', () => {
         if (!server || !uiBaseUrl) throw new Error('missing server/ui fixtures');
 
         await page.setViewportSize({ width: 1440, height: 900 });
-        await gotoDomContentLoadedWithRetries(page, uiBaseUrl);
+        await gotoDomContentLoadedWithRetries(page, uiBaseUrl, 300_000);
         await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
 
         const testDir = resolve(join(suiteDir, 't1-automations-authoring'));

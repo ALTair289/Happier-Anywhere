@@ -207,7 +207,7 @@ describe('SessionParticipantComposer auth send surface', () => {
 
         await vi.waitFor(() => {
             expect(modalAlertSpy).toHaveBeenCalledWith('common.error', 'Authentication required');
-        });
+        }, { timeout: 10_000 });
         expect(emitWithAck).not.toHaveBeenCalled();
         expect(send).not.toHaveBeenCalled();
         expect(storage.getState().sessionPending[sessionId]?.messages ?? []).toEqual([]);

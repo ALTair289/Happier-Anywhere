@@ -7,6 +7,52 @@ import type {
 } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
 import type { MessageBatch, SessionProviderInputConsumer } from '@/agent/runtime/sessionInput/types';
 
+function waitForAnySuccessfulSessionInputUpdate(
+  waits: readonly Promise<boolean>[],
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (waits.length === 0) return Promise.resolve(false);
+  if (waits.length === 1) return waits[0]!;
+
+  return new Promise<boolean>((resolve, reject) => {
+    let completedWithoutUpdate = 0;
+    let settled = false;
+    const finish = (updated: boolean) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      resolve(updated);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      reject(error);
+    };
+    const onAbort = () => finish(false);
+
+    if (signal?.aborted) {
+      finish(false);
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    for (const wait of waits) {
+      void wait.then(
+        (updated) => {
+          if (updated) {
+            finish(true);
+            return;
+          }
+          completedWithoutUpdate += 1;
+          if (completedWithoutUpdate === waits.length) finish(false);
+        },
+        fail,
+      );
+    }
+  });
+}
+
 export async function waitForNextPermissionModeMessage<Mode, Message>(opts: {
   messageQueue: MessageQueue2<Mode, Message>;
   abortSignal: AbortSignal;
@@ -15,6 +61,7 @@ export async function waitForNextPermissionModeMessage<Mode, Message>(opts: {
   onMetadataUpdate?: (() => void | Promise<void>) | null;
 }): Promise<MessageBatch<Mode, Message> | null> {
   const waitForSessionInputUpdate = (signal?: AbortSignal): Promise<boolean> => {
+    const waits: Promise<boolean>[] = [];
     const metadataWait = typeof opts.session.waitForMetadataUpdate === 'function'
       ? opts.session.waitForMetadataUpdate(signal)
       : null;
@@ -22,10 +69,11 @@ export async function waitForNextPermissionModeMessage<Mode, Message>(opts: {
       ? opts.session.waitForPendingEligibilityUpdate(signal)
       : null;
 
-    if (metadataWait && pendingEligibilityWait) {
-      return Promise.race([metadataWait, pendingEligibilityWait]);
-    }
-    return metadataWait ?? pendingEligibilityWait ?? Promise.resolve(false);
+    if (metadataWait) waits.push(metadataWait);
+    if (pendingEligibilityWait) waits.push(pendingEligibilityWait);
+    // `false` means only that one source ended without an update. Do not let it
+    // suppress a later positive wake from the other independent source.
+    return waitForAnySuccessfulSessionInputUpdate(waits, signal);
   };
 
   const session: SessionProviderInputConsumerSession = {

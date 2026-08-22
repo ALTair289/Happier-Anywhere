@@ -189,7 +189,7 @@ test.describe('ui e2e: session fork from message', () => {
       const forkButton = page.getByTestId(`transcript-message-fork:${messageId}`);
       if (await forkButton.count()) break;
 
-      await page.goto(`${uiBaseUrl}/settings/session`, { waitUntil: 'domcontentloaded' });
+      await page.goto(`${uiBaseUrl}/settings/session/resume`, { waitUntil: 'domcontentloaded' });
       await expect(page.getByTestId('settings-session-replay-enabled-item')).toHaveCount(1, { timeout: 60_000 });
       const replayItem = page.getByTestId('settings-session-replay-enabled-item');
       const replaySwitch = replayItem.locator('input[type="checkbox"]').first();

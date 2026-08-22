@@ -97,28 +97,24 @@ async function selectDirectoryFromPathBrowser(
         allowRootFallback?: boolean;
     }>,
 ): Promise<string> {
-    const inlinePathTextbox = page.getByRole('textbox', { name: 'Enter a path...' }).first();
-    if (await inlinePathTextbox.count()) {
-        const inlineCandidates = ['/Users/leeroy/Documents', '/Users/leeroy/Desktop', '/Users/leeroy'] as const;
-        for (const candidate of inlineCandidates) {
-            const button = page.getByRole('button', { name: new RegExp(candidate.replace(/\//g, '\\/')) }).first();
-            if (await button.count()) {
-                await button.click();
-                await expect(inlinePathTextbox).toHaveValue(candidate, { timeout: 30_000 });
-                return candidate;
-            }
-        }
+    const modernPathInput = page.locator('[data-testid="path-selection-list:header:input"]:visible').last();
+    const legacyPathBrowser = page.getByTestId('path-browser-modal');
+    await expect.poll(
+        async () => (await modernPathInput.count()) > 0 || (await legacyPathBrowser.count()) > 0,
+        { timeout: 60_000 },
+    ).toBe(true);
 
-        const firstSuggested = page.getByRole('button', { name: /\/Users\// }).first();
-        await expect(firstSuggested).toHaveCount(1, { timeout: 30_000 });
-        const firstSuggestedText = (await firstSuggested.textContent()) ?? '';
-        const selectedPath = firstSuggestedText.match(/\/Users\/[^\s]+/)?.[0] ?? '/Users/leeroy';
-        await firstSuggested.click();
-        await expect(inlinePathTextbox).toHaveValue(selectedPath, { timeout: 30_000 });
+    if (await modernPathInput.count()) {
+        const currentPath = (await modernPathInput.inputValue()).trim();
+        const selectedPath = currentPath || '/tmp';
+        if (!currentPath) {
+            await modernPathInput.fill(selectedPath);
+        }
+        await modernPathInput.press('Enter');
         return selectedPath;
     }
 
-    await expect(page.getByTestId('path-browser-modal')).toHaveCount(1, { timeout: 60_000 });
+    await expect(legacyPathBrowser).toHaveCount(1, { timeout: 60_000 });
     const candidates = ['/tmp', '/Users'] as const;
     let visiblePath: string | null = null;
 

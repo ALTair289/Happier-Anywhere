@@ -80,9 +80,8 @@ describe('createCodexAppServerSessionTurnTracker', () => {
             startUserMessageLocalId: null,
             startSeqInclusive: 9,
         });
-        await tracker.beginTurn({
-            turnId: null,
-            startUserMessageLocalId: 'prompt-local-1',
+        await tracker.bindStartUserMessage({
+            localId: 'prompt-local-1',
             startSeqInclusive: 10,
         });
         await tracker.updateActiveTurnId('provider-turn-1');
@@ -116,6 +115,52 @@ describe('createCodexAppServerSessionTurnTracker', () => {
             numTurns: 1,
             targetUserMessageSeq: 10,
             range: { startSeqInclusive: 10, endSeqInclusive: 15 },
+        });
+    });
+
+    it('does not wait for a pending Queue commit until provider acceptance', async () => {
+        const { lifecycle, session } = createLifecycleHarness();
+        let committedSeq: number | null = null;
+        session.getCommittedUserMessageSeq.mockImplementation(() => committedSeq);
+        session.waitForCommittedUserMessageSeq.mockImplementation(async () => committedSeq);
+        const tracker = createCodexAppServerSessionTurnTracker({
+            session,
+            getProviderThreadId: () => 'thread-1',
+            now: () => 100,
+        });
+
+        await tracker.beginTurn({
+            turnId: null,
+            startUserMessageLocalId: 'pending-local-1',
+            startSeqInclusive: null,
+        });
+
+        expect(session.waitForCommittedUserMessageSeq).not.toHaveBeenCalled();
+        expect(lifecycle.beginTurn).toHaveBeenCalledWith({ provider: 'codex' });
+
+        await tracker.updateActiveTurnId('provider-turn-1');
+        committedSeq = 10;
+        await tracker.bindStartUserMessage({
+            localId: 'pending-local-1',
+            startSeqInclusive: null,
+        });
+        await tracker.completeActiveTurn({ endSeqInclusive: 15 });
+
+        expect(lifecycle.appendTranscriptAnchors).toHaveBeenCalledWith({
+            provider: 'codex',
+            transcriptAnchors: expect.objectContaining({
+                startUserMessageSeq: 10,
+                userMessageSeqs: [10],
+                startSeqInclusive: 10,
+            }),
+        });
+        expect(lifecycle.markRollbackEligible).toHaveBeenCalledWith({
+            turnId: 'session-turn-1',
+            provider: 'codex',
+            transcriptAnchors: expect.objectContaining({
+                startUserMessageSeq: 10,
+                endSeqInclusive: 15,
+            }),
         });
     });
 

@@ -172,7 +172,9 @@ async function createSessionFromComposer(params: {
 
     await openNewSessionMachineSelection({ page, uiBaseUrl });
 
-    const exact = page.getByTestId(`new-session-machine:${machineId}`);
+    const exact = page.locator(
+        `[data-testid="new-session-machine:${machineId}"]:visible, [data-testid="new-session-machine-option:${machineId}"]:visible`,
+    ).first();
     await expect(exact).toHaveCount(1, { timeout: 120_000 });
     await exact.click();
 

@@ -194,7 +194,7 @@ async function ensureReplayForkEnabled(params: { page: Page; uiBaseUrl: string; 
     const forkButton = params.page.getByTestId(`transcript-message-fork:${messageId}`);
     if (await forkButton.count()) return;
 
-    await params.page.goto(`${params.uiBaseUrl}/settings/session`, { waitUntil: 'domcontentloaded' });
+    await params.page.goto(`${params.uiBaseUrl}/settings/session/resume`, { waitUntil: 'domcontentloaded' });
     await expect(params.page.getByTestId('settings-session-replay-enabled-item')).toHaveCount(1, { timeout: 60_000 });
     const replayItem = params.page.getByTestId('settings-session-replay-enabled-item');
     const replaySwitch = replayItem.locator('input[type="checkbox"]').first();

@@ -142,13 +142,20 @@ test.describe('ui e2e: session folders sidebar', () => {
       tagPrefix: 'session-folders',
     });
 
+    await setUiFeatureToggle({
+      page,
+      baseUrl: uiBaseUrl,
+      featureId: 'sessions.folders',
+      enabled: true,
+    });
+
     await setSessionFolderDragSettings({
       page,
       baseUrl: uiBaseUrl,
       apiBaseUrl: server.baseUrl,
       token,
       serverId,
-      folderViewMode: 'off',
+      folderViewMode: 'tree',
       sessionFoldersV1: {
         v: 1,
         folders: [{
@@ -167,18 +174,7 @@ test.describe('ui e2e: session folders sidebar', () => {
       },
     });
 
-    await setUiFeatureToggle({
-      page,
-      baseUrl: uiBaseUrl,
-      featureId: 'sessions.folders',
-      enabled: true,
-    });
-
     await expect(page.getByTestId(`session-list-item-${firstSessionId}`)).toHaveCount(1, { timeout: 120_000 });
-
-    await page.getByTestId('session-list-ordering-menu-trigger').first().click();
-    await expect(page.getByTestId('session-folder-view-toggle')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('session-folder-view-toggle').click();
 
     await expect(page.getByTestId(`session-folder-header-${FOLDER_ID}`)).toHaveCount(1, { timeout: 120_000 });
 

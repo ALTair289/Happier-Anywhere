@@ -78,7 +78,10 @@ vi.mock('@/components/ui/avatar/Avatar', () => {
 });
 vi.mock('@/components/ui/icons/Icon', () => {
     const React = require('react');
-    return { Icon: (props: Record<string, unknown>) => React.createElement('Icon', props) };
+    return {
+        Icon: (props: Record<string, unknown>) => React.createElement('Icon', props),
+        ICON_SIZE: { xs: 14, sm: 16, md: 20, lg: 24, xl: 29 },
+    };
 });
 
 const stableCredentials = { token: 't', secret: Buffer.from(new Uint8Array(32).fill(3)).toString('base64url') } as const;

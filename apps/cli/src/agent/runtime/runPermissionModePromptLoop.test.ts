@@ -1073,12 +1073,21 @@ describe('runPermissionModePromptLoop', () => {
     });
 
     const metadataWakeRef: { current: ((value: boolean) => void) | null } = { current: null };
-    session.waitForPendingEligibilityUpdate = vi.fn(
-      () =>
+    const pendingEligibilityWaitSpy = vi.fn(
+      (abortSignal?: AbortSignal) =>
         new Promise<boolean>((resolve) => {
-          metadataWakeRef.current = resolve;
+          const wake = (value: boolean) => {
+            abortSignal?.removeEventListener('abort', onAbort);
+            if (metadataWakeRef.current === wake) metadataWakeRef.current = null;
+            resolve(value);
+          };
+          const onAbort = () => wake(false);
+          metadataWakeRef.current = wake;
+          if (abortSignal?.aborted) onAbort();
+          else abortSignal?.addEventListener('abort', onAbort, { once: true });
         }),
     );
+    session.waitForPendingEligibilityUpdate = pendingEligibilityWaitSpy;
 
     const queue = createModeQueue();
     const runtime = createRuntime() as any;
@@ -1162,7 +1171,11 @@ describe('runPermissionModePromptLoop', () => {
         formatPromptErrorMessage: (error) => `Error: ${String(error)}`,
       });
 
-    for (let index = 0; index < 10 && !metadataWakeRef.current; index += 1) {
+    for (
+      let index = 0;
+      index < 10 && (pendingEligibilityWaitSpy.mock.calls.length < 2 || !metadataWakeRef.current);
+      index += 1
+    ) {
       await waitForPromptLoopTick();
     }
     const wake = metadataWakeRef.current;

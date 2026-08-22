@@ -354,7 +354,10 @@ type CodexAppServerUndeliverablePrompt = Readonly<{
 type CodexAppServerPendingProviderPrompt = CodexAppServerUndeliverablePrompt & {
     accepted: boolean;
     appliedModelId?: string;
+    acceptanceBindingPromise?: Promise<void>;
 };
+
+type CodexAppServerPromptAcceptanceAnchorKind = 'start' | 'steer';
 
 type CodexAppServerUndeliverablePromptsCallback = (
     prompts: ReadonlyArray<CodexAppServerUndeliverablePrompt>,
@@ -1620,22 +1623,41 @@ export function createCodexAppServerRuntime(params: Readonly<{
         return pending;
     };
 
-    const markPendingProviderPromptAccepted = (
+    const markPendingProviderPromptAccepted = async (
         pending: CodexAppServerPendingProviderPrompt | null | undefined,
         rawProviderTurnId: string | null | undefined,
-    ): void => {
+        anchorKind: CodexAppServerPromptAcceptanceAnchorKind,
+    ): Promise<void> => {
+        if (pending?.acceptanceBindingPromise) {
+            await pending.acceptanceBindingPromise;
+            return;
+        }
         if (!pending || !pendingProviderPrompts.has(pending)) return;
         pending.accepted = true;
         const providerTurnId = trimSessionId(rawProviderTurnId);
         if (!providerTurnId) return;
         pendingProviderPrompts.delete(pending);
-        if (!codexAppServerPromptHasDeliveryIdentity(pending)) return;
-        onPromptAcceptedByProvider?.({
-            ...codexAppServerPromptLocalIdPayload(pending.localIds),
-            userMessageSeq: pending.userMessageSeq,
-            providerTurnId,
-            ...(pending.appliedModelId ? { appliedModelId: pending.appliedModelId } : {}),
+        const acceptanceBindingPromise = Promise.resolve().then(async () => {
+            if (codexAppServerPromptHasDeliveryIdentity(pending)) {
+                onPromptAcceptedByProvider?.({
+                    ...codexAppServerPromptLocalIdPayload(pending.localIds),
+                    userMessageSeq: pending.userMessageSeq,
+                    providerTurnId,
+                    ...(pending.appliedModelId ? { appliedModelId: pending.appliedModelId } : {}),
+                });
+            }
+            const localId = pending.localIds?.[0] ?? null;
+            if (anchorKind === 'start') {
+                await turnBoundaryTracker.bindStartUserMessage({
+                    localId,
+                    startSeqInclusive: pendingTurnStartSeqInclusive,
+                });
+                return;
+            }
+            await turnBoundaryTracker.appendSteerMessage({ localId });
         });
+        pending.acceptanceBindingPromise = acceptanceBindingPromise;
+        await acceptanceBindingPromise;
     };
 
     const clearPendingProviderPrompt = (pending: CodexAppServerPendingProviderPrompt | null | undefined): void => {
@@ -3624,9 +3646,10 @@ export function createCodexAppServerRuntime(params: Readonly<{
                                 ) {
                                     markActiveTurnSteerable();
                                 }
-                                markPendingProviderPromptAccepted(
+                                await markPendingProviderPromptAccepted(
                                     activeTurn.providerPrompt,
                                     notificationTurnId ?? activeTurn.turnId,
+                                    'start',
                                 );
                                 const nextThreadId = readThreadId(notificationParams);
                                 if (nextThreadId && nextThreadId !== threadId) {
@@ -4638,8 +4661,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                         clearPendingProviderPrompt(pendingProviderPrompt);
                         throw fallbackError;
                     }
-                    await turnBoundaryTracker.appendSteerMessage({ localId: options?.localId ?? null });
-                    markPendingProviderPromptAccepted(pendingProviderPrompt, expectedTurnId);
+                    await markPendingProviderPromptAccepted(pendingProviderPrompt, expectedTurnId, 'steer');
                     return;
                 }
                 // Backward compatibility: older experimental app-server builds used `turnId` instead
@@ -4663,16 +4685,14 @@ export function createCodexAppServerRuntime(params: Readonly<{
                             clearPendingProviderPrompt(pendingProviderPrompt);
                             throw fallbackError;
                         }
-                        await turnBoundaryTracker.appendSteerMessage({ localId: options?.localId ?? null });
-                        markPendingProviderPromptAccepted(pendingProviderPrompt, expectedTurnId);
+                        await markPendingProviderPromptAccepted(pendingProviderPrompt, expectedTurnId, 'steer');
                         return;
                     }
                     clearPendingProviderPrompt(pendingProviderPrompt);
                     throw legacyError;
                 }
             }
-            await turnBoundaryTracker.appendSteerMessage({ localId: options?.localId ?? null });
-            markPendingProviderPromptAccepted(pendingProviderPrompt, expectedTurnId);
+            await markPendingProviderPromptAccepted(pendingProviderPrompt, expectedTurnId, 'steer');
         },
         compactContext: async (_command: string) => {
             const activeThreadId = threadId;
@@ -4811,6 +4831,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                         recordInProgressBestEffort(startedTurnId);
                         await turnBoundaryTracker.updateActiveTurnId(startedTurnId);
                     }
+                    await markPendingProviderPromptAccepted(pendingProviderPrompt, startedTurnId, 'start');
                     const deferredTerminal = acknowledgePendingTurnStart(activeTurn, startedTurnId);
                     if (deferredTerminal) {
                         await settleTerminalPendingTurn(
@@ -4821,7 +4842,6 @@ export function createCodexAppServerRuntime(params: Readonly<{
                     } else {
                         markActiveTurnSteerable();
                     }
-                    markPendingProviderPromptAccepted(pendingProviderPrompt, startedTurnId);
                     // A native goal successor is a distinct provider turn, not an extension of
                     // this explicit prompt. The session loop preserves that successor through
                     // hasActiveProviderTurn(), which includes the atomic handoff barrier.

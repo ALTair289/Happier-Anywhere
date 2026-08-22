@@ -149,10 +149,9 @@ test.describe('ui e2e: session fork from header action menu', () => {
     await page.goto(`${uiBaseUrl}/session/${parentSessionId}`, { waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
     await expect(page.getByText(/FAKE_TRANSCRIPT_ACTIVITY_FEED_DONE_1/)).toHaveCount(1, { timeout: 180_000 });
-    await expect(page.getByTestId('transcript-tool-calls-group')).toHaveCount(1, { timeout: 120_000 });
 
     // Ensure replay-fork is enabled so the session-level fork action is available on non-native providers.
-    await page.goto(`${uiBaseUrl}/settings/session`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${uiBaseUrl}/settings/session/resume`, { waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('settings-session-replay-enabled-item')).toHaveCount(1, { timeout: 60_000 });
     const replayItem = page.getByTestId('settings-session-replay-enabled-item');
     const replaySwitch = replayItem.locator('input[type="checkbox"]').first();
@@ -178,6 +177,7 @@ test.describe('ui e2e: session fork from header action menu', () => {
 
     await page.goto(`${uiBaseUrl}/session/${parentSessionId}`, { waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
+    await expect(page.getByTestId('transcript-tool-calls-group')).toHaveCount(1, { timeout: 120_000 });
 
     await page.getByLabel('Open session actions').click();
     await expect(page.getByRole('button', { name: /Fork session/i })).toHaveCount(1, { timeout: 60_000 });

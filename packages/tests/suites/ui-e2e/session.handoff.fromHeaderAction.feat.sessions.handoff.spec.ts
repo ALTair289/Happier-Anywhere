@@ -415,8 +415,11 @@ test.describe('ui e2e: session handoff from header action menu via direct peer',
     await page.getByTestId('dropdown-option-session_handoff').click();
 
     await expect(page.getByTestId('session-handoff-modal')).toHaveCount(1, { timeout: 60_000 });
-    await expect(page.getByTestId(`session-handoff-machine:${targetMachineId}`)).toHaveCount(1, { timeout: 120_000 });
-    await page.getByTestId(`session-handoff-machine:${targetMachineId}`).click();
+    const targetMachineOption = page.locator(
+      `[data-testid="session-handoff-machine:${targetMachineId}"]:visible, [data-testid="session-handoff-machine-option:${targetMachineId}"]:visible`,
+    ).first();
+    await expect(targetMachineOption).toHaveCount(1, { timeout: 120_000 });
+    await targetMachineOption.click();
     await enableWorkspaceTransferForHandoff(page);
     await page.getByTestId('session-handoff-workspace-transfer-strategy-trigger').click();
     await expect(page.getByTestId('dropdown-option-sync_changes')).toHaveCount(1, { timeout: 60_000 });
@@ -442,18 +445,16 @@ test.describe('ui e2e: session handoff from header action menu via direct peer',
   });
 });
 
-test.describe('ui e2e: session handoff from header action menu via forced server-routed transfer', () => {
+test.describe('ui e2e: session handoff fail-closed availability for server-routed-only transfer', () => {
   test.describe.configure({ mode: 'serial' });
 
   const suiteDir = run.testDir('session-handoff-from-header-server-routed-suite');
   const sourceCliHomeDir = resolve(join(suiteDir, 'cli-home-source'));
-  const targetCliHomeDir = resolve(join(suiteDir, 'cli-home-target'));
 
   let server: StartedServer | null = null;
   let ui: StartedUiWeb | null = null;
   let uiBaseUrl: string | null = null;
   let sourceDaemon: StartedDaemon | null = null;
-  let targetDaemon: StartedDaemon | null = null;
 
   test.beforeAll(async () => {
     const uiWebEnv = {
@@ -470,9 +471,7 @@ test.describe('ui e2e: session handoff from header action menu via forced server
     };
     test.setTimeout(resolveUiWebBeforeAllTimeoutMs(uiWebEnv));
     await mkdir(sourceCliHomeDir, { recursive: true });
-    await mkdir(targetCliHomeDir, { recursive: true });
     await writeFile(resolve(join(sourceCliHomeDir, 'AGENTS.md')), '# UI e2e source fixture\n', 'utf8');
-    await writeFile(resolve(join(targetCliHomeDir, 'AGENTS.md')), '# UI e2e target fixture\n', 'utf8');
 
     server = await startServerLight({
       testDir: suiteDir,
@@ -497,13 +496,12 @@ test.describe('ui e2e: session handoff from header action menu via forced server
 
   test.afterAll(async () => {
     test.setTimeout(120_000);
-    await targetDaemon?.stop().catch(() => {});
     await sourceDaemon?.stop().catch(() => {});
     await ui?.stop().catch(() => {});
     await server?.stop().catch(() => {});
   });
 
-  test('hands off a Claude session to a second online machine and updates the session machine binding', async ({ page }) => {
+  test('hides the handoff action when direct-peer viability cannot be proven', async ({ page }) => {
     test.setTimeout(540_000);
     if (!server || !uiBaseUrl) throw new Error('missing server/ui fixtures');
 
@@ -514,10 +512,7 @@ test.describe('ui e2e: session handoff from header action menu via forced server
     await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
 
     const sourceDir = resolve(join(suiteDir, 't1-source'));
-    const targetDir = resolve(join(suiteDir, 't1-target'));
-    const targetFakeClaudeLogPath = resolve(join(targetDir, 'fake-claude-target.jsonl'));
     await mkdir(sourceDir, { recursive: true });
-    await mkdir(targetDir, { recursive: true });
 
     await connectTerminalForHome({
       page,
@@ -564,77 +559,13 @@ test.describe('ui e2e: session handoff from header action menu via forced server
       prompt: `handoff-header-parent-server-routed ${run.runId}`,
     });
 
-    await connectTerminalForHome({
-      page,
-      testDir: targetDir,
-      cliHomeDir: targetCliHomeDir,
-      serverBaseUrl: server.baseUrl,
-      uiBaseUrl,
-    });
-
-    targetDaemon = await startTestDaemon({
-      testDir: targetDir,
-      happyHomeDir: targetCliHomeDir,
-      env: {
-        ...process.env,
-        HOME: targetCliHomeDir,
-        CI: '1',
-        HAPPIER_HOME_DIR: targetCliHomeDir,
-        HAPPIER_SERVER_URL: server.baseUrl,
-        HAPPIER_WEBAPP_URL: uiBaseUrl,
-        HAPPIER_DISABLE_CAFFEINATE: '1',
-        HAPPIER_VARIANT: 'dev',
-        HAPPIER_E2E_PROVIDER_USE_CLI_SOURCE_ENTRYPOINT: '1',
-        HAPPIER_CLAUDE_PATH: fakeClaudePath,
-        HAPPIER_E2E_FAKE_CLAUDE_LOG: targetFakeClaudeLogPath,
-        HAPPIER_E2E_FAKE_CLAUDE_SESSION_ID: `fake-claude-target-${run.runId}-server-routed`,
-        HAPPIER_E2E_FAKE_CLAUDE_INVOCATION_ID: `fake-claude-target-invocation-${run.runId}-server-routed`,
-      },
-    });
-
-    const machineIds = await waitForMachineIds({
-      cliHomeDir: sourceCliHomeDir,
-      serverBaseUrl: server.baseUrl,
-      count: 2,
-      timeoutMs: 120_000,
-    });
-    const targetMachineId = machineIds.find((id) => id !== sourceMachineId) ?? null;
-    if (!targetMachineId) throw new Error(`failed to resolve target machine id from ${JSON.stringify(machineIds)}`);
-
     await page.goto(`${uiBaseUrl}/session/${sessionId}`, { waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
 
     const sessionActionsTrigger = page.getByLabel('Open session actions');
     await expect(sessionActionsTrigger).toHaveCount(1, { timeout: 60_000 });
     await sessionActionsTrigger.click();
-    await expect(page.getByTestId('dropdown-option-session_handoff')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('dropdown-option-session_handoff').click();
-
-    await expect(page.getByTestId('session-handoff-modal')).toHaveCount(1, { timeout: 60_000 });
-    await expect(page.getByTestId(`session-handoff-machine:${targetMachineId}`)).toHaveCount(1, { timeout: 120_000 });
-    await page.getByTestId(`session-handoff-machine:${targetMachineId}`).click();
-    await enableWorkspaceTransferForHandoff(page);
-    await page.getByTestId('session-handoff-workspace-transfer-strategy-trigger').click();
-    await expect(page.getByTestId('dropdown-option-sync_changes')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('dropdown-option-sync_changes').click();
-    await page.getByTestId('session-handoff-start').click();
-    await expect(page.getByTestId('web-modal-confirm')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('web-modal-confirm').click();
-
-    await waitForSessionInfoMachineTarget({
-      page,
-      uiBaseUrl,
-      serverBaseUrl: server.baseUrl,
-      cliHomeDir: sourceCliHomeDir,
-      sessionId,
-      expectedMachineId: targetMachineId,
-      timeoutMs: 180_000,
-    });
-    await expectTransferredWorkspaceReadmeOnTarget({
-      fakeClaudeLogPath: targetFakeClaudeLogPath,
-      expectedContents: 'session handoff ui e2e\n',
-      timeoutMs: 180_000,
-    });
+    await expect(page.getByTestId('dropdown-option-session_handoff')).toHaveCount(0);
   });
 });
 
@@ -674,7 +605,7 @@ test.describe('ui e2e: session handoff failure recovery from header action menu'
       testDir: suiteDir,
       dbProvider: 'sqlite',
       extraEnv: {
-        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys,machines.transfer.directPeer',
+        HAPPIER_BUILD_FEATURES_DENY: 'sharing.contentKeys',
         HAPPIER_FEATURE_AUTH_LOGIN__KEY_CHALLENGE_ENABLED: '1',
         HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: 'plaintext_only',
       },
@@ -739,6 +670,8 @@ test.describe('ui e2e: session handoff failure recovery from header action menu'
         HAPPIER_E2E_FAKE_CLAUDE_LOG: resolve(join(sourceDir, 'fake-claude-source.jsonl')),
         HAPPIER_E2E_FAKE_CLAUDE_SESSION_ID: `fake-claude-source-${run.runId}-recovery`,
         HAPPIER_E2E_FAKE_CLAUDE_INVOCATION_ID: `fake-claude-source-invocation-${run.runId}-recovery`,
+        HAPPIER_MACHINE_TRANSFER_DIRECT_PEER_ADVERTISED_HOSTS: '127.0.0.1',
+        HAPPIER_SESSION_HANDOFF_DIRECT_PEER_BIND_HOST: '127.0.0.1',
       },
     });
 
@@ -782,6 +715,8 @@ test.describe('ui e2e: session handoff failure recovery from header action menu'
         HAPPIER_DISABLE_CAFFEINATE: '1',
         HAPPIER_VARIANT: 'dev',
         HAPPIER_CLAUDE_PATH: resolve(join(targetDir, 'missing-claude-binary')),
+        HAPPIER_MACHINE_TRANSFER_DIRECT_PEER_ADVERTISED_HOSTS: '127.0.0.1',
+        HAPPIER_SESSION_HANDOFF_DIRECT_PEER_BIND_HOST: '127.0.0.1',
       },
     });
 
@@ -804,8 +739,11 @@ test.describe('ui e2e: session handoff failure recovery from header action menu'
     await page.getByTestId('dropdown-option-session_handoff').click();
 
     await expect(page.getByTestId('session-handoff-modal')).toHaveCount(1, { timeout: 60_000 });
-    await expect(page.getByTestId(`session-handoff-machine:${targetMachineId}`)).toHaveCount(1, { timeout: 120_000 });
-    await page.getByTestId(`session-handoff-machine:${targetMachineId}`).click();
+    const targetMachineOption = page.locator(
+      `[data-testid="session-handoff-machine:${targetMachineId}"]:visible, [data-testid="session-handoff-machine-option:${targetMachineId}"]:visible`,
+    ).first();
+    await expect(targetMachineOption).toHaveCount(1, { timeout: 120_000 });
+    await targetMachineOption.click();
     await page.getByTestId('session-handoff-start').click();
     await expect(page.getByTestId('web-modal-confirm')).toHaveCount(1, { timeout: 60_000 });
     await page.getByTestId('web-modal-confirm').click();

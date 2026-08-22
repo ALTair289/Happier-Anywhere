@@ -18,6 +18,7 @@ import { acknowledgeTerminalConnectSuccessIfPresent } from '../../src/testkit/ui
 import { runCliJson } from '../../src/testkit/uiE2e/cliJson';
 import { approveTerminalConnect } from '../../src/testkit/uiE2e/approveTerminalConnect';
 import { fetchJson } from '../../src/testkit/http';
+import { waitForDaemonMachineActive } from '../../src/testkit/uiE2e/daemonMachineId';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 
@@ -235,6 +236,11 @@ test.describe('ui e2e: plaintext mode + public share', () => {
           HAPPIER_WEBAPP_URL: uiBaseUrl,
           HAPPIER_VARIANT: 'dev',
         },
+      });
+      await waitForDaemonMachineActive({
+        cliHomeDir,
+        serverUrl: server.baseUrl,
+        timeoutMs: 180_000,
       });
 
       await page.goto(`${uiBaseUrl}/settings/account`, { waitUntil: 'domcontentloaded' });

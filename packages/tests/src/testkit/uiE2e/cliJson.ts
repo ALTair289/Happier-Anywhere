@@ -33,6 +33,17 @@ function pickLastJsonEnvelope(text: string): JsonEnvelope {
   throw new Error(`Failed to parse JSON envelope from CLI stdout: ${JSON.stringify(lines.slice(-20).join('\n'))}`);
 }
 
+function summarizeEnvelopeError(error: unknown): string {
+  if (!error || typeof error !== 'object') return 'unknown';
+  const record = error as Record<string, unknown>;
+  const code = typeof record.code === 'string' && record.code.trim() ? record.code.trim() : 'unknown';
+  const rawMessage = typeof record.message === 'string' ? record.message.trim() : '';
+  const message = rawMessage
+    .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [REDACTED]')
+    .slice(0, 500);
+  return message ? `${code}: ${message}` : code;
+}
+
 export async function runCliJson(params: Readonly<{
   testDir: string;
   cliHomeDir: string;
@@ -67,26 +78,49 @@ export async function runCliJson(params: Readonly<{
       : {}),
   };
 
-  await runLoggedCommand({
-    command: cliLaunchSpec.command,
-    args: [...cliLaunchSpec.args, ...params.args],
-    cwd: repoRootDir(),
-    env: {
-      ...env,
-      ...(cliLaunchSpec.env ?? {}),
-      CI: '1',
-      HAPPIER_SESSION_AUTOSTART_DAEMON: '0',
-      HAPPIER_HOME_DIR: params.cliHomeDir,
-      HAPPIER_SERVER_URL: params.serverUrl,
-      HAPPIER_WEBAPP_URL: params.webappUrl,
-      HAPPIER_DISABLE_CAFFEINATE: '1',
-      HAPPIER_VARIANT: 'dev',
-    },
-    stdoutPath,
-    stderrPath,
-    timeoutMs: params.timeoutMs,
-  });
+  let commandError: Error | null = null;
+  try {
+    await runLoggedCommand({
+      command: cliLaunchSpec.command,
+      args: [...cliLaunchSpec.args, ...params.args],
+      cwd: repoRootDir(),
+      env: {
+        ...env,
+        ...(cliLaunchSpec.env ?? {}),
+        CI: '1',
+        HAPPIER_SESSION_AUTOSTART_DAEMON: '0',
+        HAPPIER_HOME_DIR: params.cliHomeDir,
+        HAPPIER_SERVER_URL: params.serverUrl,
+        HAPPIER_WEBAPP_URL: params.webappUrl,
+        HAPPIER_DISABLE_CAFFEINATE: '1',
+        HAPPIER_VARIANT: 'dev',
+      },
+      stdoutPath,
+      stderrPath,
+      timeoutMs: params.timeoutMs,
+    });
+  } catch (error) {
+    commandError = error instanceof Error ? error : new Error(String(error));
+  }
 
   const stdoutText = await readFile(stdoutPath, 'utf8').catch(() => '');
-  return pickLastJsonEnvelope(stdoutText);
+  let envelope: JsonEnvelope;
+  try {
+    envelope = pickLastJsonEnvelope(stdoutText);
+  } catch (parseError) {
+    if (!commandError) throw parseError;
+    const parseMessage = parseError instanceof Error ? parseError.message : String(parseError);
+    throw new Error(
+      `${commandError.message}; ${parseMessage}; stdoutPath=${stdoutPath}; stderrPath=${stderrPath}`,
+    );
+  }
+
+  if (commandError) {
+    throw new Error(
+      `${commandError.message}; CLI JSON error=${summarizeEnvelopeError(envelope.error)}; ` +
+        `stdoutPath=${stdoutPath}; stderrPath=${stderrPath}`,
+    );
+  }
+
+  return envelope;
 }

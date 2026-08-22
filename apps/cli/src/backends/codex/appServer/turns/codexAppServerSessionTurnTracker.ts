@@ -185,10 +185,16 @@ export function createCodexAppServerSessionTurnTracker(params: Readonly<{
         sessionTurnEvidence = mutate(sessionTurnEvidence, now());
     };
 
+    const readCommittedUserMessageSeq = (localId: string | null | undefined): number | null => {
+        const trimmedLocalId = readTrimmedString(localId);
+        if (!trimmedLocalId) return null;
+        return normalizeSeq(params.session.getCommittedUserMessageSeq?.(trimmedLocalId) ?? null);
+    };
+
     const resolveCommittedUserMessageSeq = async (localId: string | null | undefined): Promise<number | null> => {
         const trimmedLocalId = readTrimmedString(localId);
         if (!trimmedLocalId) return null;
-        const syncSeq = normalizeSeq(params.session.getCommittedUserMessageSeq?.(trimmedLocalId) ?? null);
+        const syncSeq = readCommittedUserMessageSeq(trimmedLocalId);
         if (syncSeq !== null) return syncSeq;
         return normalizeSeq(await params.session.waitForCommittedUserMessageSeq?.(trimmedLocalId, {
             timeoutMs: COMMITTED_USER_MESSAGE_SEQ_WAIT_TIMEOUT_MS,
@@ -335,7 +341,11 @@ export function createCodexAppServerSessionTurnTracker(params: Readonly<{
             startSeqInclusive: number | null;
         }>): Promise<void> {
             const providerTurnId = readTrimmedString(paramsForTurn.turnId);
-            const startUserMessageSeq = await resolveCommittedUserMessageSeq(paramsForTurn.startUserMessageLocalId);
+            // Pending Queue rows are only committed after the provider accepts turn/start. Waiting
+            // here would create a causal cycle (commit waits for acceptance while acceptance waits
+            // for commit). Capture an already-committed seq synchronously, then let the runtime bind
+            // a pending one immediately after provider acceptance.
+            const startUserMessageSeq = readCommittedUserMessageSeq(paramsForTurn.startUserMessageLocalId);
             const startSeqInclusive = normalizeSeq(paramsForTurn.startSeqInclusive);
             if (await mergeBeginIntoActiveTurn({ providerTurnId, startUserMessageSeq, startSeqInclusive })) return;
             const lifecycle = params.session.sessionTurnLifecycle;
@@ -387,6 +397,24 @@ export function createCodexAppServerSessionTurnTracker(params: Readonly<{
             }
             upsertInProgressSessionTurnEvidence(providerTurnId, transcriptAnchors);
             activeTurn = { kind: 'tracked', turnId: providerTurnId, providerTurnId };
+        },
+
+        async bindStartUserMessage(paramsForPrompt: Readonly<{
+            localId?: string | null;
+            startSeqInclusive: number | null;
+        }>): Promise<void> {
+            if (!activeTurn || activeTurn.kind !== 'tracked') return;
+            const expectedActiveTurnId = activeTurn.turnId;
+            const startUserMessageSeq = await resolveCommittedUserMessageSeq(paramsForPrompt.localId);
+            if (startUserMessageSeq === null) return;
+            if (!activeTurn || activeTurn.kind !== 'tracked' || activeTurn.turnId !== expectedActiveTurnId) return;
+            const activeEntry = sessionTurnEvidence.entries.find((entry) => entry.turnId === expectedActiveTurnId);
+            if (activeEntry?.transcriptAnchors?.startUserMessageSeq === startUserMessageSeq) return;
+            await mergeBeginIntoActiveTurn({
+                providerTurnId: activeTurn.providerTurnId,
+                startUserMessageSeq,
+                startSeqInclusive: normalizeSeq(paramsForPrompt.startSeqInclusive),
+            });
         },
 
         async updateActiveTurnId(turnId: string | null): Promise<void> {

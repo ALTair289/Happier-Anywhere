@@ -1769,7 +1769,7 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
                 contentHeight: 2000,
                 flushOptions: { cycles: 1, turns: 2 },
             });
-            await settleNativeMount(screen);
+            await screen.settle({ cycles: 1, turns: 3 });
 
             expect(listDataIds(screen)).toEqual([
                 'transcript-window-gap:target:session-1:1:newer',
@@ -1879,7 +1879,7 @@ describe('ChatList (FlashList v2 inverted pilot)', () => {
                 contentHeight: 2000,
                 flushOptions: { cycles: 1, turns: 2 },
             });
-            await settleNativeMount(screen);
+            await screen.triggerLoad(12, { turns: 1 });
 
             await act(async () => {
                 screen.requireCapturedFlashListProps().onEndReached?.();

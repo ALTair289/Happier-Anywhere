@@ -150,11 +150,7 @@ test.describe('ui e2e: embedded terminal (PTY)', () => {
 
             await waitForInitialAppUi({ page, browserDiagnostics, timeoutMs: 120_000 });
 
-            // If we landed on the welcome screen, click through to getting started
-            const welcomeButton = page.getByTestId('welcome-create-account');
-            if ((await welcomeButton.count()) > 0) {
-                await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
-            }
+            await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
 
             await mkdir(testDir, { recursive: true });
             await writeFile(resolve(join(testDir, 'AGENTS.md')), '# UI e2e fixture\n', 'utf8');

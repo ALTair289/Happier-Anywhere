@@ -67,7 +67,7 @@ async function createSessionFromComposer(params: {
 }
 
 async function ensureReplayForkEnabled(params: { page: Page; uiBaseUrl: string; sessionId: string }): Promise<void> {
-  await params.page.goto(`${params.uiBaseUrl}/settings/session`, { waitUntil: 'domcontentloaded' });
+  await params.page.goto(`${params.uiBaseUrl}/settings/session/resume`, { waitUntil: 'domcontentloaded' });
   await expect(params.page.getByTestId('settings-session-replay-enabled-item')).toHaveCount(1, { timeout: 60_000 });
   const replayItem = params.page.getByTestId('settings-session-replay-enabled-item');
   const replaySwitch = replayItem.locator('input[type="checkbox"]').first();
