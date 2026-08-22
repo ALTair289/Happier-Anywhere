@@ -39,6 +39,26 @@ describe('apiSessionSocketHarness', () => {
         expect(callback).toHaveBeenCalledWith({ ok: true });
     });
 
+    it('bridges legacy callback emit behavior into emitWithAck', async () => {
+        const emit = vi.fn(async (_event: string, args: unknown[]) => {
+            const [, callback] = args;
+            if (typeof callback === 'function') {
+                callback({ ok: true, result: 'success' });
+            }
+        });
+        const socket = createApiSessionSocketStub({ emit });
+
+        await expect(socket.emitWithAck('update-metadata', { sid: 's1' })).resolves.toEqual({
+            ok: true,
+            result: 'success',
+        });
+        expect(emit).toHaveBeenCalledWith(
+            'update-metadata',
+            [{ sid: 's1' }, expect.any(Function)],
+            socket,
+        );
+    });
+
     it('can emit a disconnect event when the stub disconnects', () => {
         const socket = createApiSessionSocketStub({ disconnectReason: 'io client disconnect' });
         const handler = vi.fn();

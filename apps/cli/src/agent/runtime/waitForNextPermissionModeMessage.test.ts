@@ -10,6 +10,7 @@ import { waitForNextPermissionModeMessage } from './waitForNextPermissionModeMes
 
 type QueueMode = { permissionMode: PermissionMode };
 type PermissionModeSessionFixture = Pick<ApiSessionClient, 'popPendingMessage' | 'waitForPendingEligibilityUpdate'> & {
+  waitForMetadataUpdate?: ApiSessionClient['waitForMetadataUpdate'];
   materializeNextPendingMessageSafely: (opts?: {
     reconcileWhenEmpty?: 'force' | 'throttled' | 'skip';
   }) => Promise<MaterializeNextPendingResult>;
@@ -163,6 +164,46 @@ describe('waitForNextPermissionModeMessage', () => {
 
     expect(popCount).toBe(0);
     expect(result?.message).toBe('from-pending');
+  });
+
+  it('observes the session metadata wake stream independently of pending eligibility', async () => {
+    const queue = createQueue();
+    const metadataUpdate = createDeferred<boolean>();
+    let pendingText: string | null = null;
+
+    const session: PermissionModeSessionFixture = {
+      async materializeNextPendingMessageSafely() {
+        if (!pendingText) return { type: 'no_pending' };
+        const text = pendingText;
+        pendingText = null;
+        queue.pushImmediate(text, { permissionMode: 'default' });
+        return { type: 'materialized', localId: 'local-metadata', seq: 2, content: null };
+      },
+      async popPendingMessage() {
+        return false;
+      },
+      async waitForPendingEligibilityUpdate(abortSignal?: AbortSignal) {
+        return await new Promise<boolean>((resolve) => {
+          abortSignal?.addEventListener('abort', () => resolve(false), { once: true });
+        });
+      },
+      async waitForMetadataUpdate() {
+        return await metadataUpdate.promise;
+      },
+    };
+
+    const resultPromise = waitForNextPermissionModeMessage({
+      messageQueue: queue,
+      abortSignal: new AbortController().signal,
+      session: asSessionClient(session),
+      onMetadataUpdate: () => {
+        pendingText = 'from-session-metadata';
+      },
+    });
+
+    metadataUpdate.resolve(true);
+
+    await expect(resultPromise).resolves.toMatchObject({ message: 'from-session-metadata' });
   });
 
   it('returns a queue message when one arrives while waiting', async () => {

@@ -434,6 +434,7 @@ describe('OpenCode auth-switch fake-provider e2e', () => {
         providerEmail: null,
       },
     });
+    const credentialRevision = 'csr_7123456789ABCDEFGHJKMNPQRS' as const;
     const runtimeSelection = {
       serviceId: 'openai-codex',
       brokerSelectionIdentity: 'opencode|connected|broker:1|openai-codex:account-a:',
@@ -442,12 +443,22 @@ describe('OpenCode auth-switch fake-provider e2e', () => {
       activeProfileId: 'profile-new',
       fallbackProfileId: 'profile-old',
       generation: 2,
+      credentialRevision,
       record: nextRecord,
       previousLaunchFingerprint: launchFingerprint,
       previousOwnerToken: ownerToken,
     };
     const hotApply = createSessionConnectedServiceAuthHotApply({
       resolveRuntimeAuthAdapter: async () => runtimeAdapter,
+      validateGroupMutationCurrentness: async (input) => (
+        input.serviceId === 'openai-codex'
+        && input.groupId === 'main'
+        && input.profileId === 'profile-new'
+        && input.generation === 2
+        && input.credentialRevision === credentialRevision
+          ? { current: true }
+          : { current: false }
+      ),
     });
     const switchResult = await switchSessionConnectedServiceAuth({
       core: createConnectedServiceSessionAuthSwitchCore({

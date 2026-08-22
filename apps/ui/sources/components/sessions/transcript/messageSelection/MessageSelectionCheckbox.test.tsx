@@ -100,7 +100,7 @@ describe('MessageSelectionCheckbox', () => {
         await pressByTestId(screen, 'checkbox-m1');
 
         expect(findPressableByTestId(screen, 'checkbox-m1').props.accessibilityState).toEqual({ checked: true });
-        expect(screen.findByType('Icon').props.name).toBe('checkbox-outline');
+        expect(screen.findByType('Icon').props.name).toBe('check-square');
     });
 
     it('uses a role and truncated preview in the accessibility label', async () => {

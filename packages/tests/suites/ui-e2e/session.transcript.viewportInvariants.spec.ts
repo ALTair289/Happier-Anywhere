@@ -10,7 +10,11 @@ import { type StartedDaemon } from '../../src/testkit/daemon/daemon';
 import { authenticateAndStartDaemon } from '../../src/testkit/uiE2e/authenticateAndStartDaemon';
 import { createSessionFromNewSessionComposer } from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
 import { fakeClaudeFixturePath } from '../../src/testkit/fakeClaude';
-import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
+import {
+  gotoDomContentLoadedWithPathFallback,
+  gotoDomContentLoadedWithRetries,
+  normalizeLoopbackBaseUrl,
+} from '../../src/testkit/uiE2e/pageNavigation';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 
@@ -577,7 +581,7 @@ test.describe('ui e2e: transcript viewport invariants', () => {
     test.setTimeout(420_000);
     if (!uiBaseUrl) throw new Error('missing ui fixtures');
 
-    await gotoDomContentLoadedWithRetries(page, uiBaseUrl);
+    await gotoDomContentLoadedWithPathFallback(page, uiBaseUrl, '/', 180_000);
     const rafTicked = await page.evaluate(async () => {
       return await new Promise<boolean>((resolvePromise) => {
         const timer = setTimeout(() => resolvePromise(false), 400);
@@ -763,7 +767,7 @@ test.describe('ui e2e: transcript viewport invariants', () => {
     await restoreAccountUsingSecretKey(page, uiBaseUrl, accountSecretKeyFormatted);
 
     // Enter from the session list so the in-app back navigation below has history to return to.
-    await gotoDomContentLoadedWithRetries(page, uiBaseUrl);
+    await gotoDomContentLoadedWithPathFallback(page, uiBaseUrl, '/', 180_000);
     const listItem = page.getByTestId(`session-list-item-${sessionId}`);
     await expect(listItem).toBeVisible({ timeout: 120_000 });
     await listItem.click();

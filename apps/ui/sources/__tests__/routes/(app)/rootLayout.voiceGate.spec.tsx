@@ -1,7 +1,7 @@
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
-import { renderScreen } from '@/dev/testkit';
+import { flushHookEffects, renderScreen } from '@/dev/testkit';
 import type { LocalSettings } from '@/sync/domains/settings/localSettings';
 import { installRootLayoutRouteCommonModuleMocks } from './rootLayoutRouteTestHelpers';
 
@@ -124,6 +124,10 @@ vi.mock('@/sync/sync', () => ({
     sync: { applySettings: (delta: Record<string, unknown>) => applySettings(delta) },
 }));
 
+vi.mock('@/sync/store/settingsWriters', () => ({
+    applySystemSettings: (delta: Record<string, unknown>) => applySettings(delta),
+}));
+
 vi.mock('@/hooks/server/useHappierVoiceSupport', () => ({
     useHappierVoiceSupport: () => happierVoiceSupportState.current,
 }));
@@ -144,6 +148,7 @@ describe('RootLayout voice gating', () => {
         const RootLayout = (await import('@/app/(app)/_layout')).default;
 
         await renderScreen(React.createElement(RootLayout));
+        await flushHookEffects();
 
         expect(applySettings).toHaveBeenCalledWith({
             voice: {
@@ -162,6 +167,7 @@ describe('RootLayout voice gating', () => {
         const RootLayout = (await import('@/app/(app)/_layout')).default;
 
         await renderScreen(React.createElement(RootLayout));
+        await flushHookEffects();
 
         expect(applySettings).not.toHaveBeenCalled();
     });
@@ -171,16 +177,16 @@ describe('RootLayout voice gating', () => {
         applySettings.mockClear();
 
         const RootLayout = (await import('@/app/(app)/_layout')).default;
-        let tree: renderer.ReactTestRenderer;
-
-        tree = (await renderScreen(React.createElement(RootLayout))).tree;
+        const tree: renderer.ReactTestRenderer = (await renderScreen(React.createElement(RootLayout))).tree;
+        await flushHookEffects();
 
         expect(applySettings).not.toHaveBeenCalled();
 
         happierVoiceSupportState.current = false;
         await act(async () => {
-            tree!.update(React.createElement(RootLayout));
+            tree.update(React.createElement(RootLayout));
         });
+        await flushHookEffects();
 
         expect(applySettings).toHaveBeenCalledWith({
             voice: {

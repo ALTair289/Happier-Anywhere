@@ -96,7 +96,7 @@ async function writeFakeCodexAppServerScript(params: { scriptPath: string; reque
     '      process.stdout.write(JSON.stringify({ method: "turn/started", params: { threadId, turn: { id: turnId } } }) + "\\n");',
     '    }, 5);',
     '    setTimeout(() => {',
-    '      process.stdout.write(JSON.stringify({ method: "item/completed", params: { item: { id: `msg-${turnCounter}`, type: "agentMessage", text: `FAKE_CODEX_APP_SERVER_OK_${turnCounter}` } } }) + "\\n");',
+    '      process.stdout.write(JSON.stringify({ method: "item/completed", params: { threadId, turnId, item: { id: `msg-${turnCounter}`, type: "agentMessage", text: `FAKE_CODEX_APP_SERVER_OK_${turnCounter}` } } }) + "\\n");',
     '    }, 10);',
     '    setTimeout(() => {',
     '      process.stdout.write(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: turnId } } }) + "\\n");',

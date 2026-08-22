@@ -204,6 +204,13 @@ vi.mock('@/components/sessions/model/resolveSessionMachineReachability', () => (
 vi.mock('@/components/sessions/model/useSessionMachineReachability', () => ({
     useSessionMachineReachability: () => ({ machineReachable: true, machineOnline: true }),
 }));
+vi.mock('@/components/sessions/model/useDirectSessionTakeover', () => ({
+    useDirectSessionTakeover: () => ({
+        takeoverInFlight: null,
+        requestTakeover: vi.fn(async () => true),
+        ensureReadyForSend: vi.fn(async () => true),
+    }),
+}));
 
 vi.mock('@/sync/domains/server/serverRuntime', () => ({
     getActiveServerSnapshot: () => ({ serverId: 'server-1' }),

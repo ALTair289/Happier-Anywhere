@@ -175,14 +175,16 @@ describe('SessionParticipantComposer auth send surface', () => {
         vi.spyOn(apiSocket, 'sessionRPC').mockRejectedValue(
             new RpcError('RPC method not available', RPC_ERROR_CODES.METHOD_NOT_AVAILABLE),
         );
+        vi.spyOn(apiSocket, 'request').mockRejectedValue(
+            new HappyError('Authentication required', false, {
+                kind: 'auth',
+                code: 'not_authenticated',
+            }),
+        );
+        const emitWithAck = vi.fn();
         const send = vi.fn();
         sync.setMessageTransport({
-            emitWithAck: vi.fn(async () => {
-                throw new HappyError('Authentication required', false, {
-                    kind: 'auth',
-                    code: 'not_authenticated',
-                });
-            }),
+            emitWithAck,
             send,
         });
 
@@ -206,6 +208,7 @@ describe('SessionParticipantComposer auth send surface', () => {
         await vi.waitFor(() => {
             expect(modalAlertSpy).toHaveBeenCalledWith('common.error', 'Authentication required');
         });
+        expect(emitWithAck).not.toHaveBeenCalled();
         expect(send).not.toHaveBeenCalled();
         expect(storage.getState().sessionPending[sessionId]?.messages ?? []).toEqual([]);
     });

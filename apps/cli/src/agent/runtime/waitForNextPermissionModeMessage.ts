@@ -14,6 +14,20 @@ export async function waitForNextPermissionModeMessage<Mode, Message>(opts: {
   inputConsumer?: SessionProviderInputConsumer<Mode, Message>;
   onMetadataUpdate?: (() => void | Promise<void>) | null;
 }): Promise<MessageBatch<Mode, Message> | null> {
+  const waitForSessionInputUpdate = (signal?: AbortSignal): Promise<boolean> => {
+    const metadataWait = typeof opts.session.waitForMetadataUpdate === 'function'
+      ? opts.session.waitForMetadataUpdate(signal)
+      : null;
+    const pendingEligibilityWait = typeof opts.session.waitForPendingEligibilityUpdate === 'function'
+      ? opts.session.waitForPendingEligibilityUpdate(signal)
+      : null;
+
+    if (metadataWait && pendingEligibilityWait) {
+      return Promise.race([metadataWait, pendingEligibilityWait]);
+    }
+    return metadataWait ?? pendingEligibilityWait ?? Promise.resolve(false);
+  };
+
   const session: SessionProviderInputConsumerSession = {
     materializeNextPendingMessageSafely: (materializeOpts) =>
       opts.session.materializeNextPendingMessageSafely(materializeOpts),
@@ -21,7 +35,10 @@ export async function waitForNextPermissionModeMessage<Mode, Message>(opts: {
     reconcilePendingQueueState: async (reconcileOpts) => {
       await opts.session.reconcilePendingQueueState?.(reconcileOpts);
     },
-    waitForPendingEligibilityUpdate: (signal) => opts.session.waitForPendingEligibilityUpdate(signal),
+    // Permission-mode changes are metadata updates, while Pending eligibility has
+    // its own wake stream. The provider loop must observe both or it can sleep
+    // forever after an in-session mode override.
+    waitForPendingEligibilityUpdate: waitForSessionInputUpdate,
   };
 
   const consumerOptions: SessionProviderInputConsumerOptions<Mode, Message> = {

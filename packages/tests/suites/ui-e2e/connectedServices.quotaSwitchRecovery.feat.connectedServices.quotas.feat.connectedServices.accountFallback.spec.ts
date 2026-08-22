@@ -627,6 +627,8 @@ test.describe('ui e2e: connected-service quota switch and recovery surfaces', ()
             dbProvider: 'sqlite',
             extraEnv: {
                 HAPPIER_FEATURE_AUTH_LOGIN__KEY_CHALLENGE_ENABLED: '1',
+                HAPPIER_FEATURE_ENCRYPTION__STORAGE_POLICY: 'optional',
+                HAPPIER_FEATURE_ENCRYPTION__DEFAULT_ACCOUNT_MODE: 'plain',
                 ...CONNECTED_SERVICE_FEATURE_ENV,
             },
         });

@@ -43,7 +43,11 @@ export async function moveConnectedServiceHomeEntryAside(path: string): Promise<
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
       if (err?.code === 'ENOENT') return;
-      if (err?.code === 'EEXIST') continue;
+      // Renaming a directory onto an already populated backup path is reported as
+      // EEXIST on some platforms and ENOTEMPTY on Linux. Both mean the timestamped
+      // name collided, so retry with the attempt suffix instead of aborting the
+      // state-link promotion race recovery.
+      if (err?.code === 'EEXIST' || err?.code === 'ENOTEMPTY') continue;
       throw error;
     }
   }

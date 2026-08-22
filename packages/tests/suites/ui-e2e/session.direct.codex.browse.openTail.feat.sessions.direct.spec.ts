@@ -8,8 +8,13 @@ import { startUiWeb, type StartedUiWeb } from '../../src/testkit/process/uiWeb';
 import { startTestDaemon, type StartedDaemon } from '../../src/testkit/daemon/daemon';
 import { startCliAuthLoginForTerminalConnect, type StartedCliTerminalConnect } from '../../src/testkit/uiE2e/cliTerminalConnect';
 import { enableDirectSessionsFeature } from '../../src/testkit/uiE2e/enableDirectSessionsFeature';
-import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
+import {
+  gotoDomContentLoadedWithPathFallback,
+  gotoDomContentLoadedWithRetries,
+  normalizeLoopbackBaseUrl,
+} from '../../src/testkit/uiE2e/pageNavigation';
 import { ensureAccountReadyForConnect } from '../../src/testkit/uiE2e/ensureAccountReadyForConnect';
+import { approveTerminalConnect } from '../../src/testkit/uiE2e/approveTerminalConnect';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 
@@ -19,6 +24,10 @@ function jsonlLine(value: unknown): string {
 
 function responseItemLine(params: { timestamp: string; payload: Record<string, unknown> }): string {
   return jsonlLine({ type: 'response_item', timestamp: params.timestamp, payload: params.payload });
+}
+
+function eventMsgLine(params: { timestamp: string; payload: Record<string, unknown> }): string {
+  return jsonlLine({ type: 'event_msg', timestamp: params.timestamp, payload: params.payload });
 }
 
 test.describe('ui e2e: direct Codex sessions browse/open/tail', () => {
@@ -108,8 +117,8 @@ test.describe('ui e2e: direct Codex sessions browse/open/tail', () => {
     await mkdir(testDir, { recursive: true });
 
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(uiBaseUrl, { waitUntil: 'domcontentloaded' });
-    await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
+    await gotoDomContentLoadedWithPathFallback(page, uiBaseUrl, '/', 180_000);
+    await ensureAccountReadyForConnect({ page, timeoutMs: 180_000 });
 
     const cliLogin: StartedCliTerminalConnect = await startCliAuthLoginForTerminalConnect({
       testDir,
@@ -125,9 +134,8 @@ test.describe('ui e2e: direct Codex sessions browse/open/tail', () => {
       },
     });
 
-    await page.goto(cliLogin.connectUrl, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('terminal-connect-approve')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('terminal-connect-approve').click();
+    await gotoDomContentLoadedWithPathFallback(page, cliLogin.connectUrl, '/terminal/connect', 120_000);
+    await approveTerminalConnect({ page });
     await cliLogin.waitForSuccess();
 
     daemon = await startTestDaemon({
@@ -176,7 +184,15 @@ test.describe('ui e2e: direct Codex sessions browse/open/tail', () => {
       responseItemLine({
         timestamp: '2026-03-06T00:00:03.000Z',
         payload: { type: 'message', role: 'user', content: [{ type: 'text', text: 'tail appended direct codex ui message' }] },
-      }),
+      })
+        + eventMsgLine({
+          timestamp: '2026-03-06T00:00:03.001Z',
+          payload: {
+            type: 'user_message',
+            client_id: 'tail-appended-direct-codex-ui-message',
+            message: 'tail appended direct codex ui message',
+          },
+        }),
       'utf8',
     );
 

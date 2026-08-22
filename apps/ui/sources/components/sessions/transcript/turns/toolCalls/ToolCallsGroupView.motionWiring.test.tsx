@@ -59,6 +59,11 @@ installToolCallsGroupViewCommonModuleMocks({
     },
 });
 
+vi.mock('@/components/ui/icons/Icon', () => ({
+    ICON_SIZE: { sm: 16 },
+    Icon: (props: any) => React.createElement('Icon', { ...props, testID: `icon:${props.name}` }),
+}));
+
 vi.mock('@/components/tools/shell/views/ToolView', () => ({
     ToolView: (props: any) => React.createElement('ToolView', props),
 }));
@@ -109,12 +114,12 @@ describe('ToolCallsGroupView (motion wiring)', () => {
             toolMessages,
         });
 
-        expect(screen.findByTestId('ionicons:stack-simple')).not.toBeNull();
-        expect(screen.findByTestId('ionicons:caret-up')).toBeNull();
+        expect(screen.findByTestId('icon:stack-simple')).not.toBeNull();
+        expect(screen.findByTestId('icon:caret-up')).toBeNull();
 
         await screen.pressByTestIdAsync('transcript-tool-calls-preview-more');
 
-        expect(screen.findByTestId('ionicons:caret-up')).not.toBeNull();
+        expect(screen.findByTestId('icon:caret-up')).not.toBeNull();
     });
 
     it('applies a group background only when enabled in tool feed mode', async () => {

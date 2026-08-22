@@ -175,12 +175,12 @@ async function connectWorkingSessionInProgress(params: Readonly<{
   baseUrl: string;
   token: string;
   sessionId: string;
-}>): Promise<Readonly<{ close: () => void }>> {
+}>): Promise<ReturnType<typeof createSessionScopedSocketCollector>> {
   await updateSessionRuntimeStatus({
     ...params,
     latestTurnStatus: 'in_progress',
   });
-  return { close: () => {} };
+  return await connectLegacyThinkingFallback(params);
 }
 
 async function updateSessionRuntimeStatus(params: Readonly<{

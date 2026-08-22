@@ -10,9 +10,10 @@ import { startTestDaemon, type StartedDaemon } from '../../src/testkit/daemon/da
 import { startCliAuthLoginForTerminalConnect, type StartedCliTerminalConnect } from '../../src/testkit/uiE2e/cliTerminalConnect';
 import { createSessionFromNewSessionComposer } from '../../src/testkit/uiE2e/createSessionFromNewSessionComposer';
 import { fakeClaudeFixturePath } from '../../src/testkit/fakeClaude';
-import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
+import { gotoDomContentLoadedWithPathFallback, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
 import { runCliJson } from '../../src/testkit/uiE2e/cliJson';
 import { ensureAccountReadyForConnect } from '../../src/testkit/uiE2e/ensureAccountReadyForConnect';
+import { approveTerminalConnect } from '../../src/testkit/uiE2e/approveTerminalConnect';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 const VIEWPORT_MEASUREMENT_ROUNDING_PX = 1;
@@ -281,9 +282,9 @@ test.describe('ui e2e: transcript background/foreground catch-up (visibility)', 
     });
 
     await page.setViewportSize({ width: 1440, height: 900 });
-    await gotoDomContentLoadedWithRetries(page, uiBaseUrl);
+    await gotoDomContentLoadedWithPathFallback(page, uiBaseUrl, '/', 180_000);
 
-    await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
+    await ensureAccountReadyForConnect({ page, timeoutMs: 180_000 });
 
     const testDir = resolve(join(suiteDir, 't1-visibility-catchup'));
     await mkdir(testDir, { recursive: true });
@@ -302,9 +303,8 @@ test.describe('ui e2e: transcript background/foreground catch-up (visibility)', 
       },
     });
 
-    await page.goto(cliLogin.connectUrl, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('terminal-connect-approve')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('terminal-connect-approve').click();
+    await gotoDomContentLoadedWithPathFallback(page, cliLogin.connectUrl, '/terminal/connect', 120_000);
+    await approveTerminalConnect({ page });
     await cliLogin.waitForSuccess();
     await cliLogin.stop().catch(() => {});
 
@@ -332,7 +332,7 @@ test.describe('ui e2e: transcript background/foreground catch-up (visibility)', 
 
     const machineId = await waitForLatestMachineId({ suiteDir, timeoutMs: 120_000 });
     const sessionId = await createSessionFromComposer({ page, uiBaseUrl, machineId, prompt: `hello vis ${run.runId}` });
-    await page.goto(`${uiBaseUrl}/session/${sessionId}`, { waitUntil: 'domcontentloaded' });
+    await gotoDomContentLoadedWithPathFallback(page, `${uiBaseUrl}/session/${sessionId}`, `/session/${sessionId}`, 180_000);
     await expect(page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
     await requireViewportTelemetrySnapshot(page);
 

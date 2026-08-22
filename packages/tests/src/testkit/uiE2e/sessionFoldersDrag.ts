@@ -110,7 +110,7 @@ async function ensureSessionFolderViewMode(params: Readonly<{
   if (!firstFolderId) return;
 
   const firstFolderHeader = params.page.getByTestId(`session-folder-header-${firstFolderId}`);
-  const alreadyTree = await firstFolderHeader.waitFor({ state: 'attached', timeout: 2_000 }).then(
+  const alreadyTree = await firstFolderHeader.waitFor({ state: 'attached', timeout: 30_000 }).then(
     () => true,
     () => false,
   );
@@ -119,7 +119,12 @@ async function ensureSessionFolderViewMode(params: Readonly<{
   await params.page.getByTestId('session-list-ordering-menu-trigger').first().click();
   const folderViewToggle = params.page.getByTestId('session-folder-view-toggle');
   await expect(folderViewToggle).toHaveCount(1, { timeout: 60_000 });
-  await folderViewToggle.click();
+  const toggleLabel = (await folderViewToggle.textContent())?.trim() ?? '';
+  if (/hide folders/i.test(toggleLabel)) {
+    await params.page.keyboard.press('Escape');
+  } else {
+    await folderViewToggle.click();
+  }
   await expect(firstFolderHeader).toHaveCount(1, { timeout: 120_000 });
 }
 

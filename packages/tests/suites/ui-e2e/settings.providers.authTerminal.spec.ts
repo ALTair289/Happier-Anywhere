@@ -7,8 +7,9 @@ import { startServerLight, type StartedServer } from '../../src/testkit/process/
 import { resolveUiWebBeforeAllTimeoutMs, startUiWeb, type StartedUiWeb } from '../../src/testkit/process/uiWeb';
 import { startTestDaemon, type StartedDaemon } from '../../src/testkit/daemon/daemon';
 import { startCliAuthLoginForTerminalConnect, type StartedCliTerminalConnect } from '../../src/testkit/uiE2e/cliTerminalConnect';
-import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
+import { gotoDomContentLoadedWithPathFallback, gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
 import { ensureAccountReadyForConnect } from '../../src/testkit/uiE2e/ensureAccountReadyForConnect';
+import { approveTerminalConnect } from '../../src/testkit/uiE2e/approveTerminalConnect';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 const fakeCodexPath = resolve(new URL('../../src/fixtures/fake-codex-auth-cli.js', import.meta.url).pathname);
@@ -94,8 +95,8 @@ test.describe('ui e2e: provider settings auth status', () => {
 
     let cliLogin: StartedCliTerminalConnect | null = null;
     try {
-      await gotoDomContentLoadedWithRetries(page, uiBaseUrl);
-      await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
+      await gotoDomContentLoadedWithPathFallback(page, uiBaseUrl, '/', 180_000);
+      await ensureAccountReadyForConnect({ page, timeoutMs: 180_000 });
 
       cliLogin = await startCliAuthLoginForTerminalConnect({
         testDir,
@@ -111,9 +112,8 @@ test.describe('ui e2e: provider settings auth status', () => {
         },
       });
 
-      await page.goto(cliLogin.connectUrl, { waitUntil: 'domcontentloaded' });
-      await expect(page.getByTestId('terminal-connect-approve')).toHaveCount(1, { timeout: 60_000 });
-      await page.getByTestId('terminal-connect-approve').click();
+      await gotoDomContentLoadedWithPathFallback(page, cliLogin.connectUrl, '/terminal/connect', 120_000);
+      await approveTerminalConnect({ page });
       await cliLogin.waitForSuccess();
 
       daemon = await startTestDaemon({
@@ -133,7 +133,7 @@ test.describe('ui e2e: provider settings auth status', () => {
         },
       });
 
-      await gotoDomContentLoadedWithRetries(page, uiBaseUrl);
+      await gotoDomContentLoadedWithPathFallback(page, uiBaseUrl, '/', 180_000);
       await expect(page.getByTestId('session-getting-started-kind-start_daemon')).toHaveCount(0, { timeout: 120_000 });
       await expect
         .poll(

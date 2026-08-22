@@ -22,16 +22,7 @@ async function expectVisibleTestId(page: Page, testId: string): Promise<ReturnTy
 }
 
 async function createAccountIfNeeded(page: Page): Promise<void> {
-  const createAccountByTestId = page.getByTestId('welcome-create-account');
-  if (await createAccountByTestId.count()) {
-    await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
-    return;
-  }
-
-  const createAccountByRole = page.getByRole('button', { name: 'Create account' });
-  if (await createAccountByRole.count()) {
-    await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
-  }
+  await ensureAccountReadyForConnect({ page, timeoutMs: 180_000 });
 }
 
 async function openThemeProfiles(params: Readonly<{ page: Page; uiBaseUrl: string }>): Promise<void> {

@@ -261,9 +261,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ui-e2e-playwright-artifacts-shard-${{ matrix.shard }}-of-6
-          path: |
-            packages/tests/.project/logs/e2e/ui-playwright
-            .project/logs/e2e/*ui-e2e*
+          path: packages/tests/.project/logs/e2e/ui-playwright
           if-no-files-found: ignore
 
   ui-e2e-wsrepl-lima:

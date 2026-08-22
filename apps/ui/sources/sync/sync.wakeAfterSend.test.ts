@@ -402,7 +402,8 @@ describe('sync.sendMessage wake-after-send', () => {
             expect.objectContaining({ method: 'POST' }),
         );
         await vi.waitFor(() => expect(resumeSessionSpy).toHaveBeenCalledTimes(1));
-        expect(resumeSessionSpy).toHaveBeenCalledWith(expect.objectContaining({
+        const resumeOptions = resumeSessionSpy.mock.calls[0]?.[0];
+        expect(resumeOptions).toEqual(expect.objectContaining({
             sessionId,
             machineId: 'm1',
             directory: '/tmp/project',
@@ -410,11 +411,8 @@ describe('sync.sendMessage wake-after-send', () => {
             resume: 'codex-1',
             codexBackendMode: 'appServer',
             initialTranscriptAfterSeq: 12,
-            executionAuthorization: expect.objectContaining({
-                provenance: 'user_request',
-                requestId: expect.any(String),
-            }),
         }));
+        expect(resumeOptions).not.toHaveProperty('executionAuthorization');
     });
 
     it('rejects submitMessage pending intent on old CLI without direct delivery', async () => {

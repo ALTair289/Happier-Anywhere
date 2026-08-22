@@ -178,11 +178,12 @@ test.describe('ui e2e: thinking markdown rendering', () => {
     await page.goto(`${uiBaseUrl}/session/${sessionId}`, { waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
 
-    await expect(page.getByTestId('transcript-thinking-header').first()).toBeVisible({ timeout: 180_000 });
-    await page.getByTestId('transcript-thinking-header').first().click();
-    await expect(page.getByTestId('transcript-thinking-body-markdown').first()).toBeVisible({ timeout: 60_000 });
-
     const body = page.getByTestId('transcript-thinking-body-markdown').first();
+    await expect(page.getByTestId('transcript-thinking-header').first()).toBeVisible({ timeout: 180_000 });
+    if ((await body.count()) === 0) {
+      await page.getByTestId('transcript-thinking-header').first().click();
+    }
+    await expect(body).toBeVisible({ timeout: 60_000 });
 
     // Basic sanity: headings/text are present and markdown delimiters are not shown literally.
     await expect(body).toContainText('Considering Codex functionalities');

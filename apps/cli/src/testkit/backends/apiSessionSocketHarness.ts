@@ -92,6 +92,21 @@ export function createApiSessionSocketStub(options: {
             if (options.emitWithAck) {
                 return options.emitWithAck(event, payload, socket);
             }
+            if (options.emit) {
+                let didAcknowledge = false;
+                let acknowledgment: unknown;
+                const callback = (value: unknown) => {
+                    didAcknowledge = true;
+                    acknowledgment = value;
+                };
+                const legacyResult = await options.emit(event, [payload, callback], socket);
+                if (didAcknowledge) {
+                    return acknowledgment;
+                }
+                if (legacyResult !== undefined) {
+                    return legacyResult;
+                }
+            }
             return options.emitWithAckResult ?? { ok: true, id: 'm1', seq: 1, localId: 'l1' };
         }),
         volatile: {

@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import { createRunDirs } from '../../src/testkit/runDir';
@@ -308,6 +308,18 @@ async function connectDaemonWithFakeCodexAppServer(params: Readonly<{
     await writeFile(resolve(join(cliHomeDir, 'AGENTS.md')), '# UI e2e fixture\n', 'utf8');
     await writeFakeCodexAuthFile({ cliHomeDir });
 
+    const fakeBinDir = resolve(join(params.testDir, 'fake-bin'));
+    await mkdir(fakeBinDir, { recursive: true });
+    const fakeCodexCliPath = resolve(join(fakeBinDir, process.platform === 'win32' ? 'codex.cmd' : 'codex'));
+    await writeFile(
+        fakeCodexCliPath,
+        process.platform === 'win32'
+            ? '@echo off\r\necho codex 0.0.0-e2e\r\n'
+            : '#!/bin/sh\necho "codex 0.0.0-e2e"\n',
+        'utf8',
+    );
+    if (process.platform !== 'win32') await chmod(fakeCodexCliPath, 0o755);
+
     const fakeCodexAppServerPath = resolve(join(params.testDir, 'fake-codex-app-server.mjs'));
     const requestLogPath = resolve(join(params.testDir, 'fake-codex-app-server.requests.jsonl'));
     await writeFakeCodexAppServerScript({ scriptPath: fakeCodexAppServerPath, requestLogPath });
@@ -342,6 +354,9 @@ async function connectDaemonWithFakeCodexAppServer(params: Readonly<{
             HOME: cliHomeDir,
             CI: '1',
             CODEX_HOME: codexHomeDir,
+            PATH: process.platform === 'win32'
+                ? `${fakeBinDir};${process.env.PATH ?? ''}`
+                : `${fakeBinDir}:${process.env.PATH ?? ''}`,
             HAPPIER_HOME_DIR: cliHomeDir,
             HAPPIER_SERVER_URL: params.server.baseUrl,
             HAPPIER_WEBAPP_URL: params.uiBaseUrl,

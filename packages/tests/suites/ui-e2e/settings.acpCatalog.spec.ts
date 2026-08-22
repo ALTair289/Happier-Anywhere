@@ -114,6 +114,9 @@ test.describe('ui e2e: ACP catalog settings', () => {
       cliHomeDir,
       serverUrl: server.baseUrl,
       uiBaseUrl,
+      initialUiGotoTimeoutMs: 180_000,
+      initialUiReadyTimeoutMs: 240_000,
+      accountReadyTimeoutMs: 180_000,
     });
 
     await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/settings/acp`);
@@ -135,6 +138,9 @@ test.describe('ui e2e: ACP catalog settings', () => {
       cliHomeDir,
       serverUrl: server.baseUrl,
       uiBaseUrl,
+      initialUiGotoTimeoutMs: 180_000,
+      initialUiReadyTimeoutMs: 240_000,
+      accountReadyTimeoutMs: 180_000,
     });
 
     const backendId = 'ui-acp-stub-backend';

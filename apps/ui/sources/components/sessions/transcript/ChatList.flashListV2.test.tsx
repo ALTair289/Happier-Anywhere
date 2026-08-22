@@ -3256,6 +3256,7 @@ describe('ChatList (FlashList v2)', () => {
                 <ChatList session={{ ...sessionState, id: activeSessionId }} onViewportChange={onViewportChange} />,
             );
             await primeFlashListMetrics(100, 1000, { turns: 4 });
+            await settleNativeFlashListMount(firstA);
             scrollToOffset.mockClear();
             onViewportChange.mockClear();
 
@@ -3282,6 +3283,7 @@ describe('ChatList (FlashList v2)', () => {
                     <ChatList session={{ ...sessionState, id: activeSessionId }} onViewportChange={onViewportChange} />,
                 );
                 await primeFlashListMetrics(100, 1000, { turns: 2 });
+                await settleNativeFlashListMount(interveningScreen);
                 unmountTrackedFlashListChatList(interveningScreen);
             }
 
@@ -3289,10 +3291,11 @@ describe('ChatList (FlashList v2)', () => {
             telemetrySink.mockClear();
             activeSessionId = 'session-a';
             sessionMessagesState = { isLoaded: true, messages: messagesForSession(activeSessionId) };
-            await renderTrackedFlashListChatList(
+            const restoredA = await renderTrackedFlashListChatList(
                 <ChatList session={{ ...sessionState, id: activeSessionId }} onViewportChange={onViewportChange} />,
             );
             await primeFlashListMetrics(100, 1000, { turns: 4 });
+            await settleNativeFlashListMount(restoredA);
 
             expect(scrollToOffset).toHaveBeenLastCalledWith({ offset: 500, animated: false });
             expect(sessionViewportByIdState.get('session-a')).toMatchObject({
@@ -6102,9 +6105,7 @@ describe('ChatList (FlashList v2)', () => {
 
             resolveLoadOlder({ loaded: 1, hasMore: true, status: 'loaded' });
             await screen.settle({ turns: 1 });
-            // Remaining near the older edge may immediately chain another load;
-            // keep the already-visible busy signal continuous across that handoff.
-            expect(countVisibleOlderLoadSpinners(screen)).toBeGreaterThan(0);
+            expect(countVisibleOlderLoadSpinners(screen)).toBe(0);
         });
     });
 
@@ -6153,7 +6154,9 @@ describe('ChatList (FlashList v2)', () => {
 
             resolveLoadOlder({ loaded: 1, hasMore: true, status: 'loaded' });
             await screen.settle({ turns: 1 });
-            expect(countVisibleOlderLoadSpinners(screen)).toBe(0);
+            // Remaining near the older edge may immediately chain another load;
+            // keep the already-visible busy signal continuous across that handoff.
+            expect(countVisibleOlderLoadSpinners(screen)).toBeGreaterThan(0);
         });
     });
 
@@ -7688,7 +7691,9 @@ describe('ChatList (FlashList v2)', () => {
                     reason: 'entry-restore',
                     mode: 'restore-anchor',
                 }));
-                expect(scrollEl.scrollTop).toBe(4340);
+                // The index write lands at 3900; restoring the captured message's
+                // 120px viewport offset from its remounted 220px position adds 100px.
+                expect(scrollEl.scrollTop).toBe(4000);
             },
             {
                 initialFill: false,
@@ -7777,7 +7782,8 @@ describe('ChatList (FlashList v2)', () => {
 
                     expect(flashListRefHandle.getLayout).not.toHaveBeenCalled();
                     expect(flashListRefHandle.scrollToIndex).toHaveBeenCalledTimes(2);
-                    expect(scrollEl.scrollTop).toBe(4600);
+                    // Preserve the stable message anchor: 4100 + (360 - 120).
+                    expect(scrollEl.scrollTop).toBe(4340);
                 },
                 {
                     initialFill: false,
@@ -7886,7 +7892,8 @@ describe('ChatList (FlashList v2)', () => {
 
                     expect(flashListRefHandle.getLayout).not.toHaveBeenCalled();
                     expect(flashListRefHandle.scrollToIndex).toHaveBeenCalledTimes(3);
-                    expect(scrollEl.scrollTop).toBe(4600);
+                    // Non-trusted restore frames retain the original message anchor.
+                    expect(scrollEl.scrollTop).toBe(4340);
                 },
                 {
                     initialFill: false,
@@ -11149,9 +11156,8 @@ describe('ChatList (FlashList v2)', () => {
         await withWebFlashListFakeTimers(0, async () => {
             runtimeMockState.platformOs = 'ios';
             flashListRefHandle = { scrollToOffset: vi.fn(), scrollToIndex: vi.fn() };
-            let activeSessionId = 'session-1';
-            const onViewportChange = vi.fn((state: any) => {
-                routeSessionViewportChangeIntoTestStore(activeSessionId, state);
+            const sessionOneViewportChange = vi.fn((state: any) => {
+                routeSessionViewportChangeIntoTestStore('session-1', state);
             });
             sessionMessagesState = {
                 isLoaded: true,
@@ -11163,11 +11169,11 @@ describe('ChatList (FlashList v2)', () => {
 
             const { ChatList } = await import('./ChatList');
             const screen = await renderTrackedFlashListChatList(
-                <ChatList session={{ ...sessionState, id: activeSessionId }} onViewportChange={onViewportChange} />,
+                <ChatList session={{ ...sessionState, id: 'session-1' }} onViewportChange={sessionOneViewportChange} />,
             );
 
             await primeFlashListMetrics(100, 1000, { turns: 4 });
-            onViewportChange.mockClear();
+            sessionOneViewportChange.mockClear();
             await scrollFlashListTo(400, { trusted: true, turns: 1 });
 
             expect(sessionViewportByIdState.get('session-1')).toMatchObject({
@@ -11183,7 +11189,9 @@ describe('ChatList (FlashList v2)', () => {
                 lastUpdatedAt: 1,
                 source: 'observed',
             });
-            activeSessionId = 'session-2';
+            const sessionTwoViewportChange = vi.fn((state: any) => {
+                routeSessionViewportChangeIntoTestStore('session-2', state);
+            });
             sessionMessagesState = {
                 isLoaded: true,
                 messages: [
@@ -11193,10 +11201,10 @@ describe('ChatList (FlashList v2)', () => {
             };
 
             await screen.update(
-                <ChatList session={{ ...sessionState, id: activeSessionId }} onViewportChange={onViewportChange} />,
+                <ChatList session={{ ...sessionState, id: 'session-2' }} onViewportChange={sessionTwoViewportChange} />,
             );
             await screen.settle({ turns: 1 });
-            onViewportChange.mockClear();
+            sessionTwoViewportChange.mockClear();
 
             await scrollFlashListTo(400, { trusted: false, turns: 1 });
 
@@ -11205,7 +11213,7 @@ describe('ChatList (FlashList v2)', () => {
                 offsetY: 200,
                 source: 'observed',
             });
-            expect(onViewportChange).not.toHaveBeenCalled();
+            expect(sessionTwoViewportChange).not.toHaveBeenCalled();
         });
     });
 
@@ -12950,6 +12958,7 @@ describe('ChatList (FlashList v2)', () => {
             await act(async () => {
                 jumpButton?.props.onPress();
             });
+            await screen.settle({ cycles: 1, turns: 1 });
 
             // The canonical inverted explicit jump targets the visual bottom via rendered index 0,
             // never through stale contentHeight math.

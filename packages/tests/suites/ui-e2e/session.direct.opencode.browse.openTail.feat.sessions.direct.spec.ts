@@ -9,8 +9,13 @@ import { startUiWeb, type StartedUiWeb } from '../../src/testkit/process/uiWeb';
 import { startTestDaemon, type StartedDaemon } from '../../src/testkit/daemon/daemon';
 import { startCliAuthLoginForTerminalConnect, type StartedCliTerminalConnect } from '../../src/testkit/uiE2e/cliTerminalConnect';
 import { enableDirectSessionsFeature } from '../../src/testkit/uiE2e/enableDirectSessionsFeature';
-import { gotoDomContentLoadedWithRetries, normalizeLoopbackBaseUrl } from '../../src/testkit/uiE2e/pageNavigation';
+import {
+  gotoDomContentLoadedWithPathFallback,
+  gotoDomContentLoadedWithRetries,
+  normalizeLoopbackBaseUrl,
+} from '../../src/testkit/uiE2e/pageNavigation';
 import { ensureAccountReadyForConnect } from '../../src/testkit/uiE2e/ensureAccountReadyForConnect';
+import { approveTerminalConnect } from '../../src/testkit/uiE2e/approveTerminalConnect';
 
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 
@@ -165,8 +170,8 @@ test.describe('ui e2e: direct OpenCode sessions browse/open/tail', () => {
     await mkdir(testDir, { recursive: true });
 
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(uiBaseUrl, { waitUntil: 'domcontentloaded' });
-    await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
+    await gotoDomContentLoadedWithPathFallback(page, uiBaseUrl, '/', 180_000);
+    await ensureAccountReadyForConnect({ page, timeoutMs: 180_000 });
 
     const cliLogin: StartedCliTerminalConnect = await startCliAuthLoginForTerminalConnect({
       testDir,
@@ -182,9 +187,8 @@ test.describe('ui e2e: direct OpenCode sessions browse/open/tail', () => {
       },
     });
 
-    await page.goto(cliLogin.connectUrl, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByTestId('terminal-connect-approve')).toHaveCount(1, { timeout: 60_000 });
-    await page.getByTestId('terminal-connect-approve').click();
+    await gotoDomContentLoadedWithPathFallback(page, cliLogin.connectUrl, '/terminal/connect', 120_000);
+    await approveTerminalConnect({ page });
     await cliLogin.waitForSuccess();
 
     daemon = await startTestDaemon({

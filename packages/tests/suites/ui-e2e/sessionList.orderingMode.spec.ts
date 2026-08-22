@@ -23,6 +23,7 @@ import {
   importSessionOrganization,
 } from '../../src/testkit/uiE2e/sessionOrganization';
 import { waitForInitialAppUi } from '../../src/testkit/uiE2e/waitForInitialAppUi';
+import { mutateUiE2eScopedAccountSettings } from '../../src/testkit/uiE2e/scopedAccountSettingsStorage';
 
 const run = createRunDirs({ runLabel: 'ui-e2e-session-list-ordering-mode' });
 
@@ -242,6 +243,15 @@ test.describe('ui e2e: session list ordering mode', () => {
       featureId: 'sessions.folders',
       enabled: true,
     });
+    await mutateUiE2eScopedAccountSettings({
+      page,
+      settingsPatch: {
+        sessionListActiveGroupingV1: 'project',
+        sessionListInactiveGroupingV1: 'project',
+        sessionFolderViewModeV1: 'off',
+      },
+    });
+    await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
 
     await expect(page.getByTestId(`session-list-item-${oldestSessionId}`)).toHaveCount(1, { timeout: 120_000 });
     await expect(page.getByTestId(`session-list-item-${middleSessionId}`)).toHaveCount(1, { timeout: 120_000 });

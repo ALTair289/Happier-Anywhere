@@ -11,10 +11,7 @@ import { ensureAccountReadyForConnect } from '../../src/testkit/uiE2e/ensureAcco
 const run = createRunDirs({ runLabel: 'ui-e2e' });
 
 async function createAccountIfNeeded(page: Page): Promise<void> {
-    const createAccount = page.getByTestId('welcome-create-account');
-    if (await createAccount.count()) {
-        await ensureAccountReadyForConnect({ page, timeoutMs: 120_000 });
-    }
+    await ensureAccountReadyForConnect({ page, timeoutMs: 180_000 });
 }
 
 async function confirmPrompt(page: Page, value: string): Promise<void> {

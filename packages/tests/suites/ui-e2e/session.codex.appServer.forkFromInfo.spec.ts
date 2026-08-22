@@ -321,7 +321,7 @@ test.describe('ui e2e: Codex app-server fork from session info', () => {
         await expect(page.getByTestId('transcript-chat-list')).toHaveCount(1, { timeout: 120_000 });
         await expect(page.getByText('FAKE_CODEX_INFO_FORK_OK_1')).toHaveCount(1, { timeout: 180_000 });
 
-        await page.getByTestId('session-header-avatar').click();
+        await page.getByTestId('session-header-info-button').click();
         await page.waitForURL((url) => url.pathname.endsWith(`/session/${parentSessionId}/info`), { timeout: 60_000 });
         await expect(page.getByTestId('session-info-screen')).toHaveCount(1, { timeout: 60_000 });
         await expect(page.getByTestId('session-info-fork-session')).toHaveCount(1, { timeout: 60_000 });

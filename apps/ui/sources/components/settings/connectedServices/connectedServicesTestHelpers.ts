@@ -53,6 +53,8 @@ export function resetConnectedServicesCommonModuleMockState() {
  *   `<SvgXml>` (AccountBlock + PoolsList).
  * - `Avatar`: the PoolsList member stack dynamically requires
  *   `@/agents/registry/registryUi`, which the Node test runtime cannot resolve.
+ * - `Icon`: the native icon package contains Flow-only syntax that Node cannot
+ *   parse in these controller tests.
  *
  * Call this AT MODULE SCOPE (alongside `installConnectedServicesCommonModuleMocks`).
  */
@@ -97,6 +99,13 @@ export function installConnectedServiceDetailShellMocks() {
         const React = require('react');
         return {
             Avatar: (props: Record<string, unknown>) => React.createElement('Avatar', props),
+        };
+    });
+
+    vi.mock('@/components/ui/icons/Icon', () => {
+        const React = require('react');
+        return {
+            Icon: (props: Record<string, unknown>) => React.createElement('Icon', props),
         };
     });
 }
