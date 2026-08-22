@@ -7,7 +7,13 @@ export function normalizeServerHttpBaseUrl(serverUrl: string): string {
 }
 
 export function resolveServerHttpBaseUrl(): string {
-  return normalizeServerHttpBaseUrl(configuration.apiServerUrl);
+  // A selected server profile is authoritative and must not be overridden by inherited URLs.
+  // Profileless runtimes can switch HAPPIER_SERVER_URL after startup, so read that value live.
+  const hasPinnedServerProfile = Boolean(process.env.HAPPIER_ACTIVE_SERVER_ID?.trim());
+  const liveRuntimeServerUrl = hasPinnedServerProfile
+    ? ''
+    : (process.env.HAPPIER_SERVER_URL ?? '').trim();
+  return normalizeServerHttpBaseUrl(liveRuntimeServerUrl || configuration.apiServerUrl);
 }
 
 function readErrorCode(error: unknown): string | null {

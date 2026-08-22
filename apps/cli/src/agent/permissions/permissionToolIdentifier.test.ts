@@ -94,19 +94,19 @@ describe('permissionToolIdentifier', () => {
     expect(isToolAllowedForSession(allowed, 'bash', { command: 'git status --porcelain' })).toBe(true);
   });
 
-  it('accepts prefix matches even with leading env assignments', () => {
+  it('requires exact approval when a command has leading env assignments', () => {
+    const command = 'FOO=bar git status --porcelain';
     const allowed = new Set(['execute(git:*)']);
-    expect(isToolAllowedForSession(allowed, 'bash', { command: 'FOO=bar git status --porcelain' })).toBe(true);
+    expect(isToolAllowedForSession(allowed, 'bash', { command })).toBe(false);
+    expect(isToolAllowedForSession(new Set([`execute(${command})`]), 'bash', { command })).toBe(true);
   });
 
-  it('accepts prefix matches with a leading unset prelude segment', () => {
+  it('requires exact approval when a command has a leading unset prelude segment', () => {
+    const command =
+      'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_SETUP_TOKEN; pwd';
     const allowed = new Set(['execute(pwd:*)']);
-    expect(
-      isToolAllowedForSession(allowed, 'bash', {
-        command:
-          'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_SETUP_TOKEN; pwd',
-      }),
-    ).toBe(true);
+    expect(isToolAllowedForSession(allowed, 'bash', { command })).toBe(false);
+    expect(isToolAllowedForSession(new Set([`execute(${command})`]), 'bash', { command })).toBe(true);
   });
 
   it('does not treat chained commands as allowed unless each segment is allowed', () => {

@@ -49,6 +49,20 @@ describe('resolveServerHttpBaseUrl', () => {
     expect(resolveServerHttpBaseUrl()).toBe('http://127.0.0.1:52002');
   });
 
+  it('reads the live runtime endpoint when no active profile pins configuration', async () => {
+    vi.resetModules();
+    stubServerEnv({
+      HAPPIER_SERVER_URL: 'http://127.0.0.1:41001',
+    });
+
+    await import('@/configuration');
+    const { resolveServerHttpBaseUrl } = await import('./serverHttpBaseUrl');
+
+    vi.stubEnv('HAPPIER_SERVER_URL', 'http://127.0.0.1:52002');
+
+    expect(resolveServerHttpBaseUrl()).toBe('http://127.0.0.1:52002');
+  });
+
   it('keeps HTTP and socket traffic on the persisted active profile when inherited URLs contradict it', async () => {
     const homeDir = join(tmpdir(), `happier-server-http-selection-${process.pid}-${Date.now()}`);
     tempDirs.push(homeDir);
