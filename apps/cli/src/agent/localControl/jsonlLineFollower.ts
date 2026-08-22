@@ -1,3 +1,4 @@
+import type { Stats } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 
@@ -339,7 +340,7 @@ export class JsonlLineFollower {
         };
     }
 
-    private handleFileIdentity(statResult: Awaited<ReturnType<typeof stat>>): boolean {
+    private handleFileIdentity(statResult: Stats): boolean {
         const nextIdentity = { dev: statResult.dev, ino: statResult.ino };
         if (this.fileIdentity && !isSameFileIdentity(this.fileIdentity, nextIdentity)) {
             this.resetReadState('replaced');

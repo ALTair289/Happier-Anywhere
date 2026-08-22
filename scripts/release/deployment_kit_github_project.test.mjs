@@ -351,7 +351,10 @@ test('GitHub project assembly verifies local source receipts but emits a small s
     const agentBytes = Buffer.from('agent archive\n');
     const controllerBytes = Buffer.from('controller archive\n');
     const canonicalPublicKeyBefore = await readFile(CANONICAL_RELEASE_PUBLIC_KEY, 'utf8');
-    assert.equal(sha256(canonicalPublicKeyBefore), 'b4855cafc47de40055e38194bcc26398e028f41ff731806b4a0026b9f8818ca1');
+    assert.equal(
+      sha256(canonicalPublicKeyBefore.replaceAll('\r\n', '\n')),
+      'bed66f82486a23bb89686587f9a58f3245899c412c96f84fdc85a4823ef0cb55',
+    );
     await writeSources(specRoot, agentBytes, controllerBytes);
     await writeFile(join(specRoot, 'kit-spec.json'), `${JSON.stringify(localSpec(agentBytes, controllerBytes))}\n`);
     await writeFile(join(root, 'happier-anywhere.pub'), PROJECT_RELEASE_PUBLIC_KEY);

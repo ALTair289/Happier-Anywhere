@@ -5,6 +5,10 @@ import { createFakeSocket, getSocketHandler } from "../testkit/socketHarness";
 type CheckSessionAccessFn = typeof import("@/app/share/accessControl").checkSessionAccess;
 type RequireAccessLevelFn = typeof import("@/app/share/accessControl").requireAccessLevel;
 type GetSessionParticipantUserIdsFn = typeof import("@/app/share/sessionParticipants").getSessionParticipantUserIds;
+type AccessKeyAccessProof = Readonly<{
+    machine: Readonly<{ revokedAt: Date | null; replacedByMachineId: string | null }>;
+    session: Readonly<{ accountId: string }>;
+}>;
 
 const emitEphemeral = vi.fn();
 const websocketEventsCounterInc = vi.fn();
@@ -55,7 +59,10 @@ vi.mock("@/app/share/sessionParticipants", () => ({
     getSessionParticipantUserIds,
 }));
 
-const accessKeyFindUnique = vi.hoisted(() => vi.fn(async (): Promise<{ machineId: string } | null> => ({ machineId: "m1" })));
+const accessKeyFindUnique = vi.hoisted(() => vi.fn(async (): Promise<AccessKeyAccessProof | null> => ({
+    machine: { revokedAt: null, replacedByMachineId: null },
+    session: { accountId: "u1" },
+})));
 vi.mock("@/storage/db", () => ({
     db: {
         accessKey: {
@@ -117,7 +124,10 @@ describe("sessionUpdateHandler (transcript-stream-segment relay)", () => {
         requireAccessLevel.mockReset();
         getSessionParticipantUserIds.mockReset();
         accessKeyFindUnique.mockReset();
-        accessKeyFindUnique.mockResolvedValue({ machineId: "m1" });
+        accessKeyFindUnique.mockResolvedValue({
+            machine: { revokedAt: null, replacedByMachineId: null },
+            session: { accountId: "u1" },
+        });
         checkSessionAccess.mockImplementation(async (userId, sessionId) => ({
             userId,
             sessionId,

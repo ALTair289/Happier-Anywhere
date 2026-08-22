@@ -1,7 +1,8 @@
+import type { Stats } from 'node:fs';
 import { copyFile, cp, lstat, mkdir, readdir, rename, rm, stat, symlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
-export type ConnectedServiceHomeEntryStat = Awaited<ReturnType<typeof stat>>;
+export type ConnectedServiceHomeEntryStat = Stats;
 
 export async function tryStatConnectedServiceHomeEntry(path: string): Promise<ConnectedServiceHomeEntryStat | null> {
   try {

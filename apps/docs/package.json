@@ -5,6 +5,7 @@
   "scripts": {
     "tsc": "node ../../scripts/workspaces/runTypeScriptCli.mjs",
     "build": "node scripts/build.mjs",
+    "test": "node --test scripts/*.test.mjs",
     "dev": "next dev",
     "start": "next start",
     "types:check": "fumadocs-mdx && next typegen && node ../../scripts/workspaces/runTypeScriptCli.mjs --noEmit",

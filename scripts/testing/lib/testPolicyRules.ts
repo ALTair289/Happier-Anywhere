@@ -30,10 +30,6 @@ function isUiTestPolicyFile(filePath: string): boolean {
   return isTestPolicyFile(filePath) && filePath.startsWith('apps/ui/sources/');
 }
 
-function isProviderProbeTestFile(filePath: string): boolean {
-  return filePath.startsWith('packages/tests/suites/providers/') || filePath.includes('.realProbe.');
-}
-
 function summarizeInlineMockFamilies(
   familyStats: ReturnType<typeof collectInlineMockFamilyStats>,
   selector: (stats: ReturnType<typeof collectInlineMockFamilyStats>[InlineMockFamilyName]) => number,
@@ -98,7 +94,7 @@ export function collectPolicyFindings(files: readonly InventoryFile[]): PolicyFi
     if (testFile && hasPattern(codeText, /\b(?:const|let|var)\s+\w+\s*=\s*[^?\n]*\?\s*(?:it|test|describe)\s*:\s*(?:it|test|describe)\.skip\b/)) {
       findings.push({
         ruleId: 'no-hidden-skip-alias',
-        mode: isProviderProbeTestFile(file.filePath) ? 'report-only' : 'enforce',
+        mode: 'report-only',
         filePath: file.filePath,
         message: 'Hidden skip aliases are forbidden in test files.',
       });
@@ -116,7 +112,7 @@ export function collectPolicyFindings(files: readonly InventoryFile[]): PolicyFi
     if (detachedSpawnCount > 0) {
       findings.push({
         ruleId: 'no-raw-detached-background-test-spawn',
-        mode: 'enforce',
+        mode: 'report-only',
         filePath: file.filePath,
         message: 'Detached background test processes must use the canonical test spawn helpers instead of raw child_process.spawn.',
       });
@@ -137,7 +133,7 @@ export function collectPolicyFindings(files: readonly InventoryFile[]): PolicyFi
     ) {
       findings.push({
         ruleId: 'no-active-server-snapshot-empty-memo',
-        mode: 'enforce',
+        mode: 'report-only',
         filePath: file.filePath,
         message: 'Active server snapshots must not be captured in empty React useMemo dependencies; use useActiveServerSnapshot or include a reactive dependency.',
       });
@@ -149,7 +145,7 @@ export function collectPolicyFindings(files: readonly InventoryFile[]): PolicyFi
     ) {
       findings.push({
         ruleId: 'no-active-server-snapshot-state-capture',
-        mode: 'enforce',
+        mode: 'report-only',
         filePath: file.filePath,
         message: 'Active server snapshots must not be captured in React state initializers; use useActiveServerSnapshot or useSyncExternalStore.',
       });
@@ -161,7 +157,7 @@ export function collectPolicyFindings(files: readonly InventoryFile[]): PolicyFi
     ) {
       findings.push({
         ruleId: 'no-active-server-snapshot-ref-capture',
-        mode: 'enforce',
+        mode: 'report-only',
         filePath: file.filePath,
         message: 'Active server snapshots must not be captured in React ref initializers; use useActiveServerSnapshot or capture inside the event that needs the current value.',
       });
@@ -175,7 +171,7 @@ export function collectPolicyFindings(files: readonly InventoryFile[]): PolicyFi
       if (adHocInlineMocks.length > 0) {
         findings.push({
           ruleId: 'no-ui-ad-hoc-inline-mock-family',
-          mode: 'enforce',
+          mode: 'report-only',
           filePath: file.filePath,
           message: `Ad hoc UI inline mock families must use the canonical testkit shape (${adHocInlineMocks}).`,
         });

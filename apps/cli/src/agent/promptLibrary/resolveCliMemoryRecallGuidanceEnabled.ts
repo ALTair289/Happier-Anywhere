@@ -1,5 +1,6 @@
 import { isActionEnabledByEnv } from '@/settings/actionsSettings';
 import { resolveMemoryIndexPaths } from '@/daemon/memory/memoryIndexPaths';
+import type { Stats } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import {
   isMemoryRecallGuidanceSupported,
@@ -7,7 +8,7 @@ import {
   type MemorySettingsV1,
 } from '@happier-dev/protocol';
 
-type MemoryRecallIndexStat = Readonly<Pick<Awaited<ReturnType<typeof stat>>, 'size'>>;
+type MemoryRecallIndexStat = Readonly<Pick<Stats, 'size'>>;
 type MemoryRecallIndexStatReader = (path: string) => Promise<MemoryRecallIndexStat>;
 
 export async function resolveCliMemoryRecallGuidanceEnabled(args?: Readonly<{

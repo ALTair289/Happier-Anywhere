@@ -9,7 +9,7 @@ function createPackageJsonText(): string {
       scripts: {
         test: 'yarn -s test:unit',
         'test:import-cycles': 'yarn workspace @happier-dev/cli test:import-cycles',
-        'test:unit': 'yarn workspace privacy-kit test && yarn workspace @happier-dev/protocol test && yarn workspace @happier-dev/transfers test && yarn workspace @happier-dev/agents test && yarn workspace @happier-dev/cli-common test && yarn workspace @happier-dev/connection-supervisor test && yarn workspace @happier-dev/bootstrap test && yarn workspace @happier-dev/app test && yarn workspace @happier-dev/cli test:unit && yarn --cwd apps/server test:unit && yarn --cwd packages/relay-server test && yarn --cwd apps/stack test:unit',
+        'test:unit': 'yarn --cwd apps/docs test && yarn workspace privacy-kit test && yarn workspace @happier-dev/protocol test && yarn workspace @happier-dev/transfers test && yarn workspace @happier-dev/agents test && yarn workspace @happier-dev/cli-common test && yarn workspace @happier-dev/connection-supervisor test && yarn workspace @happier-dev/bootstrap test && yarn workspace @happier-dev/app test && yarn workspace @happier-dev/sherpa-native test && yarn workspace @happier-dev/cli test:unit && yarn --cwd apps/server test:unit && yarn --cwd packages/relay-server test && yarn --cwd apps/stack test:unit',
         'test:integration': 'yarn workspace @happier-dev/app test:integration && yarn workspace @happier-dev/cli test:integration && yarn --cwd apps/server test:integration && yarn --cwd apps/stack test:integration',
         'test:e2e:core:fast': 'yarn workspace @happier-dev/tests test:core:fast',
         'test:e2e:core:slow': 'yarn workspace @happier-dev/tests test:core:slow',
@@ -38,6 +38,7 @@ function createWorkflowText(): string {
 jobs:
   testing:
     steps:
+      - run: yarn --cwd apps/docs test
       - run: yarn workspace privacy-kit test
       - run: yarn workspace @happier-dev/protocol test
       - run: yarn workspace @happier-dev/transfers test
@@ -47,7 +48,9 @@ jobs:
       - run: yarn workspace @happier-dev/bootstrap test
       - run: yarn workspace @happier-dev/app test:unit
       - run: yarn workspace @happier-dev/app test:integration
-      - run: yarn workspace @happier-dev/cli test:unit
+      - run: yarn workspace @happier-dev/sherpa-native test
+      - run: yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --shard=1/3
+      - run: yarn workspace @happier-dev/cli test:import-cycles
       - run: yarn workspace @happier-dev/cli test:integration
       - run: yarn --cwd apps/server test:unit
       - run: yarn --cwd apps/server test:integration

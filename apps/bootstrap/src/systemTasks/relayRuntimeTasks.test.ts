@@ -63,6 +63,13 @@ const next = (() => {
     if (remoteCommand.includes('printf') && remoteCommand.includes('$HOME')) {
         return { status: 0, stdout: '/home/test\\n', stderr: '' };
     }
+    if (remoteCommand.includes('relay host install') && remoteCommand.includes('--json')) {
+        return {
+            status: 0,
+            stdout: '{"ok":true,"kind":"relay_host_install","data":{"relayUrl":"http://127.0.0.1:3005","mode":"user"}}\\n',
+            stderr: '',
+        };
+    }
     if (remoteCommand.includes('--property=LoadState,ActiveState')) {
         return { status: 0, stdout: 'LoadState=not-found\\nActiveState=inactive\\n', stderr: '' };
     }

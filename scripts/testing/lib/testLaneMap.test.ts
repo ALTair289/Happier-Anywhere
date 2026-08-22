@@ -9,9 +9,13 @@ test('classifies representative lane paths', () => {
   assert.equal(classifyTestFile('apps/ui/sources/screens/home.integration.test.tsx'), 'test:integration');
   assert.equal(classifyTestFile('apps/cli/src/run.slow.test.ts'), 'cli:test:slow');
   assert.equal(classifyTestFile('apps/website/tests/index.release.test.js'), 'website:test');
+  assert.equal(classifyTestFile('apps/docs/scripts/build.test.mjs'), 'test');
   assert.equal(classifyTestFile('apps/server/sources/app/db.dbcontract.spec.ts'), 'test:db-contract:docker');
+  assert.equal(classifyTestFile('packages/privacy-kit/src/modules/crypto/deriveKey.test.ts'), 'test');
   assert.equal(classifyTestFile('packages/protocol/src/example.test.ts'), 'test');
+  assert.equal(classifyTestFile('packages/sherpa-native/scripts/resolve-sherpa-checksum.test.mjs'), 'test');
   assert.equal(classifyTestFile('packages/release-runtime/tests/http.test.mjs'), 'release-runtime:test');
+  assert.equal(classifyTestFile('packages/tests/suites/contracts/runtimeActivityProjection.test.ts'), 'test:e2e:core:fast');
   assert.equal(classifyTestFile('packages/tests/suites/core-e2e/login.test.ts'), 'test:e2e:core:fast');
   assert.equal(classifyTestFile('packages/tests/suites/core-e2e/login.slow.e2e.test.ts'), 'test:e2e:core:slow');
   assert.equal(classifyTestFile('packages/tests/suites/ui-e2e/login.spec.ts'), 'test:e2e:ui');

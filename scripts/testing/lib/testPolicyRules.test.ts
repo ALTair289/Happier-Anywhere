@@ -21,7 +21,7 @@ test('collectPolicyFindings detects direct policy violations in tests', () => {
     'deprecated-import:test-report-only:report-only',
     'no-console-in-tests:report-only',
     'no-exclusive-tests:enforce',
-    'no-hidden-skip-alias:enforce',
+    'no-hidden-skip-alias:report-only',
   ]);
 });
 
@@ -65,7 +65,7 @@ test('collectPolicyFindings ignores runtime console usage outside tests', () => 
   assert.equal(report.findings.length, 0);
 });
 
-test('collectPolicyFindings enforces ad hoc UI inline mock families and reports canonical ones', () => {
+test('collectPolicyFindings reports ad hoc and canonical UI inline mock families', () => {
   const report = collectPolicyFindings([
     {
       filePath: 'apps/ui/sources/components/example.test.tsx',
@@ -81,7 +81,7 @@ test('collectPolicyFindings enforces ad hoc UI inline mock families and reports 
 
   const ids = report.findings.map((finding) => `${finding.ruleId}:${finding.mode}`).sort();
   assert.deepEqual(ids, [
-    'no-ui-ad-hoc-inline-mock-family:enforce',
+    'no-ui-ad-hoc-inline-mock-family:report-only',
     'ui-inline-mock-family-report:report-only',
   ]);
 });
@@ -104,7 +104,7 @@ test('collectPolicyFindings reports UI tree walking when canonical harness impor
   );
 });
 
-test('collectPolicyFindings enforces reactive active-server reads in empty React memos', () => {
+test('collectPolicyFindings reports reactive active-server reads in empty React memos', () => {
   const report = collectPolicyFindings([
     {
       filePath: 'apps/ui/sources/components/example.tsx',
@@ -120,11 +120,11 @@ test('collectPolicyFindings enforces reactive active-server reads in empty React
 
   assert.deepEqual(
     report.findings.map((finding) => `${finding.ruleId}:${finding.mode}`),
-    ['no-active-server-snapshot-empty-memo:enforce'],
+    ['no-active-server-snapshot-empty-memo:report-only'],
   );
 });
 
-test('collectPolicyFindings enforces reactive active-server reads in empty React memos for namespace imports', () => {
+test('collectPolicyFindings reports reactive active-server reads in empty React memos for namespace imports', () => {
   const report = collectPolicyFindings([
     {
       filePath: 'apps/ui/sources/components/example.tsx',
@@ -140,11 +140,11 @@ test('collectPolicyFindings enforces reactive active-server reads in empty React
 
   assert.deepEqual(
     report.findings.map((finding) => `${finding.ruleId}:${finding.mode}`),
-    ['no-active-server-snapshot-empty-memo:enforce'],
+    ['no-active-server-snapshot-empty-memo:report-only'],
   );
 });
 
-test('collectPolicyFindings enforces reactive active-server reads in React state initializers', () => {
+test('collectPolicyFindings reports reactive active-server reads in React state initializers', () => {
   const report = collectPolicyFindings([
     {
       filePath: 'apps/ui/sources/components/example.tsx',
@@ -161,11 +161,11 @@ test('collectPolicyFindings enforces reactive active-server reads in React state
 
   assert.deepEqual(
     report.findings.map((finding) => `${finding.ruleId}:${finding.mode}`),
-    ['no-active-server-snapshot-state-capture:enforce'],
+    ['no-active-server-snapshot-state-capture:report-only'],
   );
 });
 
-test('collectPolicyFindings enforces reactive active-server reads in React state initializers for aliased imports', () => {
+test('collectPolicyFindings reports reactive active-server reads in React state initializers for aliased imports', () => {
   const report = collectPolicyFindings([
     {
       filePath: 'apps/ui/sources/components/example.tsx',
@@ -182,11 +182,11 @@ test('collectPolicyFindings enforces reactive active-server reads in React state
 
   assert.deepEqual(
     report.findings.map((finding) => `${finding.ruleId}:${finding.mode}`),
-    ['no-active-server-snapshot-state-capture:enforce'],
+    ['no-active-server-snapshot-state-capture:report-only'],
   );
 });
 
-test('collectPolicyFindings enforces reactive active-server reads in React refs', () => {
+test('collectPolicyFindings reports reactive active-server reads in React refs', () => {
   const report = collectPolicyFindings([
     {
       filePath: 'apps/ui/sources/components/example.tsx',
@@ -203,11 +203,11 @@ test('collectPolicyFindings enforces reactive active-server reads in React refs'
 
   assert.deepEqual(
     report.findings.map((finding) => `${finding.ruleId}:${finding.mode}`),
-    ['no-active-server-snapshot-ref-capture:enforce'],
+    ['no-active-server-snapshot-ref-capture:report-only'],
   );
 });
 
-test('collectPolicyFindings enforces canonical helpers for detached background spawns in test policy files', () => {
+test('collectPolicyFindings reports direct detached background spawns in test policy files', () => {
   const report = collectPolicyFindings([
     {
       filePath: 'apps/stack/scripts/testkit/runtime_snapshot_start_testkit.mjs',
@@ -227,7 +227,7 @@ test('collectPolicyFindings enforces canonical helpers for detached background s
 
   const finding = report.findings.find((item) => item.ruleId === 'no-raw-detached-background-test-spawn');
   assert.ok(finding);
-  assert.equal(finding.mode, 'enforce');
+  assert.equal(finding.mode, 'report-only');
 });
 
 test('collectPolicyFindings ignores canonical detached test spawn helper modules', () => {

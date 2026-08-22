@@ -199,7 +199,7 @@ Notes:
 - `test:inventory` and `test:migration:inventory` are report-only. They print lane/package-local coverage and write governance inventory artifacts under `.project/testing/reports/governance/`.
 - The current rollout is:
   - `enforce`: `.only`, forbidden runtime imports from `@happier-dev/tests` internals, root-script/workflow/docs parity
-  - `report-only`: direct test `console.*`, direct `.skip/.todo`, hidden skip aliases, deprecated helper imports, duplicate-pattern inventory
+  - `report-only`: direct test `console.*`, direct `.skip/.todo`, hidden skip aliases, raw detached background spawns, active-server snapshot captures, ad hoc UI inline mock families, deprecated helper imports, duplicate-pattern inventory
 
 ### 7b) Package-local-only lanes
 
