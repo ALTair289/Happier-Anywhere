@@ -299,7 +299,8 @@ describe('installOrUpdateRelayRuntimeDefault', () => {
 
             const remoteCommands = fakeSsh.readInvocations().map((args) => args.join(' ')).join('\n');
             expect(remoteCommands).not.toContain('hstack');
-            expect(remoteCommands).not.toContain("'$HOME/");
+            expect(remoteCommands).toContain('$HOME/.happier/cli/current/happier relay host install');
+            expect(remoteCommands).toContain('--json');
         } finally {
             fakeSsh.cleanup();
         }

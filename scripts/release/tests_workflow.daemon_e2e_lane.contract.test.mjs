@@ -18,6 +18,48 @@ test('tests workflow runs for pushes to the integration branch', async () => {
   );
 });
 
+test('tests workflow bounds CLI unit test memory with eight isolated shards', async () => {
+  const raw = await readFile(join(repoRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
+
+  for (let shard = 1; shard <= 8; shard += 1) {
+    assert.match(
+      raw,
+      new RegExp(
+        `yarn workspace @happier-dev/cli vitest run --config vitest\\.config\\.ts --no-file-parallelism --shard=${shard}/8`,
+      ),
+      `tests.yml should run CLI unit shard ${shard}/8 in its own bounded process`,
+    );
+  }
+
+  assert.doesNotMatch(
+    raw,
+    /--shard=[123]\/3/,
+    'tests.yml should not retain the three oversized CLI unit shards',
+  );
+});
+
+test('tests workflow gives large server, CLI, and stack suites enough time to finish', async () => {
+  const raw = await readFile(join(repoRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
+  const lanes = [
+    { name: 'server', next: 'server-db-contract' },
+    { name: 'cli', next: 'stack' },
+    { name: 'stack', next: 'release-contracts' },
+  ];
+
+  for (const lane of lanes) {
+    const start = raw.indexOf(`\n  ${lane.name}:`);
+    const end = raw.indexOf(`\n  ${lane.next}:`, start + 1);
+
+    assert.notEqual(start, -1, `tests.yml should define the ${lane.name} job`);
+    assert.notEqual(end, -1, `tests.yml should define the ${lane.next} job after ${lane.name}`);
+    assert.match(
+      raw.slice(start, end),
+      /timeout-minutes:\s*45/,
+      `tests.yml ${lane.name} job should allow dependency installation and its full test suite to finish`,
+    );
+  }
+});
+
 test('tests workflow runs daemon integration suite on the integration lane', async () => {
   const raw = await readFile(join(repoRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
 
