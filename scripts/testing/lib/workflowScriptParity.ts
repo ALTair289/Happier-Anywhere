@@ -46,7 +46,7 @@ const CANONICAL_LANE_PARITY: readonly ParityDefinition[] = Object.freeze([
       'yarn workspace @happier-dev/bootstrap test',
       'yarn workspace @happier-dev/app test:unit',
       'yarn workspace @happier-dev/sherpa-native test',
-      'yarn workspace @happier-dev/cli vitest run --config vitest.config.ts',
+      'yarn workspace @happier-dev/cli test:unit:vitest',
       'yarn --cwd apps/server test:unit',
       'yarn --cwd packages/relay-server test',
       'yarn --cwd apps/stack test:unit',

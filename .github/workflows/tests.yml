@@ -717,14 +717,7 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=4096
         run: |
-          yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --no-file-parallelism --shard=1/8
-          yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --no-file-parallelism --shard=2/8
-          yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --no-file-parallelism --shard=3/8
-          yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --no-file-parallelism --shard=4/8
-          yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --no-file-parallelism --shard=5/8
-          yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --no-file-parallelism --shard=6/8
-          yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --no-file-parallelism --shard=7/8
-          yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --no-file-parallelism --shard=8/8
+          yarn workspace @happier-dev/cli test:unit:vitest
           yarn workspace @happier-dev/cli test:import-cycles
 
       - name: Run integration tests

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveVitestConfigPath, resolveVitestShardCount } from '../runVitestShards.mjs';
+import {
+  buildVitestShardRunArgs,
+  parseVitestListJson,
+  partitionVitestFilesIntoShards,
+  resolveVitestConfigPath,
+  resolveVitestShardCount,
+} from '../runVitestShards.mjs';
 
 describe('runVitestShards', () => {
   it('defaults shard count to 8', () => {
@@ -24,6 +30,35 @@ describe('runVitestShards', () => {
 
   it('returns null when --config is missing', () => {
     expect(resolveVitestConfigPath(['node', 'run'])).toBe(null);
+  });
+
+  it('parses Vitest file-list JSON without retaining unrelated fields', () => {
+    expect(parseVitestListJson(JSON.stringify([
+      { file: '/repo/src/b.test.ts', projectName: '' },
+      { file: '/repo/src/a.test.ts', projectName: '' },
+      { projectName: 'missing-file' },
+    ]))).toEqual(['/repo/src/b.test.ts', '/repo/src/a.test.ts']);
+  });
+
+  it('partitions explicit files deterministically across bounded processes', () => {
+    expect(partitionVitestFilesIntoShards(['d', 'b', 'a', 'c'], 2)).toEqual([
+      ['a', 'c'],
+      ['b', 'd'],
+    ]);
+  });
+
+  it('runs only the explicit files assigned to a shard', () => {
+    expect(buildVitestShardRunArgs({
+      configPath: 'vitest.config.ts',
+      files: ['/repo/src/a.test.ts', '/repo/src/b.test.ts'],
+    })).toEqual([
+      'run',
+      '--config',
+      'vitest.config.ts',
+      '--no-file-parallelism',
+      '/repo/src/a.test.ts',
+      '/repo/src/b.test.ts',
+    ]);
   });
 });
 

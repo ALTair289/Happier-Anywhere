@@ -18,23 +18,26 @@ test('tests workflow runs for pushes to the integration branch', async () => {
   );
 });
 
-test('tests workflow bounds CLI unit test memory with eight isolated shards', async () => {
+test('tests workflow bounds CLI unit test memory with explicit-file shards', async () => {
   const raw = await readFile(join(repoRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
+  const cliPackage = JSON.parse(
+    await readFile(join(repoRoot, 'apps', 'cli', 'package.json'), 'utf8'),
+  );
 
-  for (let shard = 1; shard <= 8; shard += 1) {
-    assert.match(
-      raw,
-      new RegExp(
-        `yarn workspace @happier-dev/cli vitest run --config vitest\\.config\\.ts --no-file-parallelism --shard=${shard}/8`,
-      ),
-      `tests.yml should run CLI unit shard ${shard}/8 in its own bounded process`,
-    );
-  }
-
+  assert.match(
+    raw,
+    /yarn workspace @happier-dev\/cli test:unit:vitest/,
+    'tests.yml should run the canonical sharded CLI unit script',
+  );
+  assert.match(
+    cliPackage.scripts['test:unit:vitest'],
+    /HAPPIER_CLI_VITEST_SHARDS=64 node scripts\/runVitestShards\.mjs --config vitest\.config\.ts/,
+    'CLI unit tests should run in explicit-file batches small enough to bound collection memory',
+  );
   assert.doesNotMatch(
     raw,
-    /--shard=[123]\/3/,
-    'tests.yml should not retain the three oversized CLI unit shards',
+    /@happier-dev\/cli vitest run[^\n]*--shard=/,
+    'tests.yml should not use Vitest native sharding, which still builds an oversized collection',
   );
 });
 

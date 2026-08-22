@@ -49,7 +49,7 @@ jobs:
       - run: yarn workspace @happier-dev/app test:unit
       - run: yarn workspace @happier-dev/app test:integration
       - run: yarn workspace @happier-dev/sherpa-native test
-      - run: yarn workspace @happier-dev/cli vitest run --config vitest.config.ts --shard=1/3
+      - run: yarn workspace @happier-dev/cli test:unit:vitest
       - run: yarn workspace @happier-dev/cli test:import-cycles
       - run: yarn workspace @happier-dev/cli test:integration
       - run: yarn --cwd apps/server test:unit

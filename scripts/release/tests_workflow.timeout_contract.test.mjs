@@ -6,7 +6,8 @@ import { join } from 'node:path';
 const repoRoot = join(import.meta.dirname, '..', '..');
 
 function extractJobBlock(raw, jobName) {
-  const match = raw.match(new RegExp(`(?:^|\\n)  ${jobName}:\\n([\\s\\S]*?)(?=\\n  [A-Za-z0-9-]+:|\\n$)`));
+  const normalized = raw.replace(/\r\n/g, '\n');
+  const match = normalized.match(new RegExp(`(?:^|\\n)  ${jobName}:\\n([\\s\\S]*?)(?=\\n  [A-Za-z0-9-]+:|\\n$)`));
   assert.ok(match, `expected to find job block for ${jobName}`);
   return match[1];
 }
@@ -32,7 +33,7 @@ test('tests workflow keeps slow CI jobs above the observed timeout floor', async
 
   assert.match(
     stackJob,
-    /name:\s*Stack Tests \(unit \+ integration\)[\s\S]*?timeout-minutes:\s*20\b/,
+    /name:\s*Stack Tests \(unit \+ integration\)[\s\S]*?timeout-minutes:\s*45\b/,
     'Stack Tests job should reserve enough time to finish on GitHub-hosted runners',
   );
 
