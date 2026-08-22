@@ -31,7 +31,7 @@ test('tests workflow bounds CLI unit test memory with explicit-file shards', asy
   );
   assert.match(
     cliPackage.scripts['test:unit:vitest'],
-    /HAPPIER_CLI_VITEST_SHARDS=64 node scripts\/runVitestShards\.mjs --config vitest\.config\.ts/,
+    /HAPPIER_CLI_VITEST_SHARDS=64 HAPPIER_CLI_VITEST_MAX_WORKERS=2 node scripts\/runVitestShards\.mjs --config vitest\.config\.ts/,
     'CLI unit tests should run in explicit-file batches small enough to bound collection memory',
   );
   assert.doesNotMatch(
@@ -44,9 +44,9 @@ test('tests workflow bounds CLI unit test memory with explicit-file shards', asy
 test('tests workflow gives large server, CLI, and stack suites enough time to finish', async () => {
   const raw = await readFile(join(repoRoot, '.github', 'workflows', 'tests.yml'), 'utf8');
   const lanes = [
-    { name: 'server', next: 'server-db-contract' },
-    { name: 'cli', next: 'stack' },
-    { name: 'stack', next: 'release-contracts' },
+    { name: 'server', next: 'server-db-contract', timeoutMinutes: 45 },
+    { name: 'cli', next: 'stack', timeoutMinutes: 90 },
+    { name: 'stack', next: 'release-contracts', timeoutMinutes: 45 },
   ];
 
   for (const lane of lanes) {
@@ -57,7 +57,7 @@ test('tests workflow gives large server, CLI, and stack suites enough time to fi
     assert.notEqual(end, -1, `tests.yml should define the ${lane.next} job after ${lane.name}`);
     assert.match(
       raw.slice(start, end),
-      /timeout-minutes:\s*45/,
+      new RegExp(`timeout-minutes:\\s*${lane.timeoutMinutes}`),
       `tests.yml ${lane.name} job should allow dependency installation and its full test suite to finish`,
     );
   }

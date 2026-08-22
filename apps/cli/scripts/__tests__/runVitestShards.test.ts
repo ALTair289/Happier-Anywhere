@@ -5,6 +5,7 @@ import {
   parseVitestListJson,
   partitionVitestFilesIntoShards,
   resolveVitestConfigPath,
+  resolveVitestMaxWorkers,
   resolveVitestShardCount,
 } from '../runVitestShards.mjs';
 
@@ -30,6 +31,12 @@ describe('runVitestShards', () => {
 
   it('returns null when --config is missing', () => {
     expect(resolveVitestConfigPath(['node', 'run'])).toBe(null);
+  });
+
+  it('uses one worker by default and accepts a bounded worker override', () => {
+    expect(resolveVitestMaxWorkers({})).toBe(1);
+    expect(resolveVitestMaxWorkers({ HAPPIER_CLI_VITEST_MAX_WORKERS: '2' })).toBe(2);
+    expect(resolveVitestMaxWorkers({ HAPPIER_CLI_VITEST_MAX_WORKERS: '0' })).toBe(1);
   });
 
   it('parses Vitest file-list JSON without retaining unrelated fields', () => {
@@ -58,6 +65,20 @@ describe('runVitestShards', () => {
       '--no-file-parallelism',
       '/repo/src/a.test.ts',
       '/repo/src/b.test.ts',
+    ]);
+  });
+
+  it('caps file-level parallelism when a shard opts into multiple workers', () => {
+    expect(buildVitestShardRunArgs({
+      configPath: 'vitest.config.ts',
+      files: ['/repo/src/a.test.ts'],
+      maxWorkers: 2,
+    })).toEqual([
+      'run',
+      '--config',
+      'vitest.config.ts',
+      '--maxWorkers=2',
+      '/repo/src/a.test.ts',
     ]);
   });
 });

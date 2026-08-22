@@ -17,6 +17,11 @@ export function resolveVitestShardCount(env) {
   return override ?? 8;
 }
 
+export function resolveVitestMaxWorkers(env) {
+  const override = parsePositiveInt(env?.HAPPIER_CLI_VITEST_MAX_WORKERS);
+  return override ?? 1;
+}
+
 export function resolveVitestConfigPath(argv) {
   const idx = argv.indexOf('--config');
   if (idx === -1) return null;
@@ -45,8 +50,11 @@ export function partitionVitestFilesIntoShards(files, shardCount) {
   return buckets;
 }
 
-export function buildVitestShardRunArgs({ configPath, files }) {
-  return ['run', '--config', configPath, '--no-file-parallelism', ...(files ?? [])];
+export function buildVitestShardRunArgs({ configPath, files, maxWorkers = 1 }) {
+  const schedulingArgs = maxWorkers > 1
+    ? [`--maxWorkers=${maxWorkers}`]
+    : ['--no-file-parallelism'];
+  return ['run', '--config', configPath, ...schedulingArgs, ...(files ?? [])];
 }
 
 async function resolveVitestTestFiles({ configPath, nodeOptions }) {
@@ -89,10 +97,10 @@ async function resolveVitestTestFiles({ configPath, nodeOptions }) {
   }
 }
 
-function spawnVitestRun({ configPath, files, nodeOptions }) {
+function spawnVitestRun({ configPath, files, maxWorkers, nodeOptions }) {
   return runManagedChildCommand({
     command: 'vitest',
-    args: buildVitestShardRunArgs({ configPath, files }),
+    args: buildVitestShardRunArgs({ configPath, files, maxWorkers }),
     spawnOptions: {
       env: {
         ...process.env,
@@ -117,6 +125,7 @@ async function main(argv) {
   }
 
   const shardCount = resolveVitestShardCount(process.env);
+  const maxWorkers = resolveVitestMaxWorkers(process.env);
   const sizeMb = resolveMaxOldSpaceSizeMb(process.env);
   const nodeOptions = upsertMaxOldSpaceSize(process.env.NODE_OPTIONS, sizeMb);
   const allFiles = await resolveVitestTestFiles({ configPath, nodeOptions });
@@ -128,12 +137,14 @@ async function main(argv) {
   }
   const shardFiles = partitionVitestFilesIntoShards(allFiles, shardCount);
 
+  let failedShardCount = 0;
+  let firstFailureExitCode = 0;
   for (let index = 1; index <= shardCount; index += 1) {
     const files = shardFiles[index - 1] ?? [];
     if (files.length === 0) continue;
     // eslint-disable-next-line no-console
     console.log(`[vitest] shard ${index}/${shardCount} (${files.length} files)`);
-    const result = await spawnVitestRun({ configPath, files, nodeOptions });
+    const result = await spawnVitestRun({ configPath, files, maxWorkers, nodeOptions });
     if (!result.ok) {
       throw result.error;
     }
@@ -142,8 +153,17 @@ async function main(argv) {
       return;
     }
     if (result.code && result.code !== 0) {
-      process.exit(result.code);
+      failedShardCount += 1;
+      firstFailureExitCode ||= result.code;
+      // eslint-disable-next-line no-console
+      console.error(`[vitest] shard ${index}/${shardCount} failed with exit ${result.code}; continuing`);
     }
+  }
+
+  if (failedShardCount > 0) {
+    // eslint-disable-next-line no-console
+    console.error(`[vitest] ${failedShardCount}/${shardCount} shard(s) failed`);
+    process.exit(firstFailureExitCode || 1);
   }
 }
 
