@@ -157,7 +157,13 @@ test.describe('ui e2e: custom theme profiles', () => {
     await openThemeProfiles({ page, uiBaseUrl });
     await expectVisibleTestId(page, `settings-theme-profile-custom-${profileId}`);
 
-    await (await expectVisibleTestId(page, 'settings-theme-profile-export')).click();
+    await gotoDomContentLoadedWithRetries(
+      page,
+      `${uiBaseUrl}/settings/appearance/themes/${encodeURIComponent(profileId)}?happier_hmr=0`,
+      180_000,
+    );
+    await expectVisibleTestId(page, 'settings-theme-profile-editor');
+    await (await expectVisibleTestId(page, `settings-theme-profile-export-${profileId}`)).click();
     await expectVisibleTestId(page, 'settings-theme-profile-export-screen');
     const exportedJson = await readInputValue(await expectVisibleTestId(page, 'settings-theme-profile-export-json'));
     expect(JSON.parse(exportedJson)).toMatchObject({

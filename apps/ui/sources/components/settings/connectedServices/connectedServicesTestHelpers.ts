@@ -53,8 +53,9 @@ export function resetConnectedServicesCommonModuleMockState() {
  *   `<SvgXml>` (AccountBlock + PoolsList).
  * - `Avatar`: the PoolsList member stack dynamically requires
  *   `@/agents/registry/registryUi`, which the Node test runtime cannot resolve.
- * - `Icon`: the native icon package contains Flow-only syntax that Node cannot
- *   parse in these controller tests.
+ * - `Icon`: keeps the shared icon seam as an inspectable host element.
+ * - `react-native-gesture-handler`: AccountBlockView mounts GestureDetector;
+ *   loading the native package in Node reaches Flow-only React Native syntax.
  *
  * Call this AT MODULE SCOPE (alongside `installConnectedServicesCommonModuleMocks`).
  */
@@ -93,6 +94,11 @@ export function installConnectedServiceDetailShellMocks() {
                 React.createElement('Svg', props, props.children),
             Circle: (props: Record<string, unknown>) => React.createElement('Circle', props, null),
         };
+    });
+
+    vi.mock('react-native-gesture-handler', async () => {
+        const { createGestureHandlerMock } = await import('@/dev/testkit/mocks/gestureHandler');
+        return createGestureHandlerMock();
     });
 
     vi.mock('@/components/ui/avatar/Avatar', () => {

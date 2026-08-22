@@ -3256,6 +3256,7 @@ describe('ChatList (FlashList v2)', () => {
                 <ChatList session={{ ...sessionState, id: activeSessionId }} onViewportChange={onViewportChange} />,
             );
             await primeFlashListMetrics(100, 1000, { turns: 4 });
+            await settleNativeFlashListMount(firstA);
             scrollToOffset.mockClear();
             onViewportChange.mockClear();
 
@@ -3282,6 +3283,7 @@ describe('ChatList (FlashList v2)', () => {
                     <ChatList session={{ ...sessionState, id: activeSessionId }} onViewportChange={onViewportChange} />,
                 );
                 await primeFlashListMetrics(100, 1000, { turns: 2 });
+                await settleNativeFlashListMount(interveningScreen);
                 unmountTrackedFlashListChatList(interveningScreen);
             }
 
@@ -3289,10 +3291,11 @@ describe('ChatList (FlashList v2)', () => {
             telemetrySink.mockClear();
             activeSessionId = 'session-a';
             sessionMessagesState = { isLoaded: true, messages: messagesForSession(activeSessionId) };
-            await renderTrackedFlashListChatList(
+            const restoredA = await renderTrackedFlashListChatList(
                 <ChatList session={{ ...sessionState, id: activeSessionId }} onViewportChange={onViewportChange} />,
             );
             await primeFlashListMetrics(100, 1000, { turns: 4 });
+            await settleNativeFlashListMount(restoredA);
 
             expect(scrollToOffset).toHaveBeenLastCalledWith({ offset: 500, animated: false });
             expect(sessionViewportByIdState.get('session-a')).toMatchObject({
@@ -12955,6 +12958,7 @@ describe('ChatList (FlashList v2)', () => {
             await act(async () => {
                 jumpButton?.props.onPress();
             });
+            await screen.settle({ cycles: 1, turns: 1 });
 
             // The canonical inverted explicit jump targets the visual bottom via rendered index 0,
             // never through stale contentHeight math.

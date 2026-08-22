@@ -472,7 +472,7 @@ jobs:
 
       - name: Run unit tests
         env:
-          HAPPIER_UI_VITEST_SHARDS: "24"
+          HAPPIER_UI_VITEST_SHARDS: "48"
           HAPPIER_UI_VITEST_OUTER_SHARD: "${{ matrix.shard }}/4"
         run: yarn workspace @happier-dev/app test:unit
 
@@ -728,19 +728,22 @@ jobs:
             sed -i 's/^DEBUG=.*/DEBUG=/' apps/cli/.env.integration-test
           fi
 
+      # The unit suite intentionally uses the same integration-test env and can
+      # leave state in its fixed /tmp home. Exercise integration on the clean
+      # runner before the 100 isolated unit child processes touch that home.
+      - name: Run integration tests
+        if: matrix.shard == 1
+        run: yarn workspace @happier-dev/cli test:integration
+
       - name: Run unit tests and import-cycle guard
         env:
-          NODE_OPTIONS: --max-old-space-size=4096
+          NODE_OPTIONS: --max-old-space-size=8192
           HAPPIER_CLI_VITEST_OUTER_SHARD: "${{ matrix.shard }}/4"
         run: |
           yarn workspace @happier-dev/cli test:unit:vitest
           if [ "${{ matrix.shard }}" = "1" ]; then
             yarn workspace @happier-dev/cli test:import-cycles
           fi
-
-      - name: Run integration tests
-        if: matrix.shard == 1
-        run: yarn workspace @happier-dev/cli test:integration
 
   stack:
     if: ${{ (github.event_name != 'workflow_dispatch' && github.event_name != 'workflow_call') || inputs.run_stack }}

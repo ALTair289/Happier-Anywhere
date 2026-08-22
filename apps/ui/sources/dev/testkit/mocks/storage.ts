@@ -315,6 +315,7 @@ function createStorageStateSnapshot(state: Partial<StorageState>): StorageState 
         sessions: {},
         sessionListRenderables: {},
         sessionMessages: {},
+        sessionPending: {},
         profile: testkitProfileDefaults,
         machines: {},
         machineDisplayById: {},

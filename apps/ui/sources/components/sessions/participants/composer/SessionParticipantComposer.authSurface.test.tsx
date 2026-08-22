@@ -103,9 +103,6 @@ vi.mock('@/voice/context/voiceHooks', () => ({
     },
 }));
 
-import { RPC_ERROR_CODES } from '@happier-dev/protocol/rpc';
-import { RpcError } from '@happier-dev/protocol/rpcErrors';
-
 import { renderScreen } from '@/dev/testkit';
 import { apiSocket } from '@/sync/api/session/apiSocket';
 import { storage } from '@/sync/domains/state/storage';
@@ -173,9 +170,6 @@ describe('SessionParticipantComposer auth send surface', () => {
         const { sync } = await import('@/sync/sync');
         sync.encryption = encryption;
         vi.spyOn(apiSocket, 'sessionRPC').mockRejectedValue(
-            new RpcError('RPC method not available', RPC_ERROR_CODES.METHOD_NOT_AVAILABLE),
-        );
-        vi.spyOn(apiSocket, 'request').mockRejectedValue(
             new HappyError('Authentication required', false, {
                 kind: 'auth',
                 code: 'not_authenticated',

@@ -46,8 +46,8 @@ test('tests workflow keeps slow CI jobs above the observed timeout floor', async
   assert.match(uiJob, /shard:\s*\[1, 2, 3, 4\]/, 'UI unit tests should fan out across four runner jobs');
   assert.match(
     uiJob,
-    /HAPPIER_UI_VITEST_SHARDS:\s*"24"[\s\S]*?HAPPIER_UI_VITEST_OUTER_SHARD:\s*"\$\{\{ matrix\.shard \}\}\/4"/,
-    'each UI runner should execute only its quarter of the unit suite in bounded child processes',
+    /HAPPIER_UI_VITEST_SHARDS:\s*"48"[\s\S]*?HAPPIER_UI_VITEST_OUTER_SHARD:\s*"\$\{\{ matrix\.shard \}\}\/4"/,
+    'each UI runner should execute only its quarter of the unit suite in child processes small enough to stay below the heap limit',
   );
 
   assert.match(
@@ -58,8 +58,18 @@ test('tests workflow keeps slow CI jobs above the observed timeout floor', async
   assert.match(cliJob, /shard:\s*\[1, 2, 3, 4\]/, 'CLI unit tests should fan out across four runner jobs');
   assert.match(
     cliJob,
+    /NODE_OPTIONS:\s*--max-old-space-size=8192\b/,
+    'CLI unit shards should retain enough heap for the heaviest isolated app-server and daemon test files',
+  );
+  assert.match(
+    cliJob,
     /HAPPIER_CLI_VITEST_OUTER_SHARD:\s*"\$\{\{ matrix\.shard \}\}\/4"/,
     'each CLI runner should execute only its deterministic quarter of the unit suite',
+  );
+  assert.match(
+    cliJob,
+    /- name:\s*Run integration tests[\s\S]*?- name:\s*Run unit tests and import-cycle guard/,
+    'CLI integration tests should run before the unit shards can contaminate the fixed integration-test home',
   );
 
   assert.match(
