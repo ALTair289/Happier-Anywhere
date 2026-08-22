@@ -21,7 +21,9 @@ function createRunnerScriptHarness() {
   const module = { exports: {} as Record<string, unknown> };
   const fakeRequire = Object.assign((id: string) => {
     if (id === 'node:child_process') return { spawn };
+    if (id === 'node:fs') return require(id);
     if (id === 'node:fs/promises') return require(id);
+    if (id === 'node:os') return require(id);
     if (id === 'node:path') return require(id);
     throw new Error(`unexpected require: ${id}`);
   }, { main: {} });

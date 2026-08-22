@@ -22,6 +22,27 @@ export function resolveVitestMaxWorkers(env) {
   return override ?? 1;
 }
 
+export function resolveVitestOuterShard(env) {
+  const raw = String(env?.HAPPIER_CLI_VITEST_OUTER_SHARD ?? '').trim();
+  const match = /^(\d+)\/(\d+)$/.exec(raw);
+  if (!match) return null;
+
+  const index = Number.parseInt(match[1], 10);
+  const count = Number.parseInt(match[2], 10);
+  if (index < 1 || count < 1 || index > count) return null;
+  return { index, count };
+}
+
+export function selectVitestOuterShardFiles(files, outerShard) {
+  if (!outerShard) return Array.from(files ?? []);
+  return partitionVitestFilesIntoShards(files, outerShard.count)[outerShard.index - 1] ?? [];
+}
+
+export function resolveVitestInnerShardCount(configuredShardCount, outerShard) {
+  if (!outerShard) return configuredShardCount;
+  return Math.max(1, Math.ceil(configuredShardCount / outerShard.count));
+}
+
 export function resolveVitestConfigPath(argv) {
   const idx = argv.indexOf('--config');
   if (idx === -1) return null;
@@ -124,18 +145,28 @@ async function main(argv) {
     process.exit(1);
   }
 
-  const shardCount = resolveVitestShardCount(process.env);
+  const configuredShardCount = resolveVitestShardCount(process.env);
+  const outerShard = resolveVitestOuterShard(process.env);
+  const shardCount = resolveVitestInnerShardCount(configuredShardCount, outerShard);
   const maxWorkers = resolveVitestMaxWorkers(process.env);
   const sizeMb = resolveMaxOldSpaceSizeMb(process.env);
   const nodeOptions = upsertMaxOldSpaceSize(process.env.NODE_OPTIONS, sizeMb);
   const allFiles = await resolveVitestTestFiles({ configPath, nodeOptions });
-  if (allFiles.length === 0) {
+  const selectedFiles = selectVitestOuterShardFiles(allFiles, outerShard);
+  if (selectedFiles.length === 0) {
     // eslint-disable-next-line no-console
     console.error('[vitest] no test files matched — refusing to report a sharded run as green');
     process.exit(1);
     return;
   }
-  const shardFiles = partitionVitestFilesIntoShards(allFiles, shardCount);
+  if (outerShard) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[vitest] outer shard ${outerShard.index}/${outerShard.count}`
+      + ` selected ${selectedFiles.length}/${allFiles.length} files`,
+    );
+  }
+  const shardFiles = partitionVitestFilesIntoShards(selectedFiles, shardCount);
 
   let failedShardCount = 0;
   let firstFailureExitCode = 0;

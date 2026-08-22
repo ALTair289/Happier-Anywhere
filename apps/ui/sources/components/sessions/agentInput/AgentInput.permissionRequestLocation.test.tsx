@@ -66,6 +66,7 @@ vi.mock('@/components/ui/layout/layout', () => ({
 }));
 
 vi.mock('@/constants/Typography', () => ({
+    FontWeights: { regular: '400' },
     Typography: new Proxy({}, { get: () => () => ({}) }),
 }));
 
@@ -274,10 +275,6 @@ vi.mock('@/hooks/ui/useKeyboardHeight', () => ({
     useKeyboardHeight: () => 0,
 }));
 
-vi.mock('@/components/autocomplete/useActiveWord', () => ({
-    useActiveWord: () => ({ activeWord: null, setActiveWord: () => {} }),
-}));
-
 vi.mock('@/components/autocomplete/useActiveSuggestions', () => ({
     useActiveSuggestions: () => [[], null, () => {}, () => {}],
 }));
@@ -301,7 +298,7 @@ describe('AgentInput (permission tool location)', () => {
             onSend={() => {}}
             sessionId={sessionId}
             metadata={null as any}
-            autocompletePrefixes={[]}
+            autocompleteKinds={[]}
             autocompleteSuggestions={async () => []}
             permissionRequests={[] as any}
         />)).tree;
@@ -329,7 +326,7 @@ describe('AgentInput (permission tool location)', () => {
                     onSend={() => {}}
                     sessionId={sessionId}
                     metadata={null as any}
-                    autocompletePrefixes={[]}
+                    autocompleteKinds={[]}
                     autocompleteSuggestions={async () => []}
                     permissionRequests={permissionRequests as any}
                 />)).tree;
@@ -355,7 +352,7 @@ describe('AgentInput (permission tool location)', () => {
                     onSend={() => {}}
                     sessionId={sessionId}
                     metadata={null as any}
-                    autocompletePrefixes={[]}
+                    autocompleteKinds={[]}
                     autocompleteSuggestions={async () => []}
                     permissionRequests={permissionRequests as any}
                 />
@@ -395,7 +392,7 @@ describe('AgentInput (permission tool location)', () => {
                     onSend={() => {}}
                     sessionId={sessionId}
                     metadata={null as any}
-                    autocompletePrefixes={[]}
+                    autocompleteKinds={[]}
                     autocompleteSuggestions={async () => []}
                     permissionRequests={permissionRequests as any}
                 />)).tree;

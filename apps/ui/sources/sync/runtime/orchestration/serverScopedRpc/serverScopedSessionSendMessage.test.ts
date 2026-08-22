@@ -90,6 +90,9 @@ function currentPendingInputFeatures() {
         compatibility: {
           pendingInput: { currentPendingInputProtocolVersion: 1 },
         },
+        session: {
+          pendingInput: { protocolVersion: 1 },
+        },
       },
       features: {
         sharing: {

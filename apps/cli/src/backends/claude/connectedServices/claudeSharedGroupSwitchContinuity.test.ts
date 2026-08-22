@@ -132,6 +132,13 @@ describe('Claude shared-group switch continuity', () => {
       encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) },
     } satisfies Credentials;
     const api = {
+      getAccountEncryptionMode: async () => 'plain' as const,
+      getConnectedServiceCredentialPlain: async () => ({
+        content: { t: 'plain' as const, v: selectedRecord },
+        revisionSemantics: 'revisioned' as const,
+        credentialRevision: NEW_CREDENTIAL_REVISION,
+      }),
+      getConnectedServiceCredentialSealed: async () => null,
       listConnectedServiceProfiles: async () => ({
         serviceId: 'claude-subscription' as const,
         profiles: [{ profileId: 'lb_bat', status: 'connected' as const }],

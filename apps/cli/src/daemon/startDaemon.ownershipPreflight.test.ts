@@ -57,6 +57,8 @@ describe('startDaemon ownership preflight', () => {
         'HAPPIER_ACTIVE_SERVER_ID',
         'HAPPIER_PUBLIC_RELEASE_CHANNEL',
         'HAPPIER_DAEMON_STARTUP_SOURCE',
+        'HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID',
+        'HAPPIER_DAEMON_SELF_RESTART_DEADLINE_MS',
         'HAPPIER_DAEMON_RUNTIME_ID',
         'HAPPIER_DAEMON_TAKEOVER',
         'HAPPIER_DAEMON_PROCESS_INVENTORY_FALLBACK',
@@ -151,6 +153,7 @@ describe('startDaemon ownership preflight', () => {
                 exitSpy.mockRestore();
             }
 
+            logger.flushSync();
             const logContent = await readFile(logger.logFilePath, 'utf8');
             expect(logContent).toContain('Daemon ownership conflict prevented daemon startup');
             expect(logContent).toContain('already running for the selected relay');
@@ -194,6 +197,7 @@ describe('startDaemon ownership preflight', () => {
                 vi.doUnmock('@/daemon/doctor');
             }
 
+            logger.flushSync();
             const logContent = await readFile(logger.logFilePath, 'utf8');
             expect(logContent).toContain('Daemon ownership conflict prevented daemon startup');
             expect(logContent).toContain('Another running daemon is already using the selected relay');
@@ -304,6 +308,8 @@ describe('startDaemon ownership preflight', () => {
                 HAPPIER_ACTIVE_SERVER_ID: 'cloud',
                 HAPPIER_PUBLIC_RELEASE_CHANNEL: 'stable',
                 HAPPIER_DAEMON_STARTUP_SOURCE: 'self-restart',
+                HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID: 'self-restart-ownership-preflight',
+                HAPPIER_DAEMON_SELF_RESTART_DEADLINE_MS: String(Date.now() + 60_000),
             });
             vi.resetModules();
             vi.stubGlobal('fetch', fetchMock);
@@ -338,6 +344,8 @@ describe('startDaemon ownership preflight', () => {
                 HAPPIER_ACTIVE_SERVER_ID: 'cloud',
                 HAPPIER_PUBLIC_RELEASE_CHANNEL: 'stable',
                 HAPPIER_DAEMON_RUNTIME_ID: 'runtime-manual',
+                HAPPIER_DAEMON_SELF_RESTART_CORRELATION_ID: 'self-restart-runtime-intent',
+                HAPPIER_DAEMON_SELF_RESTART_DEADLINE_MS: String(Date.now() + 60_000),
             });
             vi.resetModules();
             vi.stubGlobal('fetch', fetchMock);
@@ -513,6 +521,7 @@ describe('startDaemon ownership preflight', () => {
                 exitSpy.mockRestore();
             }
 
+            logger.flushSync();
             const logContent = await readFile(logger.logFilePath, 'utf8');
             expect(logContent).toContain('Installed background service prevented manual daemon startup');
             expect(logContent).toContain('happier service start');

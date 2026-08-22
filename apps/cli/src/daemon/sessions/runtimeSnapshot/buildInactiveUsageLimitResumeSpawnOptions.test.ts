@@ -38,7 +38,8 @@ describe('buildInactiveUsageLimitResumeSpawnOptions', () => {
       }),
       metadata: {
         agentId: 'claude',
-        path: '/repo/from-metadata',
+        claudeSessionId: 'provider-session-1',
+        path: '/repo/from-raw',
         connectedServices,
         connectedServiceMaterializationIdentityV1: materializationIdentity,
         connectedServicesUpdatedAt: 1000,

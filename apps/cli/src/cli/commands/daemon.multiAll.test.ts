@@ -46,7 +46,10 @@ describe('happier daemon --all', () => {
             ).rejects.toThrow('process.exit(0)');
 
             expect(await waitForProcessExit(daemon.pid, { timeoutMs: 3_000 })).toBe(true);
-            expect(existsSync(statePath)).toBe(false);
+            // The fake HTTP daemon does not own the real daemon lifecycle lock, so it cannot
+            // publish lifecycle cleanup. The --all caller must leave that state file for its
+            // owning daemon rather than unlinking another runtime's publication itself.
+            expect(existsSync(statePath)).toBe(true);
           } finally {
             await daemon.kill();
           }

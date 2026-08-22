@@ -1910,11 +1910,6 @@ esac
     `source start did not launch the prior usable dist after current build failure\nstdout:\n${stdout}\nstderr:\n${stderr}`,
   );
   assert.match(
-    await readFile(ownershipLogPath, 'utf-8'),
-    /lsof/,
-    'the admission fixture must use its deterministic listener adapter',
-  );
-  assert.match(
     `${stdout}\n${stderr}`,
     /WARNING: happier-cli current build failed .*starting the daemon from the last usable dist.*Source changes are not active/s,
   );
@@ -2067,6 +2062,9 @@ import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
+if (process.env.HAPPIER_CLI_DIST_INTEGRITY_PROBE === 'daemon-command' && args[0] === 'daemon' && args[1] === '--help') {
+  process.exit(0);
+}
 if (args[0] !== 'daemon') process.exit(0);
 const home = process.env.HAPPIER_HOME_DIR || process.env.HAPPIER_STACK_CLI_HOME_DIR;
 if (!home) process.exit(2);

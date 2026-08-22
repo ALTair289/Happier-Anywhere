@@ -14,6 +14,10 @@ const fakePackageDistFs = {
   rmSync: noopPackageDistWrite,
 };
 
+function isPackageDistSyncTempPath(targetPath: unknown): boolean {
+  return String(targetPath).replaceAll('\\', '/').includes('/package-dist.__sync_tmp__.');
+}
+
 describe('packTarball (npmExecpath)', () => {
   it('ignores non-npm npm_execpath values (e.g. yarn) and uses npm on PATH', () => {
     const destDir = createTempDirSync('happier-cli-pack-tarball-dest-');
@@ -27,6 +31,7 @@ describe('packTarball (npmExecpath)', () => {
       packageRoot,
       destDir,
       npmExecpath: '/somewhere/yarn.js',
+      platform: 'linux',
       spawnSync: spawn,
       existsSync: () => true,
       ...fakePackageDistFs,
@@ -60,7 +65,10 @@ describe('packTarball (npmExecpath)', () => {
       existsSync: (targetPath) => {
         const normalized = String(targetPath).replaceAll('\\', '/').toLowerCase();
         const normalizedNpmCli = npmCliPath.replaceAll('\\', '/').toLowerCase();
-        return normalized === normalizedNpmCli || normalized.endsWith(`/${tarballName}`) || normalized.endsWith('/dist');
+        return normalized === normalizedNpmCli
+          || normalized.endsWith(`/${tarballName}`)
+          || normalized.endsWith('/dist')
+          || isPackageDistSyncTempPath(targetPath);
       },
       ...fakePackageDistFs,
       env: {},
@@ -90,7 +98,9 @@ describe('packTarball (npmExecpath)', () => {
       spawnSync: spawn,
       existsSync: (targetPath) => {
         const normalized = String(targetPath).replaceAll('\\', '/').toLowerCase();
-        return normalized.endsWith(`/${tarballName}`) || normalized.endsWith('/dist');
+        return normalized.endsWith(`/${tarballName}`)
+          || normalized.endsWith('/dist')
+          || isPackageDistSyncTempPath(targetPath);
       },
       ...fakePackageDistFs,
       env: {},
@@ -123,7 +133,10 @@ describe('packTarball (npmExecpath)', () => {
       existsSync: (targetPath) => {
         const normalized = String(targetPath).replaceAll('\\', '/').toLowerCase();
         const normalizedNpmCli = npmCliPath.replaceAll('\\', '/').toLowerCase();
-        return normalized === normalizedNpmCli || normalized.endsWith(`/${tarballName}`) || normalized.endsWith('/dist');
+        return normalized === normalizedNpmCli
+          || normalized.endsWith(`/${tarballName}`)
+          || normalized.endsWith('/dist')
+          || isPackageDistSyncTempPath(targetPath);
       },
       ...fakePackageDistFs,
       env: {},

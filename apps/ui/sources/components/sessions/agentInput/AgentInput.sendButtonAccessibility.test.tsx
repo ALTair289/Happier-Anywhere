@@ -15,6 +15,10 @@ const multiTextInputHandleMocks = vi.hoisted(() => ({
 }));
 const useActiveSuggestionsMock = vi.hoisted(() => vi.fn(() => [[], -1, () => {}, () => {}] as const));
 
+vi.mock('@/agents/registry/AgentIcon', () => ({
+    AgentIcon: (props: Record<string, unknown>) => React.createElement('AgentIcon', props),
+}));
+
 installAgentInputCommonModuleMocks({
     reactNative: async () => {
         const { createReactNativeWebMock } = await import('@/dev/testkit/mocks/reactNative');

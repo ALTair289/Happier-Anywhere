@@ -113,7 +113,7 @@ async function removeFixtureAfterOwnerDeathWatchdog({
         await rm(join(storageDir, stackName, 'stack.runtime.json'), { force: true });
     }
     await waitForOwnerDeathWatchdogQuiescence({ storageDir, stackName, timeoutMs: 60_000 });
-    await rm(tempRoot, { recursive: true, force: true });
+    await rm(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
 async function writeRunningDaemonState({ cliHomeDir, serverUrl, pid, env }) {

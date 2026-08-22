@@ -318,7 +318,7 @@ describe('claudeRemoteAgentSdk abort repair', () => {
         const dir = await mkdtemp(join(tmpdir(), 'happier-claude-stop-task-'));
         const transcriptPath = join(dir, 'sess_1.jsonl');
 
-        await writeFile(transcriptPath, '', 'utf8');
+        await writeFile(transcriptPath, '{}\n', 'utf8');
 
         let interruptHandler: (() => Promise<void>) | null = null;
         const taskStartedYielded = createDeferred<void>();
@@ -410,7 +410,7 @@ describe('claudeRemoteAgentSdk abort repair', () => {
     it('replaces a terminal detached target with another active blocker and never reselects the terminal task', async () => {
         const dir = await mkdtemp(join(tmpdir(), 'happier-claude-stop-task-replacement-'));
         const transcriptPath = join(dir, 'sess_1.jsonl');
-        await writeFile(transcriptPath, '', 'utf8');
+        await writeFile(transcriptPath, '{}\n', 'utf8');
 
         let interruptHandler: (() => Promise<void>) | null = null;
         const terminalYielded = createDeferred<void>();
@@ -499,7 +499,7 @@ describe('claudeRemoteAgentSdk abort repair', () => {
         const dir = await mkdtemp(join(tmpdir(), 'happier-claude-stop-task-throws-'));
         const transcriptPath = join(dir, 'sess_1.jsonl');
 
-        await writeFile(transcriptPath, '', 'utf8');
+        await writeFile(transcriptPath, '{}\n', 'utf8');
 
         let interruptHandler: (() => Promise<void>) | null = null;
         const taskStartedYielded = createDeferred<void>();

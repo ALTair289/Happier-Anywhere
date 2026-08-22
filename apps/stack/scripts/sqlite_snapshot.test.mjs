@@ -86,7 +86,8 @@ async function assertMissing(path) {
 }
 
 async function waitForPartial(...directories) {
-  for (let attempt = 0; attempt < 2_000; attempt += 1) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
     for (const directory of directories) {
       const name = (await readdir(directory)).find((entry) => entry.includes('.partial-'));
       if (name) return join(directory, name);
@@ -97,7 +98,8 @@ async function waitForPartial(...directories) {
 }
 
 async function waitForManifestPartial(...directories) {
-  for (let attempt = 0; attempt < 2_000; attempt += 1) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
     for (const directory of directories) {
       const name = (await readdir(directory)).find((entry) => entry.includes('.manifest.partial-'));
       if (name) return join(directory, name);
@@ -108,7 +110,8 @@ async function waitForManifestPartial(...directories) {
 }
 
 async function waitForWrittenPartial(directory) {
-  for (let attempt = 0; attempt < 2_000; attempt += 1) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
     const name = (await readdir(directory)).find((entry) => entry.includes('.partial-'));
     if (name) {
       const path = join(directory, name);

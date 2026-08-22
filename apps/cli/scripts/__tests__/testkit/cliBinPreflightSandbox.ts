@@ -44,6 +44,31 @@ export function copyCliBinRuntimeFiles(options: {
   for (const file of runtimeScriptFiles) {
     cpSync(resolve(runtimeScriptsDir, file), join(targetScriptsDir, file));
   }
+
+  // optionalWorkspaceBundleLock.mjs is a packaged runtime file and imports the
+  // cli-common lock helper before the bin preflight executes. Keep the sandbox
+  // faithful to an installed CLI package so protocol/dependency assertions do
+  // not fail earlier on an unrelated missing workspace package.
+  writeSandboxPackage({
+    packageDir: resolve(options.binDir, '..', 'node_modules', '@happier-dev', 'cli-common'),
+    manifest: {
+      name: '@happier-dev/cli-common',
+      version: '0.0.0',
+      type: 'module',
+      exports: {
+        './workspaceBundleLock': './workspaceBundleLock.mjs',
+      },
+    },
+    files: {
+      'workspaceBundleLock.mjs': [
+        "import { resolve } from 'node:path';",
+        "export const resolveWorkspaceBundleLockPath = (repoRoot) => resolve(repoRoot, '.project', 'tmp', 'cli-dist-build.lock');",
+        "export const withWorkspaceBundleLock = async (fn) => await fn({ heldLockValue: '' });",
+        "export const withWorkspaceBundleLockSync = (fn) => fn({ heldLockValue: '' });",
+        '',
+      ].join('\n'),
+    },
+  });
 }
 
 export function runHappierBin(options: {

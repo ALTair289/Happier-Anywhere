@@ -72,7 +72,16 @@ type SessionHeaderActionMenuProps = Readonly<{
 }>;
 
 function readCurrentSessionForOpenMenu(sessionId: string, fallback: Session): Session {
-  return storage.getState().sessions[sessionId] ?? fallback;
+  const state = storage.getState();
+  const session = state.sessions[sessionId] ?? fallback;
+  const renderable = state.sessionListRenderables[sessionId];
+  if (renderable?.hasUnreadMessages !== true && renderable?.hasUnreadMessages !== false) {
+    return session;
+  }
+  return {
+    ...session,
+    hasUnreadMessages: renderable.hasUnreadMessages,
+  } as Session;
 }
 
 function signatureValue(value: unknown): string {

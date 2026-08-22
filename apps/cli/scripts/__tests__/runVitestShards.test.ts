@@ -5,8 +5,11 @@ import {
   parseVitestListJson,
   partitionVitestFilesIntoShards,
   resolveVitestConfigPath,
+  resolveVitestInnerShardCount,
   resolveVitestMaxWorkers,
+  resolveVitestOuterShard,
   resolveVitestShardCount,
+  selectVitestOuterShardFiles,
 } from '../runVitestShards.mjs';
 
 describe('runVitestShards', () => {
@@ -37,6 +40,26 @@ describe('runVitestShards', () => {
     expect(resolveVitestMaxWorkers({})).toBe(1);
     expect(resolveVitestMaxWorkers({ HAPPIER_CLI_VITEST_MAX_WORKERS: '2' })).toBe(2);
     expect(resolveVitestMaxWorkers({ HAPPIER_CLI_VITEST_MAX_WORKERS: '0' })).toBe(1);
+  });
+
+  it('parses a valid CI outer shard and rejects malformed ranges', () => {
+    expect(resolveVitestOuterShard({ HAPPIER_CLI_VITEST_OUTER_SHARD: '2/4' })).toEqual({
+      index: 2,
+      count: 4,
+    });
+    expect(resolveVitestOuterShard({ HAPPIER_CLI_VITEST_OUTER_SHARD: '0/4' })).toBe(null);
+    expect(resolveVitestOuterShard({ HAPPIER_CLI_VITEST_OUTER_SHARD: '5/4' })).toBe(null);
+    expect(resolveVitestOuterShard({ HAPPIER_CLI_VITEST_OUTER_SHARD: 'bad' })).toBe(null);
+  });
+
+  it('selects deterministic outer files and scales the inner process count', () => {
+    const outerShard = { index: 2, count: 4 };
+    expect(selectVitestOuterShardFiles(['h', 'g', 'f', 'e', 'd', 'c', 'b', 'a'], outerShard)).toEqual([
+      'b',
+      'f',
+    ]);
+    expect(resolveVitestInnerShardCount(64, outerShard)).toBe(16);
+    expect(resolveVitestInnerShardCount(8, null)).toBe(8);
   });
 
   it('parses Vitest file-list JSON without retaining unrelated fields', () => {

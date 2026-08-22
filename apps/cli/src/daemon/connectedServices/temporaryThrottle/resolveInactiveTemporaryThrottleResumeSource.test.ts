@@ -25,6 +25,7 @@ describe('resolveInactiveTemporaryThrottleResumeSource', () => {
       }),
       decryptSessionMetadata: () => ({
         agentId: 'claude',
+        claudeSessionId: 'provider-session-1',
         path: '/repo/project',
       }),
     });

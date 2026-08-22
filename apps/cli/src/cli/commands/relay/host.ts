@@ -747,13 +747,14 @@ export async function runRelayHostSubcommand(args: string[]): Promise<void> {
             copyLocalDirectoryToRemote: async ({ localPath, remotePath }) => {
               await runner.copyLocalDirectoryToRemote(localPath, remotePath);
             },
-            installRemoteComponent: async ({ componentId, channel, ssh, knownHostsMode, installerBinaryPath, remoteHomeDir }) => {
+            installRemoteComponent: async ({ componentId, channel, ssh, knownHostsMode, installerBinaryPath, localBinaryPath, remoteHomeDir }) => {
               const out = await installRemoteFirstPartyComponent({
                 componentId,
                 channel,
                 ssh,
                 knownHostsMode,
                 installerBinaryPath,
+                localBinaryPath,
                 remoteHomeDir,
               }, {
                 resolveRemoteReleaseTarget: async () => await resolveRemoteReleaseTarget(),

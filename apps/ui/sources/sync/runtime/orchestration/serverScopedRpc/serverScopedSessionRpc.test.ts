@@ -185,6 +185,7 @@ describe('sessionRpcWithServerScope', () => {
       'fetch',
       vi.fn(async () => ({
         ok: true,
+        status: 200,
         json: async () => ({
           session: {
             ...sessionListByIdFixture,
@@ -253,6 +254,7 @@ describe('sessionRpcWithServerScope', () => {
       'fetch',
       vi.fn(async () => ({
         ok: true,
+        status: 200,
         json: async () => ({
           session: {
             ...sessionListByIdFixture,
@@ -322,6 +324,7 @@ describe('sessionRpcWithServerScope', () => {
       'fetch',
       vi.fn(async () => ({
         ok: true,
+        status: 200,
         json: async () => ({ session: sessionListByIdFixture }),
       })),
     );
@@ -390,6 +393,7 @@ describe('sessionRpcWithServerScope', () => {
       'fetch',
       vi.fn(async () => ({
         ok: true,
+        status: 200,
         json: async () => ({ session: sessionListByIdFixture }),
       })),
     );
@@ -446,6 +450,7 @@ describe('sessionRpcWithServerScope', () => {
       'fetch',
       vi.fn(async () => ({
         ok: true,
+        status: 200,
         json: async () => ({
           session: {
             ...sessionListByIdFixture,
@@ -523,6 +528,7 @@ describe('sessionRpcWithServerScope', () => {
       'fetch',
       vi.fn(async () => ({
         ok: true,
+        status: 200,
         json: async () => ({ session: sessionListByIdFixture }),
       })),
     );
@@ -573,6 +579,7 @@ describe('sessionRpcWithServerScope', () => {
       'fetch',
       vi.fn(async () => ({
         ok: true,
+        status: 200,
         json: async () => ({
           session: {
             ...sessionListByIdFixture,

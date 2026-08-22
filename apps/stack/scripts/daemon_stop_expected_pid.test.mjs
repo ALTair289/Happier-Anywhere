@@ -129,7 +129,13 @@ setInterval(() => {}, 1000);
     let timeoutError = null;
     const stopStartedAt = Date.now();
     try {
-      await stopLocalDaemon({ cliBin, cliHomeDir, internalServerUrl, env });
+      await stopLocalDaemon({
+        cliBin,
+        cliEntrypoint: join(cliDir, 'dist', 'index.mjs'),
+        cliHomeDir,
+        internalServerUrl,
+        env,
+      });
     } catch (error) {
       timeoutError = error;
     }

@@ -58,6 +58,10 @@ vi.mock('@/constants/Typography', () => ({
     },
 }));
 
+vi.mock('@/components/ui/icons/Icon', () => ({
+    Icon: () => '.',
+}));
+
 vi.mock('expo-clipboard', () => ({
     setStringAsync: vi.fn(async () => {}),
 }));

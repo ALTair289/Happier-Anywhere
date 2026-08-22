@@ -55,6 +55,7 @@ function createGroupResponse() {
             },
             activeProfileId: 'work',
             generation: 2,
+            runtimeStateRevision: 1,
             state: {},
             createdAt: 1,
             updatedAt: 2,

@@ -237,7 +237,7 @@ describe('BasePermissionHandler allowlist', () => {
     const handler = new TestPermissionHandler(session as any);
 
     const input1 = { command: ['bash', '-lc', 'find . -maxdepth 2 -type f | head -n 5'] };
-    const input2 = { command: ['bash', '-lc', 'find . -maxdepth 1 -type f | head -n 5'] };
+    const input2 = { command: ['bash', '-lc', 'find . -maxdepth 1 -type f'] };
     const p1 = handler.request('perm-1', 'Bash', input1);
     const p2 = handler.request('perm-2', 'Bash', input2);
 

@@ -19,12 +19,12 @@ describe('server HTTP base URL helper ownership', () => {
       return /\b(?:export\s+)?function\s+resolveServerHttpBaseUrl\s*\(/.test(source);
     });
 
-    expect(owners.map((path) => relative(cliRoot, resolve(cliRoot, path)))).toEqual(
+    expect(owners.map((path) => relative(cliRoot, resolve(cliRoot, path)).replaceAll('\\', '/'))).toEqual(
       ['src/api/client/serverHttpBaseUrl.ts'],
     );
 
-    expect(readFileSync(resolve(cliRoot, 'src/session/transport/http/serverHttpBaseUrl.ts'), 'utf8')).toContain(
-      "export { resolveServerHttpBaseUrl } from '@/api/client/serverHttpBaseUrl';",
+    expect(readFileSync(resolve(cliRoot, 'src/session/transport/http/serverHttpBaseUrl.ts'), 'utf8')).toMatch(
+      /export\s*\{[\s\S]*?\bresolveServerHttpBaseUrl\b[\s\S]*?\}\s*from '@\/api\/client\/serverHttpBaseUrl';/,
     );
   });
 });

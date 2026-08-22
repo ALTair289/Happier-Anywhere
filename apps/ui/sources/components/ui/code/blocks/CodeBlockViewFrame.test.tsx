@@ -128,7 +128,7 @@ describe('CodeBlockViewFrame', () => {
                 </CodeBlockViewFrame>)).tree;
 
         const iconBefore = tree.findByType('Icon') as any;
-        expect(iconBefore.props.name).toBe('copy-outline');
+        expect(iconBefore.props.name).toBe('copy');
 
         const pressable = tree.findByProps({ accessibilityLabel: 'common.copy' });
         await pressTestInstanceAsync(pressable, 'common.copy');

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { runNodeCapture } from './testkit/core/run_node_capture.mjs';
@@ -23,8 +24,20 @@ async function createFixture(t, lines) {
   const root = await mkdtemp(join(tmpdir(), 'hstack-repo-local-provider-'));
   t.after(async () => rm(root, { recursive: true, force: true }));
   const storageDir = join(root, 'storage');
-  const id = (await readFile(join(repoRoot, '.git', 'happier-stack-stackless-id'), 'utf8')).trim();
-  const stackName = `repo-${sanitizeStackNameToken(basename(repoRoot))}-${id.slice(0, 10)}`;
+  const stacklessIdPath = join(repoRoot, '.git', 'happier-stack-stackless-id');
+  const stacklessIdBefore = await readFile(stacklessIdPath, 'utf8').catch((error) => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  t.after(async () => {
+    if (stacklessIdBefore == null) await rm(stacklessIdPath, { force: true });
+    else await writeFile(stacklessIdPath, stacklessIdBefore, 'utf8');
+  });
+  const fallbackId = createHash('sha256').update(String(repoRoot)).digest('hex').slice(0, 10);
+  const existingId = String(stacklessIdBefore ?? '').trim();
+  const id = /^[a-f0-9]{8,}$/i.test(existingId) ? existingId.slice(0, 20) : fallbackId;
+  const repoBase = repoRoot.split('/').filter(Boolean).at(-1);
+  const stackName = `repo-${sanitizeStackNameToken(repoBase)}-${id.slice(0, 10)}`;
   const stackDir = join(storageDir, stackName);
   const envPath = join(stackDir, 'env');
   await mkdir(stackDir, { recursive: true });

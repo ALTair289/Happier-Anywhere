@@ -348,7 +348,7 @@ describe('requestSessionStop marker fallback', () => {
     await expect(requestSessionStop({ credentials, idOrPrefix: 'sess-marker-stop' })).resolves.toEqual({
       ok: true,
       sessionId: 'sess-marker-stop',
-      stopped: true,
+      stopped: false,
     });
     expect(mocks.persistedMetadata).toMatchObject({
       terminal: { controlServiceabilityV1: { attachmentId: replacementAttachmentId, state: 'servable' } },

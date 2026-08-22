@@ -111,7 +111,7 @@ describe('apiConnectedServicesQuotasV3', () => {
     mockServerConfig();
     const fetchMock = vi.fn(async (input: unknown) => {
       const url = String(input);
-      if (url === 'https://api.example.test/health') {
+      if (url === 'https://api.example.test/health' || url === 'https://api.example.test/v1/auth/ping') {
         return { ok: true, status: 200, json: async () => ({ ok: true }) };
       }
       return { ok: false, status: 404, json: async () => ({ error: 'connect_quotas_not_found' }) };
@@ -150,7 +150,7 @@ describe('apiConnectedServicesQuotasV3', () => {
     mockServerConfig();
     const fetchMock = vi.fn(async (input: unknown) => {
       const url = String(input);
-      if (url === 'https://api.example.test/health') {
+      if (url === 'https://api.example.test/health' || url === 'https://api.example.test/v1/auth/ping') {
         return { ok: true, status: 200, json: async () => ({ ok: true }) };
       }
       return { ok: false, status: 404, json: async () => ({ error: 'connect_quotas_not_found' }) };

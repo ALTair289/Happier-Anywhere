@@ -80,6 +80,7 @@ vi.mock('@/components/sessions/agentInput/subscribeToIosHardwareShiftEnter', () 
 
 describe('KeyboardShortcutProvider', () => {
     beforeEach(() => {
+        vi.stubGlobal('navigator', { platform: 'MacIntel' });
         vi.resetModules();
         vi.clearAllMocks();
         testState.platformOS = 'web';

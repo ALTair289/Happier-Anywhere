@@ -17,6 +17,9 @@ vi.mock('react-native-mmkv', () => {
         delete(key: string) {
             kvStore.delete(key);
         }
+        getAllKeys() {
+            return [...kvStore.keys()];
+        }
         clearAll() {
             kvStore.clear();
         }

@@ -20,6 +20,27 @@ export function resolveVitestShardCount(env) {
   return override ?? 24;
 }
 
+export function resolveVitestOuterShard(env) {
+  const raw = String(env?.HAPPIER_UI_VITEST_OUTER_SHARD ?? '').trim();
+  const match = /^(\d+)\/(\d+)$/.exec(raw);
+  if (!match) return null;
+
+  const index = Number.parseInt(match[1], 10);
+  const count = Number.parseInt(match[2], 10);
+  if (index < 1 || count < 1 || index > count) return null;
+  return { index, count };
+}
+
+export function selectVitestOuterShardFiles(files, outerShard) {
+  if (!outerShard) return Array.from(files ?? []);
+  return partitionVitestFilesIntoShards(files, outerShard.count)[outerShard.index - 1] ?? [];
+}
+
+export function resolveVitestInnerShardCount(configuredShardCount, outerShard) {
+  if (!outerShard) return configuredShardCount;
+  return Math.max(1, Math.ceil(configuredShardCount / outerShard.count));
+}
+
 export function resolveVitestConfigPath(argv) {
   const idx = argv.indexOf('--config');
   if (idx === -1) return null;
@@ -283,7 +304,9 @@ async function main(argv) {
     process.exit(1);
   }
 
-  const shardCount = resolveVitestShardCount(process.env);
+  const configuredShardCount = resolveVitestShardCount(process.env);
+  const outerShard = resolveVitestOuterShard(process.env);
+  const shardCount = resolveVitestInnerShardCount(configuredShardCount, outerShard);
   const sizeMb = resolveMaxOldSpaceSizeMb(process.env);
   const nodeOptions = upsertMaxOldSpaceSize(process.env.NODE_OPTIONS, sizeMb);
   const passthroughArgs = resolveVitestPassthroughArgs(argv);
@@ -299,7 +322,15 @@ async function main(argv) {
     return;
   }
   const positionalFilters = await resolveVitestPositionalFilters(passthroughArgs);
-  const shardFiles = partitionVitestFilesIntoShards(allFiles, shardCount);
+  const selectedFiles = selectVitestOuterShardFiles(allFiles, outerShard);
+  if (outerShard) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[vitest] outer shard ${outerShard.index}/${outerShard.count}`
+      + ` selected ${selectedFiles.length}/${allFiles.length} files`,
+    );
+  }
+  const shardFiles = partitionVitestFilesIntoShards(selectedFiles, shardCount);
 
   const outcomes = await runVitestShardRuns({
     shardFiles,

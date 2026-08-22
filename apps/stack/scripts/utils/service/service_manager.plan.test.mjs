@@ -129,6 +129,14 @@ test('uninstallService removes definitions only after backend-confirmed teardown
           const script = behavior.replace('#!/bin/sh\n', '#!/bin/sh\necho "$*" >> "$HAPPIER_TEST_SERVICE_LOG"\n');
           await writeFile(commandPath, script, 'utf8');
           await chmod(commandPath, 0o755);
+          if (platform === 'win32') {
+            const powershellPath = join(binDir, 'powershell.exe');
+            const powershellBehavior = outcome === 'denied'
+              ? '#!/bin/sh\necho "$*" >> "$HAPPIER_TEST_SERVICE_LOG"\necho "Access is denied: Permission denied" >&2\nexit 1\n'
+              : '#!/bin/sh\necho "$*" >> "$HAPPIER_TEST_SERVICE_LOG"\nprintf \'%s\\n\' \'{"exists":false,"enabled":false,"active":false,"stateLabel":"not_installed"}\'\n';
+            await writeFile(powershellPath, powershellBehavior, 'utf8');
+            await chmod(powershellPath, 0o755);
+          }
           process.env.PATH = `${binDir}:${previousPath ?? ''}`;
           process.env.HAPPIER_TEST_SERVICE_LOG = logPath;
 
@@ -153,7 +161,7 @@ test('uninstallService removes definitions only after backend-confirmed teardown
               assert.match(invocations, /print gui\/501\/dev\.happier\.stack\.test/);
               assert.doesNotMatch(invocations, /bootout|disable|\.plist/);
             } else {
-              assert.match(invocations, /\/Query \/TN Happier\\dev\.happier\.stack\.test/);
+              assert.match(invocations, /Get-ScheduledTask/);
               assert.doesNotMatch(invocations, /\/End|\/Delete/);
             }
           }

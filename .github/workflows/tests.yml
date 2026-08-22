@@ -170,13 +170,13 @@ env:
 jobs:
   ui-e2e:
     if: ${{ (github.event_name != 'workflow_dispatch' && github.event_name != 'workflow_call') || (github.event_name == 'workflow_call' && inputs.run_ui_e2e) }}
-    name: UI E2E (Playwright) / shard ${{ matrix.shard }}/3
+    name: UI E2E (Playwright) / shard ${{ matrix.shard }}/6
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6]
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       # UI E2E boots Expo web; keep web assets available to avoid CI-only runtime surprises.
       HAPPIER_UI_VENDOR_WEB_ASSETS: "1"
@@ -199,6 +199,7 @@ jobs:
               - 'apps/server/**'
               - 'apps/cli/**'
               - 'packages/tests/**'
+              - '.github/workflows/tests.yml'
               - 'package.json'
               - 'yarn.lock'
 
@@ -253,13 +254,13 @@ jobs:
 
       - name: Run UI E2E
         if: github.event_name == 'workflow_call' || steps.changes.outputs.ui_e2e == 'true'
-        run: yarn -s test:e2e:ui -- --shard=${{ matrix.shard }}/3
+        run: yarn -s test:e2e:ui -- --shard=${{ matrix.shard }}/6
 
       - name: Upload UI E2E artifacts (Playwright)
-        if: (github.event_name == 'workflow_call' || steps.changes.outputs.ui_e2e == 'true') && failure()
+        if: always() && (github.event_name == 'workflow_call' || steps.changes.outputs.ui_e2e == 'true') && (failure() || cancelled())
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ui-e2e-playwright-artifacts-shard-${{ matrix.shard }}-of-3
+          name: ui-e2e-playwright-artifacts-shard-${{ matrix.shard }}-of-6
           path: |
             packages/tests/.project/logs/e2e/ui-playwright
             .project/logs/e2e/*ui-e2e*
@@ -419,9 +420,13 @@ jobs:
 
   ui:
     if: ${{ (github.event_name != 'workflow_dispatch' && github.event_name != 'workflow_call') || inputs.run_ui }}
-    name: UI Tests (unit + integration)
+    name: UI Tests (unit + integration) / shard ${{ matrix.shard }}/4
     runs-on: ubuntu-22.04
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -461,12 +466,17 @@ jobs:
           args: --frozen-lockfile
 
       - name: Run protocol unit tests
+        if: matrix.shard == 1
         run: yarn workspace @happier-dev/protocol test
 
       - name: Run unit tests
+        env:
+          HAPPIER_UI_VITEST_SHARDS: "6"
+          HAPPIER_UI_VITEST_OUTER_SHARD: "${{ matrix.shard }}/4"
         run: yarn workspace @happier-dev/app test:unit
 
       - name: Run integration tests
+        if: matrix.shard == 1
         run: yarn workspace @happier-dev/app test:integration
 
   shared-packages-unit:
@@ -628,9 +638,13 @@ jobs:
 
   cli:
     if: ${{ (github.event_name != 'workflow_dispatch' && github.event_name != 'workflow_call') || inputs.run_cli }}
-    name: CLI Tests (unit + integration)
+    name: CLI Tests (unit + integration) / shard ${{ matrix.shard }}/4
     runs-on: ubuntu-22.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       # Some CLI tests fetch/inspect GitHub Release assets. Prefer the built-in
       # GitHub Actions token rather than requiring extra secrets.
@@ -716,11 +730,15 @@ jobs:
       - name: Run unit tests and import-cycle guard
         env:
           NODE_OPTIONS: --max-old-space-size=4096
+          HAPPIER_CLI_VITEST_OUTER_SHARD: "${{ matrix.shard }}/4"
         run: |
           yarn workspace @happier-dev/cli test:unit:vitest
-          yarn workspace @happier-dev/cli test:import-cycles
+          if [ "${{ matrix.shard }}" = "1" ]; then
+            yarn workspace @happier-dev/cli test:import-cycles
+          fi
 
       - name: Run integration tests
+        if: matrix.shard == 1
         run: yarn workspace @happier-dev/cli test:integration
 
   stack:

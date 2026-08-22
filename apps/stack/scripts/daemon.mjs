@@ -1916,6 +1916,19 @@ export async function startLocalDaemonWithAuth({
     await syncRuntimeDaemonState({ runtimeDaemonPid: pid });
     return;
   }
+  if (
+    guardLocalCliDist
+    && (existing.status === 'running' || existing.status === 'starting')
+    && isCliDistBuildLockActive(resolveCliDistBuildLockPath(dirname(dirname(distEntrypoint))))
+  ) {
+    console.warn(
+      `[local] happier-cli dist publication is in progress; keeping the existing daemon running` +
+        (existing.pid ? ` (pid=${existing.pid})` : '') +
+        ' until the new CLI closure is fully published.'
+    );
+    await syncRuntimeDaemonState({ runtimeDaemonPid: existing.pid });
+    return;
+  }
   if (guardLocalCliDist) {
     const guardedDistIntegrity = readCliDistIntegrity(distEntrypoint);
     if (!guardedDistIntegrity.ok) {

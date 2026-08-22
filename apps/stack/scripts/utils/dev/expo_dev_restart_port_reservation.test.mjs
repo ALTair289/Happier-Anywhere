@@ -90,6 +90,7 @@ function buildExpoFixtureEnv(extraEnv = {}) {
     extraEnv: {
       HAPPIER_STACK_SKIP_REFRESH_DEPS: '1',
       TEST_EXPO_LISTENER_DIR: join(listenerFixtureRoot, 'listeners'),
+      TEST_EXPO_LISTENER_MARKERS_ONLY: '1',
       ...extraEnv,
     },
   });

@@ -1,6 +1,21 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+const CLI_DIST_INTEGRITY_PROBE_GUARD = [
+  "if (process.env.HAPPIER_CLI_DIST_INTEGRITY_PROBE === 'daemon-command'",
+  "  && process.argv[2] === 'daemon'",
+  "  && process.argv[3] === '--help') process.exit(0);",
+  '',
+].join('\n');
+
+function addCliDistIntegrityProbeGuard(script) {
+  const source = String(script);
+  if (!source.startsWith('#!')) return CLI_DIST_INTEGRITY_PROBE_GUARD + source;
+  const firstLineEnd = source.indexOf('\n');
+  if (firstLineEnd < 0) return `${source}\n${CLI_DIST_INTEGRITY_PROBE_GUARD}`;
+  return source.slice(0, firstLineEnd + 1) + CLI_DIST_INTEGRITY_PROBE_GUARD + source.slice(firstLineEnd + 1);
+}
+
 export async function writeStubHappierCliFiles(
   monoRoot,
   {
@@ -20,7 +35,7 @@ export async function writeStubHappierCliFiles(
 
   if (typeof distIndexScript !== 'undefined') {
     await mkdir(join(cliDir, 'dist'), { recursive: true });
-    await writeFile(join(cliDir, 'dist', 'index.mjs'), distIndexScript, 'utf-8');
+    await writeFile(join(cliDir, 'dist', 'index.mjs'), addCliDistIntegrityProbeGuard(distIndexScript), 'utf-8');
   }
 
   if (typeof srcIndexScript !== 'undefined') {

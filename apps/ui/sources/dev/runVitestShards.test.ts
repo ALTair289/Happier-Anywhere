@@ -5,10 +5,13 @@ import {
     classifyVitestShardTermination,
     partitionVitestFilesIntoShards,
     resolveVitestConfigPath,
+    resolveVitestInnerShardCount,
+    resolveVitestOuterShard,
     resolveVitestPositionalFilters,
     resolveVitestShardCount,
     resolveVitestPassthroughArgs,
     runVitestShardRuns,
+    selectVitestOuterShardFiles,
     shouldVitestShardRunProceedWithoutFiles,
     summarizeVitestShardOutcomes,
 } from '../../scripts/runVitestShards.mjs';
@@ -25,6 +28,27 @@ describe('apps/ui runVitestShards', () => {
     it('ignores invalid shard overrides', () => {
         expect(resolveVitestShardCount({ HAPPIER_UI_VITEST_SHARDS: '0' })).toBe(24);
         expect(resolveVitestShardCount({ HAPPIER_UI_VITEST_SHARDS: 'nope' })).toBe(24);
+    });
+
+    it('parses a valid outer CI shard and rejects invalid values', () => {
+        expect(resolveVitestOuterShard({ HAPPIER_UI_VITEST_OUTER_SHARD: '2/4' })).toEqual({
+            index: 2,
+            count: 4,
+        });
+        expect(resolveVitestOuterShard({ HAPPIER_UI_VITEST_OUTER_SHARD: '0/4' })).toBe(null);
+        expect(resolveVitestOuterShard({ HAPPIER_UI_VITEST_OUTER_SHARD: '5/4' })).toBe(null);
+        expect(resolveVitestOuterShard({ HAPPIER_UI_VITEST_OUTER_SHARD: 'nope' })).toBe(null);
+    });
+
+    it('selects each outer shard exactly once before calculating inner shard count', () => {
+        const files = ['h', 'a', 'g', 'b', 'f', 'c', 'e', 'd'];
+        const outerShards = Array.from({ length: 4 }, (_, index) => (
+            selectVitestOuterShardFiles(files, { index: index + 1, count: 4 })
+        ));
+
+        expect(outerShards.flat().slice().sort()).toEqual(files.slice().sort());
+        expect(resolveVitestInnerShardCount(24, { index: 1, count: 4 })).toBe(6);
+        expect(resolveVitestInnerShardCount(24, null)).toBe(24);
     });
 
     it('parses --config path from argv', () => {

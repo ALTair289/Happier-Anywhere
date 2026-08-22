@@ -632,7 +632,7 @@ describe('claudeLocal --continue handling', () => {
         const spawnArgs = mockSpawn.mock.calls[0]?.[1] as unknown;
         const spawnOpts = mockSpawn.mock.calls[0]?.[2] as Record<string, unknown>;
 
-        expect(spawnCommand).toBe('cmd.exe');
+        expect(String(spawnCommand)).toMatch(/(?:^|[\\/])?cmd\.exe$/i);
         expect((spawnArgs as any)?.slice?.(0, 3)).toEqual(['/d', '/s', '/c']);
         expect(String((spawnArgs as any)?.[3])).toContain('claude.cmd');
         expect(spawnOpts.shell).not.toBe(true);

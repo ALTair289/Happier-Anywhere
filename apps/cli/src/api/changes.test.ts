@@ -10,7 +10,7 @@ describe('fetchChanges', () => {
     vi.clearAllMocks();
   });
 
-  it('uses the canonical active server endpoint loaded by configuration', async () => {
+  it('uses the live runtime server endpoint when no profile is pinned', async () => {
     vi.stubEnv('HAPPIER_SERVER_URL', 'http://127.0.0.1:41001');
     vi.stubEnv('HAPPIER_LOCAL_SERVER_URL', '');
     vi.stubEnv('HAPPIER_PUBLIC_SERVER_URL', '');
@@ -29,7 +29,7 @@ describe('fetchChanges', () => {
 
     await fetchChanges({ token: 't', after: 0 });
 
-    expect((axios.get as any).mock.calls[0]?.[0]).toBe('http://127.0.0.1:41001/v2/changes');
+    expect((axios.get as any).mock.calls[0]?.[0]).toBe('http://127.0.0.1:52002/v2/changes');
   });
 
   it('parses ok response', async () => {

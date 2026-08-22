@@ -970,6 +970,7 @@ export async function claudeRemoteAgentSdk(opts: {
     };
     let nextMessagePump: Promise<void> | null = null;
     let deferredUntilForegroundTurnEnds: ClaudeRemoteProviderAcceptedPrompt<EnhancedMode> | null = null;
+    let deferredEndUntilForegroundTurnEnds = false;
     const swallowOptionalPromise = async (promise: Promise<void> | null): Promise<void> => {
         if (!promise) return;
         await promise.catch(() => {});
@@ -1489,6 +1490,16 @@ export async function claudeRemoteAgentSdk(opts: {
             nextMessagePump = (async () => {
                 try {
                     while (!abortSignal.aborted) {
+                        if (deferredEndUntilForegroundTurnEnds && !foregroundTurnInterruptActive) {
+                            deferredEndUntilForegroundTurnEnds = false;
+                            messages.end();
+                            try {
+                                response?.close?.();
+                            } catch {
+                                // ignore
+                            }
+                            return;
+                        }
                         const nextOrAbort = deferredUntilForegroundTurnEnds ?? await Promise.race([
                             opts.nextMessage(),
                             waitForAbort(abortSignal),
@@ -1500,6 +1511,10 @@ export async function claudeRemoteAgentSdk(opts: {
 
                         const next: ClaudeRemoteProviderAcceptedPrompt<EnhancedMode> | null = nextOrAbort;
                         if (!next) {
+                            if (foregroundTurnInterruptActive) {
+                                deferredEndUntilForegroundTurnEnds = true;
+                                return;
+                            }
                             messages.end();
                             try {
                                 response?.close?.();
@@ -1708,7 +1723,9 @@ export async function claudeRemoteAgentSdk(opts: {
                 opts.onCompletionEvent?.(params.completionEvent);
             }
             await opts.onReady();
-            scheduleNextMessagePump();
+            if (!foregroundTurnInterruptActive) {
+                scheduleNextMessagePump();
+            }
         };
 
         const reconcileRuntimeActivityForResult = async () => {
@@ -1741,7 +1758,9 @@ export async function claudeRemoteAgentSdk(opts: {
             didReleaseTurnForResult = true;
             await reconcileRuntimeActivityForResult();
             await opts.onReady();
-            scheduleNextMessagePump();
+            if (!foregroundTurnInterruptActive) {
+                scheduleNextMessagePump();
+            }
         };
 
         const finalizeSubagentTurn = async () => {

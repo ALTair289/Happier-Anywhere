@@ -111,6 +111,7 @@ vi.mock('./buildCommandPaletteCommands', async () => {
 
 describe('CommandPaletteProvider', () => {
     beforeEach(() => {
+        vi.stubGlobal('navigator', { platform: 'MacIntel' });
         vi.resetModules();
         vi.clearAllMocks();
         testState.routerPush.mockClear();

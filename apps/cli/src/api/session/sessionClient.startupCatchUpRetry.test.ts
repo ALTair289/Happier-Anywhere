@@ -26,7 +26,7 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
         vi.useRealTimers();
     });
 
-    it('does not schedule daemon startup transcript retries after the initial catch-up succeeds', async () => {
+    it('runs the bounded daemon startup transcript retries after the initial catch-up succeeds', async () => {
         const client = Object.create(ApiSessionClient.prototype) as {
             pendingMessageCallback: null;
             userSocketDisconnectTimer: ReturnType<typeof setTimeout> | null;
@@ -69,11 +69,13 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
         await Promise.resolve();
         await vi.runAllTimersAsync();
 
-        expect(client.catchUpSessionMessages).toHaveBeenCalledTimes(1);
-        expect(client.catchUpSessionMessages).toHaveBeenCalledWith({
-            afterSeq: 7,
-            replayPreviouslyObservedMessageIdsForObservation: true,
-        });
+        expect(client.catchUpSessionMessages).toHaveBeenCalledTimes(4);
+        for (const call of (client.catchUpSessionMessages as ReturnType<typeof vi.fn>).mock.calls) {
+            expect(call[0]).toEqual({
+                afterSeq: 7,
+                replayPreviouslyObservedMessageIdsForObservation: true,
+            });
+        }
     });
 
     it('retries startup transcript catch-up from the initial afterSeq even if a local echo advances the live cursor', async () => {
@@ -225,12 +227,20 @@ describe('ApiSessionClient startup transcript catch-up retries', () => {
         await Promise.resolve();
         await vi.runAllTimersAsync();
 
-        expect(client.catchUpSessionMessages).toHaveBeenCalledTimes(2);
+        expect(client.catchUpSessionMessages).toHaveBeenCalledTimes(4);
         expect(client.catchUpSessionMessages).toHaveBeenNthCalledWith(1, {
             afterSeq: 7,
             replayPreviouslyObservedMessageIdsForObservation: true,
         });
         expect(client.catchUpSessionMessages).toHaveBeenNthCalledWith(2, {
+            afterSeq: 7,
+            replayPreviouslyObservedMessageIdsForObservation: true,
+        });
+        expect(client.catchUpSessionMessages).toHaveBeenNthCalledWith(3, {
+            afterSeq: 7,
+            replayPreviouslyObservedMessageIdsForObservation: true,
+        });
+        expect(client.catchUpSessionMessages).toHaveBeenNthCalledWith(4, {
             afterSeq: 7,
             replayPreviouslyObservedMessageIdsForObservation: true,
         });

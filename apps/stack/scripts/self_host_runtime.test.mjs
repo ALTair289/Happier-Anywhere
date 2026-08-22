@@ -1918,7 +1918,7 @@ test('renderSelfHostStatusText shows disabled auto-update config even if job sta
   assert.match(text, /health:\s*failed/);
 });
 
-test('buildSelfHostDoctorChecks does not require external minisign and includes ui-web checks when installed', () => {
+test('buildSelfHostDoctorChecks does not require external archive verifiers and includes ui-web checks when installed', () => {
   const checks = buildSelfHostDoctorChecks(
     {
       platform: 'linux',
@@ -1929,13 +1929,13 @@ test('buildSelfHostDoctorChecks does not require external minisign and includes 
     },
     {
       state: { uiWeb: { installed: true } },
-      commandExists: (name) => new Set(['tar', 'systemctl']).has(name),
+      commandExists: (name) => name === 'systemctl',
       pathExists: (p) => p.endsWith('happier-server') || p.endsWith('server.env') || p.endsWith('index.html'),
     },
   );
 
-  assert.ok(checks.find((c) => c.name === 'tar')?.ok);
   assert.ok(checks.find((c) => c.name === 'systemctl')?.ok);
+  assert.equal(checks.some((c) => c.name === 'tar'), false);
   assert.equal(checks.some((c) => c.name === 'minisign'), false);
   assert.ok(checks.find((c) => c.name === 'ui-web')?.ok);
 });
