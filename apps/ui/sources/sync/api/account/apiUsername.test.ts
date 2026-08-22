@@ -2,6 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AuthCredentials } from '@/auth/storage/tokenStorage';
 import { HappyError } from '@/utils/errors/errors';
 
+const serverFetchMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@/sync/http/client', () => ({
+    serverFetch: serverFetchMock,
+}));
+
 vi.mock('@/utils/timing/time', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/utils/timing/time')>();
     const immediate = async <T,>(callback: () => Promise<T>): Promise<T> => await callback();
@@ -13,7 +19,7 @@ vi.mock('@/utils/timing/time', async (importOriginal) => {
 });
 
 afterEach(() => {
-    vi.unstubAllGlobals();
+    serverFetchMock.mockReset();
     vi.resetModules();
 });
 
@@ -49,21 +55,24 @@ describe('setAccountUsername', () => {
             }
             return { ok: true, status: 200, json: async () => ({ username: 'alice' }) };
         });
-        vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+        serverFetchMock.mockImplementation(fetchMock);
 
         const { setAccountUsername } = await import('./apiUsername');
         const res = await setAccountUsername(credentials, 'alice');
 
         expect(fetchMock).toHaveBeenCalledWith(
-            'https://api.example.test/v1/account/username',
+            '/v1/account/username',
             expect.objectContaining({
                 method: 'POST',
-                headers: expect.any(Headers),
+                headers: expect.objectContaining({ Authorization: 'Bearer t' }),
             }),
+            { includeAuth: false },
         );
-        const requestInit = resolveNonHealthCall(fetchMock, 'https://api.example.test/v1/account/username');
-        expect((requestInit.headers as Headers).get('Authorization')).toBe('Bearer t');
-        expect((requestInit.headers as Headers).get('Content-Type')).toBe('application/json');
+        const requestInit = resolveNonHealthCall(fetchMock, '/v1/account/username');
+        expect(requestInit.headers).toMatchObject({
+            Authorization: 'Bearer t',
+            'Content-Type': 'application/json',
+        });
         expect(res).toEqual({ username: 'alice' });
     });
 
@@ -76,10 +85,7 @@ describe('setAccountUsername', () => {
             }
             return { ok: false, status: 409, json: async () => ({ error: 'username-taken' }) };
         });
-        vi.stubGlobal(
-            'fetch',
-            fetchMock as unknown as typeof fetch,
-        );
+        serverFetchMock.mockImplementation(fetchMock);
 
         const { setAccountUsername } = await import('./apiUsername');
         await expect(setAccountUsername(credentials, 'alice')).rejects.toMatchObject({
@@ -98,10 +104,7 @@ describe('setAccountUsername', () => {
             }
             return { ok: false, status: 400, json: async () => ({ error: 'invalid-username' }) };
         });
-        vi.stubGlobal(
-            'fetch',
-            fetchMock as unknown as typeof fetch,
-        );
+        serverFetchMock.mockImplementation(fetchMock);
 
         const { setAccountUsername } = await import('./apiUsername');
         await expect(setAccountUsername(credentials, 'bad')).rejects.toMatchObject({
@@ -120,10 +123,7 @@ describe('setAccountUsername', () => {
             }
             return { ok: false, status: 400, json: async () => ({ error: 'username-disabled' }) };
         });
-        vi.stubGlobal(
-            'fetch',
-            fetchMock as unknown as typeof fetch,
-        );
+        serverFetchMock.mockImplementation(fetchMock);
 
         const { setAccountUsername } = await import('./apiUsername');
         await expect(setAccountUsername(credentials, 'alice')).rejects.toMatchObject({
@@ -149,10 +149,7 @@ describe('setAccountUsername', () => {
                 },
             };
         });
-        vi.stubGlobal(
-            'fetch',
-            fetchMock as unknown as typeof fetch,
-        );
+        serverFetchMock.mockImplementation(fetchMock);
 
         const { setAccountUsername } = await import('./apiUsername');
         await expect(setAccountUsername(credentials, 'alice')).rejects.toMatchObject({
@@ -172,10 +169,7 @@ describe('setAccountUsername', () => {
             }
             return { ok: true, status: 200, json: async () => ({ ok: true }) };
         });
-        vi.stubGlobal(
-            'fetch',
-            fetchMock as unknown as typeof fetch,
-        );
+        serverFetchMock.mockImplementation(fetchMock);
 
         const { setAccountUsername } = await import('./apiUsername');
         await expect(setAccountUsername(credentials, 'alice')).rejects.toThrow('Failed to parse set username response');

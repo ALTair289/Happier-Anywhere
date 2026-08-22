@@ -4,6 +4,12 @@ import type { AuthCredentials } from '@/auth/storage/tokenStorage';
 import { HappyError } from '@/utils/errors/errors';
 import { connectVendorToken, disconnectVendorToken } from './apiVendorTokens';
 
+const serverFetchMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@/sync/http/client', () => ({
+    serverFetch: serverFetchMock,
+}));
+
 vi.mock('@/utils/timing/time', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/utils/timing/time')>();
     const immediate = async <T,>(callback: () => Promise<T>): Promise<T> => await callback();
@@ -17,21 +23,12 @@ vi.mock('@/utils/timing/time', async (importOriginal) => {
 const credentials: AuthCredentials = { token: 'test', secret: 'secret' };
 
 function stubFetch(responseFactory: () => Promise<unknown>) {
-    vi.stubGlobal(
-        'fetch',
-        vi.fn(async (input: unknown) => {
-            const url = String(input);
-            if (url.endsWith('/health')) {
-                return { ok: true, status: 200, json: async () => ({ ok: true }) };
-            }
-            return await responseFactory();
-        }) as unknown as typeof fetch,
-    );
+    serverFetchMock.mockImplementation(responseFactory);
 }
 
 describe('apiVendorTokens', () => {
     afterEach(() => {
-        vi.unstubAllGlobals();
+        serverFetchMock.mockReset();
         vi.restoreAllMocks();
     });
 

@@ -198,6 +198,7 @@ vi.mock('@/constants/Typography', () => ({
         pillLabel: () => ({}),
         tabular: () => ({}),
     },
+    FontWeights: { regular: '400', semiBold: '500', bold: '600' },
 }));
 
 vi.mock('@/components/ui/status/StatusDot', () => ({

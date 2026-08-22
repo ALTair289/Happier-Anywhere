@@ -3,6 +3,22 @@ import { PermissionStatus } from 'expo-modules-core';
 
 import type { AuthCredentials } from '@/auth/storage/tokenStorage';
 
+const pushApiMocks = vi.hoisted(() => ({
+    registerPushToken: vi.fn(async () => {}),
+    deletePushToken: vi.fn(async () => {}),
+}));
+
+vi.mock('@/sync/api/session/apiPush', () => ({
+    registerPushToken: pushApiMocks.registerPushToken,
+    deletePushToken: pushApiMocks.deletePushToken,
+}));
+
+vi.mock('@/sync/domains/state/pushTokenRegistration', () => ({
+    loadLastRegisteredExpoPushToken: () => null,
+    saveLastRegisteredExpoPushToken: vi.fn(),
+    clearLastRegisteredExpoPushToken: vi.fn(),
+}));
+
 vi.mock('expo-notifications', () => ({
     getPermissionsAsync: vi.fn(),
     requestPermissionsAsync: vi.fn(),
@@ -38,7 +54,9 @@ vi.mock('expo-secure-store', () => {
 });
 
 afterEach(() => {
-    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    pushApiMocks.registerPushToken.mockClear();
+    pushApiMocks.deletePushToken.mockClear();
     vi.clearAllMocks();
 });
 
@@ -62,12 +80,6 @@ describe('registerPushTokenIfAvailable (multi-server)', () => {
             data: 'ExponentPushToken[secret-token]',
         } satisfies Awaited<ReturnType<typeof Notifications.getExpoPushTokenAsync>>);
 
-        const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => ({
-            ok: true,
-            json: async () => ({ success: true }),
-        }));
-        vi.stubGlobal('fetch', fetchSpy as unknown as typeof fetch);
-
         const { upsertServerProfile, setActiveServerId } = await import('@/sync/domains/server/serverProfiles');
         const defaultServer = upsertServerProfile({ serverUrl: 'https://remote-a.example.test', name: 'Primary' });
         const company = upsertServerProfile({ serverUrl: 'https://company.example.test', name: 'Company' });
@@ -75,12 +87,15 @@ describe('registerPushTokenIfAvailable (multi-server)', () => {
         const { TokenStorage } = await import('@/auth/storage/tokenStorage');
 
         setActiveServerId(defaultServer.id, { scope: 'device' });
-        await TokenStorage.setCredentials({ token: 't_primary', secret: 's' });
-
-        setActiveServerId(company.id, { scope: 'device' });
-        await TokenStorage.setCredentials({ token: 't_company', secret: 's' });
-
-        setActiveServerId(defaultServer.id, { scope: 'device' });
+        vi.spyOn(TokenStorage, 'getCredentialsForServerUrl').mockImplementation(async (_serverUrl, options) => {
+            if (options?.serverId === defaultServer.id) {
+                return { token: 't_primary', secret: 's' };
+            }
+            if (options?.serverId === company.id) {
+                return { token: 't_company', secret: 's' };
+            }
+            return null;
+        });
 
         const messages: string[] = [];
         const log = { log: (message: string) => messages.push(message) };
@@ -89,28 +104,26 @@ describe('registerPushTokenIfAvailable (multi-server)', () => {
         await registerPushTokenIfAvailable({
             credentials: { token: 't_primary', secret: 's' } satisfies AuthCredentials,
             log,
+            getAccountSettings: () => ({}),
         });
 
-        const urls = fetchSpy.mock.calls.map((call) => String(call[0]));
-        expect(urls).toContain('https://remote-a.example.test/v1/push-tokens');
-        expect(urls).toContain('https://company.example.test/v1/push-tokens');
+        expect(pushApiMocks.registerPushToken).toHaveBeenCalledWith(
+            { token: 't_primary', secret: 's' },
+            'ExponentPushToken[secret-token]',
+            expect.objectContaining({
+                apiEndpoint: 'https://remote-a.example.test',
+                clientServerUrl: 'https://remote-a.example.test',
+            }),
+        );
+        expect(pushApiMocks.registerPushToken).toHaveBeenCalledWith(
+            { token: 't_company', secret: 's' },
+            'ExponentPushToken[secret-token]',
+            expect.objectContaining({
+                apiEndpoint: 'https://company.example.test',
+                clientServerUrl: 'https://company.example.test',
+            }),
+        );
         expect(messages.join('\n')).not.toContain('ExponentPushToken[secret-token]');
-
-        const bodiesByUrl = new Map<string, any>();
-        for (const call of fetchSpy.mock.calls) {
-            const url = String(call[0]);
-            const init = (call[1] ?? {}) as any;
-            const body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
-            bodiesByUrl.set(url, body);
-        }
-        expect(bodiesByUrl.get('https://remote-a.example.test/v1/push-tokens')).toMatchObject({
-            token: 'ExponentPushToken[secret-token]',
-            clientServerUrl: 'https://remote-a.example.test',
-        });
-        expect(bodiesByUrl.get('https://company.example.test/v1/push-tokens')).toMatchObject({
-            token: 'ExponentPushToken[secret-token]',
-            clientServerUrl: 'https://company.example.test',
-        });
     });
 
     it('does not reuse another same-origin profile credentials when only one alternate profile is authenticated', async () => {
@@ -132,12 +145,6 @@ describe('registerPushTokenIfAvailable (multi-server)', () => {
             type: 'expo',
             data: 'ExponentPushToken[secret-token]',
         } satisfies Awaited<ReturnType<typeof Notifications.getExpoPushTokenAsync>>);
-
-        const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => ({
-            ok: true,
-            json: async () => ({ success: true }),
-        }));
-        vi.stubGlobal('fetch', fetchSpy as unknown as typeof fetch);
 
         const state = {
             activeServerId: 'server-a',
@@ -178,15 +185,19 @@ describe('registerPushTokenIfAvailable (multi-server)', () => {
         await registerPushTokenIfAvailable({
             credentials: { token: 't_primary', secret: 's' } satisfies AuthCredentials,
             log,
+            getAccountSettings: () => ({}),
         });
 
-        const registerCalls = fetchSpy.mock.calls.filter(([, init]) => ((init as RequestInit | undefined)?.method ?? 'GET') === 'POST');
-        expect(registerCalls).toHaveLength(1);
-        const [url, init] = registerCalls[0]!;
-        expect(String(url)).toBe('https://shared.example.test/v1/push-tokens');
-        expect((init as RequestInit | undefined)?.headers).toMatchObject({
-            Authorization: 'Bearer t_primary',
-        });
+        expect(pushApiMocks.registerPushToken).toHaveBeenCalledTimes(1);
+        expect(pushApiMocks.registerPushToken).toHaveBeenCalledWith(
+            { token: 't_primary', secret: 's' },
+            'ExponentPushToken[secret-token]',
+            expect.objectContaining({
+                serverId: 'server-a',
+                apiEndpoint: 'https://shared.example.test',
+                clientServerUrl: 'https://shared.example.test',
+            }),
+        );
         expect(messages.join('\n')).not.toContain('ExponentPushToken[secret-token]');
 
         vi.doUnmock('@/sync/domains/server/serverProfiles');

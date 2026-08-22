@@ -557,6 +557,12 @@ export function useTranscriptEntryHost(deps: TranscriptEntryHostDeps): Transcrip
                     if (result?.status === 'loaded' && result.targetPresent) {
                         deps.activeTargetWindowTargetRef.current = target;
                         shouldRetryRestore = true;
+                    } else if (result?.status === 'not_found') {
+                        // A conclusive targeted lookup means further bounded loads cannot
+                        // recover this durable anchor. Retry once with materialization
+                        // disabled so the owner can select the nearest surviving row.
+                        deps.anchorLookupExhaustedRef.current = true;
+                        shouldRetryRestore = true;
                     }
                 } else {
                     const result = await deps.loadOlder({ preservePrependViewport: false, showLoadingIndicator: false });

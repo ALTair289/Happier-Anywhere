@@ -3,7 +3,7 @@ import { Pressable, View } from 'react-native';
 
 import { Text, TextInput } from '@/components/ui/text/Text';
 import { Typography } from '@/constants/Typography';
-import { StyleSheet as RNStyleSheet } from 'react-native';
+import { StyleSheet as RNStyleSheet } from 'react-native-unistyles';
 import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
 
 export type SourceControlUpdateTheme = Readonly<{

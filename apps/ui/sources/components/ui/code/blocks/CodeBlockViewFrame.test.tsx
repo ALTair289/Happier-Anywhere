@@ -137,6 +137,6 @@ describe('CodeBlockViewFrame', () => {
         expect(alertSpy).toHaveBeenCalledTimes(0);
 
         const iconAfter = tree.findByType('Icon') as any;
-        expect(iconAfter.props.name).toBe('checkmark-outline');
+        expect(iconAfter.props.name).toBe('check');
     });
 });

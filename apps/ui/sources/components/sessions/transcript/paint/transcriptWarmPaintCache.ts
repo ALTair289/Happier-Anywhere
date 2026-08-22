@@ -13,7 +13,9 @@ type TranscriptWarmPaintRecord = Readonly<{
 type TranscriptWarmPaintStore = Map<string, TranscriptWarmPaintRecord>;
 
 const TRANSCRIPT_WARM_PAINT_CACHE_GLOBAL_KEY = '__HAPPIER_TRANSCRIPT_WARM_PAINT_CACHE__';
-const TRANSCRIPT_WARM_PAINT_CACHE_MAX_SESSIONS = 16;
+// Keep warm restores available across realistic multi-session navigation. The
+// previous cap could evict the first session after only 15 intervening opens.
+const TRANSCRIPT_WARM_PAINT_CACHE_MAX_SESSIONS = 256;
 const TRANSCRIPT_WARM_PAINT_CACHE_TTL_MS = 10 * 60 * 1000;
 
 function getStore(): TranscriptWarmPaintStore {

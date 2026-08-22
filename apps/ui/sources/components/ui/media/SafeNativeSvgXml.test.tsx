@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { parseSafeNativeSvgXml } from './SafeNativeSvgXml';
+
+vi.unmock('react-native-svg');
 
 describe('parseSafeNativeSvgXml', () => {
     it.each([

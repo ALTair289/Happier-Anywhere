@@ -36,12 +36,14 @@ vi.mock('@/ui/logger', () => ({
 vi.mock('./rpc/RpcHandlerManager', () => {
   class RpcHandlerManager {
     registerHandler() {}
+    hasHandler() { return true; }
     onSocketConnect() {}
     onSocketDisconnect() {}
     async handleRequest() {
       return '';
     }
     async waitForIdle() {}
+    async waitForRegisteredHandlers() { return { status: 'ready' as const }; }
   }
   return { RpcHandlerManager };
 });

@@ -206,7 +206,7 @@ const desktopPetOverlayTokenClassifications = [
     reason: 'Feature-specific desktop pet bubble palette; not part of the V1 public theme profile surface.',
 } as const));
 
-const shadowLevelTokenClassifications = [1, 2, 3, 4, 5].flatMap((level) => [
+const shadowLevelTokenClassifications = [1, 2, 3, 4, 5, 6].flatMap((level) => [
     {
         path: ['shadowLevels', String(level), 'boxShadow'],
         status: 'internal',
@@ -224,6 +224,7 @@ export const THEME_COLOR_TOKEN_CLASSIFICATIONS = [
     ...desktopPetOverlayTokenClassifications,
     ...shadowLevelTokenClassifications,
 
+    { path: ['border', 'subtle'], status: 'internal', reason: 'Low-emphasis border variant used by private component chrome; V1 exposes the primary semantic border tokens.' },
     { path: ['button', 'primary', 'gradient', 'colors', '0'], status: 'derived', reason: 'Primary button gradient stop derived from the primary button background recipe.' },
     { path: ['button', 'primary', 'gradient', 'colors', '1'], status: 'derived', reason: 'Primary button gradient stop derived from the primary button background recipe.' },
     { path: ['fab', 'gradient', 'colors', '0'], status: 'derived', reason: 'FAB gradient stop derived from the FAB background recipe.' },

@@ -60,6 +60,7 @@ vi.mock('@/constants/Typography', () => ({
 
 vi.mock('@/components/ui/icons/Icon', () => ({
     Icon: () => '.',
+    ICON_SIZE: { xs: 14, sm: 16, md: 20, lg: 24, xl: 29 },
 }));
 
 vi.mock('expo-clipboard', () => ({

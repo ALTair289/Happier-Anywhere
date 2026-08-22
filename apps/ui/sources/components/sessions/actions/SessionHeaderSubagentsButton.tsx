@@ -1,23 +1,22 @@
 import * as React from 'react';
-import { Pressable, View } from 'react-native';
+import { Pressable } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { useAppPaneScope } from '@/components/appShell/panes/hooks/useAppPaneScope';
-import { Text } from '@/components/ui/text/Text';
 import { t } from '@/text';
 import { useOptionalSessionScreenTestId } from '../shell/sessionScreenTestIds';
 import { SESSION_HEADER_ICON_SIZE_PX } from '@/components/sessions/actions/sessionHeaderIconMetrics';
 import { SessionHeaderIconWithCount } from '@/components/sessions/actions/SessionHeaderIconWithCount';
-import { Icon, ICON_SIZE } from '@/components/ui/icons/Icon';
+import { Icon } from '@/components/ui/icons/Icon';
 
 /**
- * A live indicator: present exactly while agents are running in this session. `activeCount` is the
- * whole condition — there is no second "has any" flag, because a session that ran an agent an hour
- * ago is history, and history belongs in the overflow menu, not in a status slot.
+ * A live indicator while agents are running. Callers may also expose it while idle when the session
+ * supports launching subagents, so the pane remains reachable before the first agent starts.
  */
 export const SessionHeaderSubagentsButton = React.memo((props: Readonly<{
     scopeId: string;
     activeCount: number;
+    showWhenIdle?: boolean;
 }>) => {
     const { theme } = useUnistyles();
     const pane = useAppPaneScope(props.scopeId);
@@ -28,7 +27,7 @@ export const SessionHeaderSubagentsButton = React.memo((props: Readonly<{
         pane.setRightTab('agents');
     }, [pane]);
 
-    if (props.activeCount <= 0) return null;
+    if (props.activeCount <= 0 && props.showWhenIdle !== true) return null;
 
     return (
         <Pressable

@@ -1,5 +1,6 @@
 import * as React from 'react';
-import { Platform, Pressable, StyleSheet, useWindowDimensions, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native';
+import { Platform, Pressable, useWindowDimensions, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native';
+import { StyleSheet } from 'react-native-unistyles';
 import { useUnistyles } from 'react-native-unistyles';
 
 import { COMPOSER_SURFACE_RADIUS } from '@/components/sessions/agentInput/composerContentInset';

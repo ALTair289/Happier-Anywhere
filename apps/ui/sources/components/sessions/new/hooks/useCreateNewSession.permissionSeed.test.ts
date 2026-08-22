@@ -232,6 +232,7 @@ async function setupUseCreateNewSessionHarness() {
         loadSessionPermissionModes: () => ({}),
         loadSessionPermissionModeUpdatedAts: () => ({}),
         loadSessionReviewCommentsDrafts: () => ({}),
+        loadWorkspaceReviewCommentsDrafts: () => ({}),
         loadSettings: () => ({ settings: {}, version: null }),
         loadThemePreference: () => 'adaptive',
         saveChangesCursor: vi.fn(),
@@ -254,6 +255,7 @@ async function setupUseCreateNewSessionHarness() {
         saveSessionPermissionModes: vi.fn(),
         saveSessionPermissionModeUpdatedAts: vi.fn(),
         saveSessionReviewCommentsDrafts: vi.fn(),
+        saveWorkspaceReviewCommentsDrafts: vi.fn(),
         clearPersistence: vi.fn(),
     }));
     vi.doMock('@/sync/domains/server/serverRuntime', () => ({

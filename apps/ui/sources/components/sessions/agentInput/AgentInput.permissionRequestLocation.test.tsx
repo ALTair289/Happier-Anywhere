@@ -298,7 +298,7 @@ describe('AgentInput (permission tool location)', () => {
             onSend={() => {}}
             sessionId={sessionId}
             metadata={null as any}
-            autocompleteKinds={[]}
+            autocompletePrefixes={[]}
             autocompleteSuggestions={async () => []}
             permissionRequests={[] as any}
         />)).tree;
@@ -326,7 +326,7 @@ describe('AgentInput (permission tool location)', () => {
                     onSend={() => {}}
                     sessionId={sessionId}
                     metadata={null as any}
-                    autocompleteKinds={[]}
+                    autocompletePrefixes={[]}
                     autocompleteSuggestions={async () => []}
                     permissionRequests={permissionRequests as any}
                 />)).tree;
@@ -352,7 +352,7 @@ describe('AgentInput (permission tool location)', () => {
                     onSend={() => {}}
                     sessionId={sessionId}
                     metadata={null as any}
-                    autocompleteKinds={[]}
+                    autocompletePrefixes={[]}
                     autocompleteSuggestions={async () => []}
                     permissionRequests={permissionRequests as any}
                 />
@@ -392,7 +392,7 @@ describe('AgentInput (permission tool location)', () => {
                     onSend={() => {}}
                     sessionId={sessionId}
                     metadata={null as any}
-                    autocompleteKinds={[]}
+                    autocompletePrefixes={[]}
                     autocompleteSuggestions={async () => []}
                     permissionRequests={permissionRequests as any}
                 />)).tree;

@@ -50,6 +50,19 @@ vi.mock('@/components/sessions/files/views/SessionScmReviewDetailsView', () => (
     SessionScmReviewDetailsView: () => React.createElement('SessionScmReviewDetailsView'),
 }));
 
+vi.mock('@/agents/registry/sessionSubagentUiBehavior', () => ({
+    renderProviderSessionDetailsTab: () => null,
+    resolveProviderSessionDetailsTabIconName: () => null,
+}));
+
+vi.mock('./SessionDetailsPanelDetailViews', () => ({
+    SessionCommitDetailsViewForPanel: () => React.createElement('SessionCommitDetailsViewForPanel'),
+    SessionFileDetailsViewForPanel: () => React.createElement('SessionFileDetailsViewForPanel'),
+    SessionScmReviewDetailsViewForPanel: () => React.createElement('SessionScmReviewDetailsViewForPanel'),
+    SessionScmStashDetailsViewForPanel: () => React.createElement('SessionScmStashDetailsViewForPanel'),
+    SessionSubagentDetailsViewForPanel: () => React.createElement('SessionSubagentDetailsViewForPanel'),
+}));
+
 vi.mock('@/components/appShell/panes/hooks/useAppPaneScope', () => ({
     useAppPaneScope: () => ({
         closeDetails: vi.fn(),

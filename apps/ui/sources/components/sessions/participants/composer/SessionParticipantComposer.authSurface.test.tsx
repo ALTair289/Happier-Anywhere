@@ -82,6 +82,13 @@ vi.mock('@/utils/system/fireAndForget', () => ({
     fireAndForget: (promise: Promise<unknown>) => void promise,
 }));
 
+vi.mock('@/sync/domains/scope/activeServerAccountScope', () => ({
+    getActiveServerAccountScope: () => ({
+        serverId: 'server-auth-surface',
+        accountId: 'account-auth-surface',
+    }),
+}));
+
 vi.mock('@/log', () => ({
     log: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));

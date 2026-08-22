@@ -54,8 +54,14 @@ const IGNORED_UNTRANSLATED_KEYS = new Set([
 ]);
 const IGNORED_UNTRANSLATED_KEYS_BY_LOCALE: Readonly<Record<string, ReadonlySet<string>>> = {
     // These locales use the same spelling for this label.
-    ca: new Set(['message.runtimeConfigOutcomeKeyModel']),
+    ca: new Set([
+        'message.runtimeConfigOutcomeKeyModel',
+        'settingsSession.sessionList.headerIdentityDisplayAvatarTitle',
+    ]),
     pl: new Set(['message.runtimeConfigOutcomeKeyModel']),
+    es: new Set(['settingsSession.sessionList.headerIdentityDisplayAvatarTitle']),
+    it: new Set(['settingsSession.sessionList.headerIdentityDisplayAvatarTitle']),
+    pt: new Set(['settingsSession.sessionList.headerIdentityDisplayAvatarTitle']),
 };
 const IGNORED_UNTRANSLATED_KEY_PREFIXES = [
     'settingsAppearance.themeProfiles.',

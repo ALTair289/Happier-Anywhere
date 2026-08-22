@@ -32,6 +32,8 @@ const usageApiState: UsageApiState = {
     })),
 };
 
+const dateTimeFormatSpy = vi.hoisted(() => vi.fn());
+
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock('expo-localization', () => ({
@@ -68,15 +70,23 @@ vi.mock('@/sync/api/account/apiUsage', () => ({
     calculateTotals: (...args: unknown[]) => usageApiState.calculateTotals(...args),
 }));
 
+vi.mock('@/utils/datetime/cachedIntlFormatters', () => ({
+    getCachedIntlDateTimeFormat: (...args: unknown[]) => {
+        dateTimeFormatSpy(...args);
+        return { format: () => '2 janv.' };
+    },
+}));
+
 function findPressableByText(
     screen: Parameters<typeof renderScreen>[0] extends never ? never : Awaited<ReturnType<typeof renderScreen>>,
     text: string,
 ) {
-    return screen.findAll((node) => (
-        typeof node.type === 'string' &&
-        String(node.type) === 'Pressable' &&
-        node.findAll((child) => typeof child.type === 'string' && String(child.type) === 'Text' && child.props?.children === text).length > 0
-    ))[0];
+    const textNode = findTextNodeByContent(screen, text);
+    let node = textNode?.parent ?? null;
+    while (node && String(node.type) !== 'Pressable') {
+        node = node.parent;
+    }
+    return node;
 }
 
 function findTextNodeByContent(
@@ -98,6 +108,7 @@ describe('UsagePanel settings behavior', () => {
             tokensByModel: {},
             costByModel: {},
         });
+        dateTimeFormatSpy.mockClear();
         getStorage().setState((state) => ({
             settings: {
                 ...(state.settings ?? {}),
@@ -152,16 +163,15 @@ describe('UsagePanel settings behavior', () => {
                 },
             ],
         });
-        const dateSpy = vi.spyOn(Date.prototype, 'toLocaleDateString').mockReturnValue('2 janv.');
-
         const { UsagePanel } = await import('./UsagePanel');
         await renderScreen(<UsagePanel />);
         await flushHookEffects();
 
-        expect(dateSpy).toHaveBeenCalledWith('fr-CH', { month: 'short', day: 'numeric' });
+        expect(dateTimeFormatSpy).toHaveBeenCalledWith('fr-CH', { month: 'short', day: 'numeric' });
     });
 
     it('uses theme token colors for the active period control', async () => {
+        setPreferredLanguageFromSettings('en');
         authState.credentials = { token: 'token-1' };
         usageApiState.getUsageForPeriod.mockResolvedValue({ usage: [] });
 

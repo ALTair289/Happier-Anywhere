@@ -982,7 +982,29 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
                 <SessionHeaderSubagentsButton
                     scopeId={props.paneScopeId}
                     activeCount={subagentCounts.active}
+                    showWhenIdle={shouldOfferSubagentsMenuItem}
                 />
+            ) : null}
+            {!props.shouldFoldHeaderIconActions && sessionExecutionRunsSupported ? (
+                <Pressable
+                    onPress={() => router.push(buildCurrentSessionHref('/runs') as any)}
+                    hitSlop={15}
+                    style={({ pressed }) => ({
+                        width: 44,
+                        height: 44,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        opacity: pressed ? 0.7 : 1,
+                    })}
+                    accessibilityRole="button"
+                    accessibilityLabel={t('session.openRuns')}
+                >
+                    <Icon
+                        name="play"
+                        size={SESSION_HEADER_ICON_SIZE_PX}
+                        color={theme.colors.chrome.header.foreground}
+                    />
+                </Pressable>
             ) : null}
             <SessionHeaderTerminalButton
                 sessionId={props.sessionId}
@@ -993,7 +1015,7 @@ const SessionHeaderRightElement = React.memo(function SessionHeaderRightElement(
                 shown on every width; moving that navigation to an icon that folds below 520pt would
                 delete the only path to it on phones rather than tidy the row. */}
             <SessionHeaderInfoButton onPress={props.onOpenSessionInfo} />
-            {!props.shouldFoldHeaderIconActions && props.showAutomations && props.sessionAutomationsEnabledCount > 0 ? (
+            {!props.shouldFoldHeaderIconActions && props.showAutomations ? (
                 <Pressable
                     onPress={() => navigateWithBlurOnWeb(() => router.push(buildCurrentSessionHref('/automations') as any))}
                     hitSlop={15}

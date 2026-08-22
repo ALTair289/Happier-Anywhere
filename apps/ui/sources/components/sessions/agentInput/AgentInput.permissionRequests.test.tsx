@@ -334,7 +334,7 @@ describe('AgentInput (permission requests)', () => {
             onChangeText: () => {},
             sessionId: 's1',
             onSend: () => {},
-            autocompleteKinds: [],
+            autocompletePrefixes: [],
             autocompleteSuggestions: async () => [],
             permissionRequests: [
                 { id: 'req1', tool: 'Bash', arguments: { command: 'ls' }, createdAt: 123 },
@@ -353,7 +353,7 @@ describe('AgentInput (permission requests)', () => {
             onChangeText: () => {},
             sessionId: 's1',
             onSend: () => {},
-            autocompleteKinds: [],
+            autocompletePrefixes: [],
             autocompleteSuggestions: async () => [],
             permissionRequests: [
                 { id: 'req1', tool: 'Bash', arguments: { command: 'ls' }, createdAt: 123 },
@@ -373,7 +373,7 @@ describe('AgentInput (permission requests)', () => {
             onChangeText: () => {},
             sessionId: 's1',
             onSend: () => {},
-            autocompleteKinds: [],
+            autocompletePrefixes: [],
             autocompleteSuggestions: async () => [],
             permissionRequests: [
                 { id: 'req1', tool: 'Bash', arguments: { command: 'ls' }, createdAt: 123 },
@@ -396,7 +396,7 @@ describe('AgentInput (permission requests)', () => {
             onChangeText: () => {},
             sessionId: 's1',
             onSend: () => {},
-            autocompleteKinds: [],
+            autocompletePrefixes: [],
             autocompleteSuggestions: async () => [],
             maxPanelHeight: 90,
             permissionRequests: [

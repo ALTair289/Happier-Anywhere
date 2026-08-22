@@ -33,7 +33,7 @@ const defaultApprovalArtifactBody = {
     actionArgs: {
         sessionId: 'session-1',
         requestId: 'ask-1',
-        answers: [{ question: 'Continue?', answer: 'Yes' }],
+        answers: [{ question: 'Continue?', values: ['Yes'] }],
     },
     summary: 'Approve answering the user',
     preview: {

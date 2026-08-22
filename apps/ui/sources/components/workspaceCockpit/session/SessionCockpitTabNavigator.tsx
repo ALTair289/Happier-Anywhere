@@ -3,7 +3,8 @@ import {
     createBottomTabNavigator,
 } from '@react-navigation/bottom-tabs';
 import { NavigationContainer, NavigationIndependentTree, useIsFocused } from '@react-navigation/native';
-import { Platform, StyleSheet, View, type ViewProps } from 'react-native';
+import { Platform, View, type ViewProps } from 'react-native';
+import { StyleSheet } from 'react-native-unistyles';
 
 import { usePersistSessionLastMobileSurface } from '@/sync/domains/state/storage';
 

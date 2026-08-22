@@ -15,6 +15,7 @@ import {
   ConnectedServiceSessionAuthSwitchLockRegistry,
   createConnectedServiceSessionAuthSwitchCore,
 } from '@/daemon/connectedServices/runtimeAuth/connectedServiceSessionAuthSwitchCore';
+import { createConnectedServiceGroupMutationCurrentnessValidator } from '@/daemon/connectedServices/credentials/createConnectedServiceGroupMutationCurrentnessValidator';
 import { resolveTrackedConnectedServiceSwitchContinuityContext } from '@/daemon/connectedServices/sessionAuthSwitch/resolveTrackedConnectedServiceSwitchContinuityContext';
 import { createSessionConnectedServiceAuthHotApply } from '@/daemon/connectedServices/sessionAuthSwitch/sessionConnectedServiceAuthHotApply';
 import {
@@ -257,6 +258,10 @@ describe('Claude shared-group switch continuity', () => {
       restartSession,
       hotApply: createSessionConnectedServiceAuthHotApply({
         resolveRuntimeAuthAdapter: async () => createClaudeConnectedServiceRuntimeAuthAdapter(),
+        validateGroupMutationCurrentness: createConnectedServiceGroupMutationCurrentnessValidator({
+          api: api as unknown as ApiClient,
+          credentials,
+        }),
       }),
       persistSessionBindings: vi.fn(),
       registerHotApplyTargets,

@@ -84,6 +84,19 @@ vi.mock('@/components/sessions/files/views/SessionFileDetailsView', () => ({
     SessionFileDetailsView: () => React.createElement('SessionFileDetailsView'),
 }));
 
+vi.mock('@/agents/registry/sessionSubagentUiBehavior', () => ({
+    renderProviderSessionDetailsTab: () => null,
+    resolveProviderSessionDetailsTabIconName: () => null,
+}));
+
+vi.mock('./SessionDetailsPanelDetailViews', () => ({
+    SessionCommitDetailsViewForPanel: () => React.createElement('SessionCommitDetailsViewForPanel'),
+    SessionFileDetailsViewForPanel: () => React.createElement('SessionFileDetailsViewForPanel'),
+    SessionScmReviewDetailsViewForPanel: () => React.createElement('SessionScmReviewDetailsViewForPanel'),
+    SessionScmStashDetailsViewForPanel: () => React.createElement('SessionScmStashDetailsViewForPanel'),
+    SessionSubagentDetailsViewForPanel: () => React.createElement('SessionSubagentDetailsViewForPanel'),
+}));
+
 describe('SessionDetailsPanel (execution run launcher resource)', () => {
     const getSessionDetailsPanel = async () => (await import('./SessionDetailsPanel')).SessionDetailsPanel;
 

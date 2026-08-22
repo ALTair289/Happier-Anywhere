@@ -33,6 +33,11 @@ installConnectedServicesCommonModuleMocks({
 });
 installConnectedServiceDetailShellMocks();
 
+vi.mock('@/agents/registry/AgentIcon', () => {
+  const React = require('react');
+  return { AgentIcon: (props: Record<string, unknown>) => React.createElement('AgentIcon', props) };
+});
+
 vi.mock('@/sync/store/settingsWriters', () => ({
   useApplySettings: () => applySettingsSpy,
 }));

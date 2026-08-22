@@ -76,6 +76,10 @@ vi.mock('@/components/ui/avatar/Avatar', () => {
     const React = require('react');
     return { Avatar: (props: Record<string, unknown>) => React.createElement('Avatar', props) };
 });
+vi.mock('@/agents/registry/AgentIcon', () => {
+    const React = require('react');
+    return { AgentIcon: (props: Record<string, unknown>) => React.createElement('AgentIcon', props) };
+});
 
 const stableCredentials = { token: 't', secret: Buffer.from(new Uint8Array(32).fill(3)).toString('base64url') } as const;
 vi.mock('@/auth/context/AuthContext', () => ({

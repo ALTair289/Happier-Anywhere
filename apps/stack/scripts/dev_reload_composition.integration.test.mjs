@@ -211,7 +211,6 @@ test('production reload composition keeps app and Prisma reloads exclusive while
     ['kill', 101, 1450],
     ['kill', 102, 1450],
     ['kill', 103, 1450],
-    ['kill', 102, 1450],
   ]);
   assert.ok(
     calls.findIndex(([kind]) => kind === 'maintenance')

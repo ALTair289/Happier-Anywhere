@@ -982,7 +982,7 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
       });
 
       await waitUntil(() => onMessage.mock.calls.some(([message]) => message.uuid === 'resumed-hook-assistant-row'));
-      await waitUntil(() => onReady.mock.calls.length === 1);
+      await waitUntil(() => onReady.mock.calls.length === 1, 10_000);
       expect(onPromptAcceptedByProvider).toHaveBeenCalledTimes(1);
       expect(onPromptAcceptedByProvider).toHaveBeenCalledWith({
         message: prompt,

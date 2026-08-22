@@ -157,9 +157,10 @@ function pendingOutboxFixture(params: Readonly<{
     };
 }
 
-async function flushPendingOutboxRetryMicrotasks(): Promise<void> {
-    for (let index = 0; index < 20; index += 1) {
+async function flushPendingOutboxRetryMicrotasks(until: () => boolean): Promise<void> {
+    for (let index = 0; index < 200; index += 1) {
         await Promise.resolve();
+        if (until()) return;
     }
 }
 
@@ -293,11 +294,19 @@ describe('sync.sendMessage optimistic thinking', () => {
         });
         assertServerReachabilityAuthenticatedMock.mockReset();
         runtimeFetchWithServerReachabilityMock.mockReset();
-        runtimeFetchWithServerReachabilityMock.mockImplementation(async (request: { url?: string }) =>
-            Response.json(request.url?.endsWith('/v1/features')
-                ? buildServerFeaturesResponse()
-                : { requestedAction: { v: 1, kind: 'enqueue' } }),
-        );
+        runtimeFetchWithServerReachabilityMock.mockImplementation(async (request: { url?: string; init?: RequestInit }) => {
+            if (request.url?.endsWith('/v1/features')) {
+                return Response.json(buildServerFeaturesResponse());
+            }
+            const requestBody = JSON.parse(String(request.init?.body ?? '{}')) as {
+                localId?: string;
+                requestedAction?: { v: 1; kind: string };
+            };
+            return Response.json({
+                requestedAction: requestBody.requestedAction ?? { v: 1, kind: 'enqueue' },
+                pending: { localId: requestBody.localId },
+            });
+        });
         resumeSessionMock.mockClear();
     });
 
@@ -888,7 +897,10 @@ describe('sync.sendMessage optimistic thinking', () => {
             }
 
             await vi.advanceTimersByTimeAsync(1_000);
-            await flushPendingOutboxRetryMicrotasks();
+            await flushPendingOutboxRetryMicrotasks(() =>
+                loadPendingOutboxForSession(sessionId, scopeA).length === 0
+                && loadPendingOutboxForSession(sessionId, scopeB).length === 0
+            );
 
             const posts = runtimeFetchWithServerReachabilityMock.mock.calls
                 .map(([request]) => request as { serverUrl: string; init?: RequestInit })
@@ -943,7 +955,10 @@ describe('sync.sendMessage optimistic thinking', () => {
             }
 
             await vi.advanceTimersByTimeAsync(1_000);
-            await flushPendingOutboxRetryMicrotasks();
+            await flushPendingOutboxRetryMicrotasks(() =>
+                loadPendingOutboxForSession(sessionId, scopeA).length === 0
+                && loadPendingOutboxForSession(sessionId, scopeB).length === 0
+            );
 
             const deletes = runtimeFetchWithServerReachabilityMock.mock.calls
                 .map(([request]) => request as { serverUrl: string; url: string; init?: RequestInit })
@@ -1149,7 +1164,10 @@ describe('sync.sendMessage optimistic thinking', () => {
                 didWrite: true,
             })) as any;
             const requestSpy = vi.spyOn(apiSocket, 'request').mockResolvedValue(
-                Response.json({ requestedAction: { v: 1, kind: 'enqueue' } }),
+                Response.json({
+                    requestedAction: { v: 1, kind: 'enqueue' },
+                    pending: { localId: 'first-message-local' },
+                }),
             );
 
             const { sync } = await import('./sync');
@@ -1201,7 +1219,7 @@ describe('sync.sendMessage optimistic thinking', () => {
         storage.getState().applySessions([createSession({
             sessionId,
             metadata: {
-                version: '0.1.0',
+                version: '0.0.9',
             } as any,
         })]);
 

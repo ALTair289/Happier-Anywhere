@@ -10,7 +10,7 @@ import type { ScmProjectInFlightOperation } from '@/sync/runtime/orchestration/p
 import type { MarkdownEditMode } from '@/components/ui/markdown/editor/markdownEditorTypes';
 import type { MarkdownRichIneligibleReason } from '@/components/ui/markdown/editor/core/eligibility/markdownRichEligibility';
 import { resolveMarkdownRichDisabledReasonCopy } from '@/components/ui/markdown/editor/core/eligibility/markdownRichDisabledReasonCopy';
-import { StyleSheet as RNStyleSheet } from 'react-native';
+import { StyleSheet as RNStyleSheet } from 'react-native-unistyles';
 import { IconAction } from '@/components/ui/buttons/IconAction';
 import { ToolbarButton } from '@/components/ui/buttons/ToolbarButton';
 import { Icon, type IconName } from '@/components/ui/icons/Icon';

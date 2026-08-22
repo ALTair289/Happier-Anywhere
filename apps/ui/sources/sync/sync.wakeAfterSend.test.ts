@@ -29,14 +29,20 @@ vi.mock('@/voice/context/voiceHooks', () => ({
     },
 }));
 
-const ensureSessionRuntimeForPendingInputSpy = vi.hoisted(() => vi.fn(async (_options: unknown) => ({ type: 'success' as const })));
+const resumeSessionSpy = vi.hoisted(() => vi.fn(async (_options: unknown) => ({ type: 'success' as const })));
 vi.mock('@/sync/ops', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/sync/ops')>();
     return {
         ...actual,
-        ensureSessionRuntimeForPendingInput: ensureSessionRuntimeForPendingInputSpy,
+        resumeSession: resumeSessionSpy,
     };
 });
+
+const getServerFeaturesSnapshotSpy = vi.hoisted(() => vi.fn());
+vi.mock('@/sync/api/capabilities/serverFeaturesClient', async (importOriginal) => ({
+    ...await importOriginal<typeof import('@/sync/api/capabilities/serverFeaturesClient')>(),
+    getServerFeaturesSnapshot: (...args: unknown[]) => getServerFeaturesSnapshotSpy(...args),
+}));
 
 import { storage } from './domains/state/storage';
 import type { Machine, Session } from './domains/state/storageTypes';
@@ -125,7 +131,16 @@ describe('sync.sendMessage wake-after-send', () => {
             accountId: 'sync-wake-after-send-test-account',
         });
         appStateAddListener.mockClear();
-        ensureSessionRuntimeForPendingInputSpy.mockClear();
+        resumeSessionSpy.mockClear();
+        getServerFeaturesSnapshotSpy.mockReset();
+        getServerFeaturesSnapshotSpy.mockResolvedValue({
+            status: 'ready',
+            features: {
+                capabilities: {
+                    session: { pendingInput: { protocolVersion: 1 } },
+                },
+            },
+        });
     });
 
     afterEach(() => {
@@ -249,8 +264,8 @@ describe('sync.sendMessage wake-after-send', () => {
 
         await sync.sendMessage(sessionId, 'hello');
 
-        expect(ensureSessionRuntimeForPendingInputSpy).toHaveBeenCalledTimes(1);
-        expect(ensureSessionRuntimeForPendingInputSpy).toHaveBeenCalledWith(
+        expect(resumeSessionSpy).toHaveBeenCalledTimes(1);
+        expect(resumeSessionSpy).toHaveBeenCalledWith(
             expect.objectContaining({
                 sessionId,
                 machineId: 'm1',
@@ -307,8 +322,8 @@ describe('sync.sendMessage wake-after-send', () => {
 
         await sync.sendMessage(sessionId, 'hello');
 
-        expect(ensureSessionRuntimeForPendingInputSpy).toHaveBeenCalledTimes(1);
-        expect(ensureSessionRuntimeForPendingInputSpy).toHaveBeenCalledWith(
+        expect(resumeSessionSpy).toHaveBeenCalledTimes(1);
+        expect(resumeSessionSpy).toHaveBeenCalledWith(
             expect.objectContaining({
                 sessionId,
                 machineId: 'm-new',
@@ -386,8 +401,8 @@ describe('sync.sendMessage wake-after-send', () => {
             `/v2/sessions/${sessionId}/pending`,
             expect.objectContaining({ method: 'POST' }),
         );
-        await vi.waitFor(() => expect(ensureSessionRuntimeForPendingInputSpy).toHaveBeenCalledTimes(1));
-        expect(ensureSessionRuntimeForPendingInputSpy).toHaveBeenCalledWith({
+        await vi.waitFor(() => expect(resumeSessionSpy).toHaveBeenCalledTimes(1));
+        expect(resumeSessionSpy).toHaveBeenCalledWith(expect.objectContaining({
             sessionId,
             machineId: 'm1',
             directory: '/tmp/project',
@@ -395,7 +410,11 @@ describe('sync.sendMessage wake-after-send', () => {
             resume: 'codex-1',
             codexBackendMode: 'appServer',
             initialTranscriptAfterSeq: 12,
-        });
+            executionAuthorization: expect.objectContaining({
+                provenance: 'user_request',
+                requestId: expect.any(String),
+            }),
+        }));
     });
 
     it('rejects submitMessage pending intent on old CLI without direct delivery', async () => {

@@ -10,6 +10,15 @@ import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
 import { captureConsoleLogAndMuteStdout } from '@/testkit/logger/captureOutput';
 import { commandRegistry } from '@/cli/commandRegistry';
 
+const successfulRemoteRelayHostInstallOutput = {
+    status: 0,
+    stdout: `${JSON.stringify({
+        ok: true,
+        kind: 'relay_host_install',
+        data: { relayUrl: 'http://127.0.0.1:3005', mode: 'user' },
+    })}\n`,
+} as const;
+
 function createFakeSsh(scenario: Readonly<{
     outputs?: readonly Readonly<{ status?: number; stdout?: string; stderr?: string }>[];
 }>): Readonly<{
@@ -425,7 +434,7 @@ describe('happier relay --json', () => {
                 { status: 0, stdout: `${JSON.stringify({ platform: 'linux', arch: 'x86_64' })}\n` },
                 { status: 0, stdout: 'yes\n' },
                 { status: 0, stdout: '\n' },
-                { status: 0, stdout: '\n' },
+                successfulRemoteRelayHostInstallOutput,
                 { status: 0, stdout: '\n' },
                 { status: 0, stdout: '\n' },
             ],
@@ -480,7 +489,7 @@ describe('happier relay --json', () => {
                 { status: 0, stdout: `${JSON.stringify({ platform: 'linux', arch: 'x86_64' })}\n` },
                 { status: 0, stdout: 'yes\n' },
                 { status: 0, stdout: '\n' },
-                { status: 0, stdout: '\n' },
+                successfulRemoteRelayHostInstallOutput,
                 { status: 0, stdout: '\n' },
                 { status: 0, stdout: '\n' },
             ],
@@ -833,7 +842,7 @@ describe('happier relay --json', () => {
                 { status: 0, stdout: `${JSON.stringify({ platform: 'linux', arch: 'x86_64' })}\n` },
                 { status: 0, stdout: 'yes\n' },
                 { status: 0, stdout: '\n' },
-                { status: 0, stdout: '\n' },
+                successfulRemoteRelayHostInstallOutput,
                 { status: 0, stdout: '\n' },
                 { status: 0, stdout: '\n' },
             ],
@@ -890,7 +899,7 @@ describe('happier relay --json', () => {
                 { status: 0, stdout: '\n' },
                 { status: 0, stdout: '\n' },
                 { status: 0, stdout: '\n' },
-                { status: 0, stdout: '\n' },
+                successfulRemoteRelayHostInstallOutput,
             ],
         });
 
@@ -951,7 +960,7 @@ describe('happier relay --json', () => {
                 { status: 0, stdout: '\n' },
                 { status: 0, stdout: '\n' },
                 { status: 0, stdout: '\n' },
-                { status: 0, stdout: '\n' },
+                successfulRemoteRelayHostInstallOutput,
             ],
         });
 

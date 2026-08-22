@@ -63,6 +63,7 @@ vi.mock('@/constants/Typography', () => ({
             systemMono: () => ({}),
         },
     },
+    FontWeights: { regular: '400', semiBold: '500', bold: '600' },
 }));
 
 vi.mock('@/components/ui/lists/ItemList', () => ({

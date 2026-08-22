@@ -37,6 +37,10 @@ export function resolveWebViewportTelemetryDiagnostics(params: Readonly<{
         // visibility now lives in the navigation visibility store, derived in
         // renderer index space.
         navigationAnchorCount: params.runtimeAnchors.length,
+        // Keep the historical diagnostic field present without reintroducing
+        // the expensive DOM-wide anchor scan. Consumers use the explicit
+        // sentinel to distinguish "not observed" from a malformed event.
+        firstVisibleAnchorTestId: 'none',
         ...(metrics ? {
             domScrollTop: metrics.scrollTop,
             domScrollHeight: metrics.scrollHeight,

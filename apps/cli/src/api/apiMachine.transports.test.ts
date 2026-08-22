@@ -68,6 +68,9 @@ vi.mock('./rpc/RpcHandlerManager', () => ({
       rpcHandlerConfigs.push(config);
     }
     registerHandler() {}
+    hasHandler() {
+      return true;
+    }
     onSocketConnect() {}
     onSocketDisconnect() {}
     async handleRequest() {
@@ -75,6 +78,9 @@ vi.mock('./rpc/RpcHandlerManager', () => ({
     }
     async invokeLocal() {
       return { ok: true };
+    }
+    async waitForRegisteredHandlers() {
+      return { status: 'ready' };
     }
     async waitForIdle() {}
   },

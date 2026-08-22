@@ -90,16 +90,15 @@ describe('fetchSessionByIdWithServerScope', () => {
         const params = fetchAndApplySessionByIdSpy.mock.calls[0]?.[0];
         expect(params.credentials).toEqual({ token: 'scoped-token', secret: '' });
         await params.request('/v2/sessions/session-1', { method: 'GET', headers: { 'X-Test': '1' } });
-        expect(runtimeFetchSpy).toHaveBeenCalledWith(
-            'https://server-b.example.test/v2/sessions/session-1',
-            expect.objectContaining({
-                method: 'GET',
-                headers: expect.objectContaining({
-                    Authorization: 'Bearer scoped-token',
-                    'X-Test': '1',
-                }),
-            }),
+        const requestCall = runtimeFetchSpy.mock.calls.find(
+            ([url]) => url === 'https://server-b.example.test/v2/sessions/session-1',
         );
+        expect(requestCall).toBeDefined();
+        const requestInit = requestCall?.[1] as RequestInit;
+        const requestHeaders = new Headers(requestInit.headers);
+        expect(requestInit.method).toBe('GET');
+        expect(requestHeaders.get('Authorization')).toBe('Bearer scoped-token');
+        expect(requestHeaders.get('X-Test')).toBe('1');
     });
 
     it('forwards shell-only hydration options to the session-by-id reader', async () => {

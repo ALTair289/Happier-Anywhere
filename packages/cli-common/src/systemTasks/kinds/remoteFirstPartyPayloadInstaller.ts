@@ -1,4 +1,4 @@
-import { chmod, cp, lstat, mkdtemp, rm } from 'node:fs/promises';
+import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
@@ -170,7 +170,6 @@ async function prepareLocalBinaryPayload(params: Readonly<{
   channel: PublicReleaseRingId;
   componentId: FirstPartyComponentId;
   localBinaryPath: string;
-  versionId: string;
 }>): Promise<PreparedFirstPartyComponentPayload> {
   const sourceStats = await lstat(params.localBinaryPath);
   if (!sourceStats.isFile() || sourceStats.isSymbolicLink()) {
@@ -178,19 +177,24 @@ async function prepareLocalBinaryPayload(params: Readonly<{
   }
 
   const component = getFirstPartyComponentCatalogEntry(params.componentId);
+  const binaryDir = dirname(params.localBinaryPath);
+  const sourcePayloadRoot = basename(binaryDir) === 'bin' ? dirname(binaryDir) : binaryDir;
+  const versionId = basename(sourcePayloadRoot) || 'local-server';
   const scratchRoot = await mkdtemp(join(tmpdir(), `happier-local-${params.componentId}-`));
   const payloadRoot = join(scratchRoot, 'payload-root');
   const payloadBinaryPath = join(payloadRoot, component.binaryRelativePath);
   try {
-    await cp(dirname(params.localBinaryPath), payloadRoot, {
+    await cp(sourcePayloadRoot, payloadRoot, {
       recursive: true,
       preserveTimestamps: true,
     });
+    await mkdir(dirname(payloadBinaryPath), { recursive: true });
+    await copyFile(params.localBinaryPath, payloadBinaryPath);
     await chmod(payloadBinaryPath, 0o755);
     return {
       componentId: params.componentId,
       channel: params.channel,
-      versionId: params.versionId,
+      versionId,
       payloadRoot,
       source: null,
       cleanup: async () => {
@@ -230,7 +234,6 @@ export async function installRemoteFirstPartyComponent(params: Readonly<{
         channel,
         componentId: params.componentId,
         localBinaryPath,
-        versionId: `local-${resolvedDeps.now()}`,
       })
     : await resolvedDeps.preparePayload({
         componentId: params.componentId,

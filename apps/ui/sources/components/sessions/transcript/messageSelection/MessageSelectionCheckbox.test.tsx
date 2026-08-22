@@ -95,7 +95,7 @@ describe('MessageSelectionCheckbox', () => {
         expect(unchecked.props.accessibilityRole).toBe('checkbox');
         expect(unchecked.props.accessibilityState).toEqual({ checked: false });
         expect(resolvePressableStyle(unchecked).backgroundColor).toEqual(expect.any(String));
-        expect(screen.findByType('Icon').props.name).toBe('square-outline');
+        expect(screen.findByType('Icon').props.name).toBe('square');
 
         await pressByTestId(screen, 'checkbox-m1');
 

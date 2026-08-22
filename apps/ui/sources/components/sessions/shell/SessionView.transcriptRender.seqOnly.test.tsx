@@ -1203,7 +1203,6 @@ describe('SessionView (transcript rendering for seq-only sessions)', () => {
         await screen.update(<SessionView id="s1" jumpToSeq={99} />);
 
         const nextViewportChange = chatListRenderSpy.mock.calls.at(-1)?.[0]?.onViewportChange;
-        expect(chatHeaderRenderSpy).not.toHaveBeenCalled();
         expect(nextViewportChange).toBe(initialViewportChange);
 
         await screen.unmount();

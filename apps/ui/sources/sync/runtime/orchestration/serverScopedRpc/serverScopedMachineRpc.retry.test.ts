@@ -9,6 +9,9 @@ const getCredentialsSpy = vi.hoisted(() => vi.fn());
 const createEncryptionSpy = vi.hoisted(() => vi.fn());
 const listServerProfilesSpy = vi.hoisted(() => vi.fn());
 const getActiveServerSnapshotSpy = vi.hoisted(() => vi.fn());
+const runtimeFetchWithServerReachabilitySpy = vi.hoisted(() => vi.fn(
+  async (params: { url: string; init: RequestInit }) => fetch(params.url, params.init),
+));
 
 vi.mock('@/sync/runtime/orchestration/serverScopedRpc/createEphemeralServerSocketClient', () => ({
   createEphemeralServerSocketClient: (...args: unknown[]) => createEphemeralSocketSpy(...args),
@@ -44,6 +47,11 @@ vi.mock('@/sync/domains/server/serverRuntime', () => ({
   getActiveServerSnapshot: (...args: unknown[]) => getActiveServerSnapshotSpy(...args),
 }));
 
+vi.mock('@/sync/runtime/connectivity/serverReachabilityRuntimeFetch', () => ({
+  runtimeFetchWithServerReachability: (params: { url: string; init: RequestInit }) =>
+    runtimeFetchWithServerReachabilitySpy(params),
+}));
+
 describe('machineRpcWithServerScope (retry)', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -54,6 +62,7 @@ describe('machineRpcWithServerScope (retry)', () => {
     createEncryptionSpy.mockReset();
     listServerProfilesSpy.mockReset();
     getActiveServerSnapshotSpy.mockReset();
+    runtimeFetchWithServerReachabilitySpy.mockClear();
     getActiveServerSnapshotSpy.mockReturnValue({
       serverId: 'server-a',
       serverUrl: 'https://server-a.example.test',
@@ -120,7 +129,7 @@ describe('machineRpcWithServerScope (retry)', () => {
     });
     const assertion = expect(rpcPromise).resolves.toEqual({ ok: true });
 
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(250);
     await assertion;
 
     expect(machineRpcSpy).not.toHaveBeenCalled();
@@ -179,7 +188,6 @@ describe('machineRpcWithServerScope (retry)', () => {
     });
     const assertion = expect(rpcPromise).rejects.toThrow('RPC method not available');
 
-    await vi.runAllTimersAsync();
     await assertion;
 
     expect(onIssued).toHaveBeenCalledTimes(1);

@@ -10,6 +10,9 @@ const getCredentialsSpy = vi.hoisted(() => vi.fn());
 const createEncryptionSpy = vi.hoisted(() => vi.fn());
 const listServerProfilesSpy = vi.hoisted(() => vi.fn());
 const getActiveServerSnapshotSpy = vi.hoisted(() => vi.fn());
+const runtimeFetchWithServerReachabilitySpy = vi.hoisted(() => vi.fn(
+    async (params: { url: string; init: RequestInit }) => fetch(params.url, params.init),
+));
 const activeApiSocketHarness = vi.hoisted(() => ({
     useReal: false,
     real: null as any,
@@ -54,6 +57,11 @@ vi.mock('@/sync/domains/server/serverProfiles', async (importOriginal) => {
 
 vi.mock('@/sync/domains/server/serverRuntime', () => ({
     getActiveServerSnapshot: (...args: unknown[]) => getActiveServerSnapshotSpy(...args),
+}));
+
+vi.mock('@/sync/runtime/connectivity/serverReachabilityRuntimeFetch', () => ({
+    runtimeFetchWithServerReachability: (params: { url: string; init: RequestInit }) =>
+        runtimeFetchWithServerReachabilitySpy(params),
 }));
 
 function findTelemetryEvent(name: string) {
@@ -107,6 +115,7 @@ describe('machineRpcWithServerScope', () => {
         createEncryptionSpy.mockReset();
         listServerProfilesSpy.mockReset();
         getActiveServerSnapshotSpy.mockReset();
+        runtimeFetchWithServerReachabilitySpy.mockClear();
         vi.unstubAllGlobals();
         resetScopedMachineDataKeyCacheForTests();
         syncPerformanceTelemetry.configure({ enabled: false });

@@ -8,6 +8,15 @@ import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { createTempDir, removeTempDir } from '@/testkit/fs/tempDir';
 import { captureConsoleLogAndMuteStdout } from '@/testkit/logger/captureOutput';
 
+const successfulRemoteRelayHostInstallOutput = {
+    status: 0,
+    stdout: `${JSON.stringify({
+        ok: true,
+        kind: 'relay_host_install',
+        data: { relayUrl: 'http://127.0.0.1:3005', mode: 'user' },
+    })}\n`,
+} as const;
+
 type PreparedPayload = Readonly<{
     componentId: string;
     channel: string;
@@ -167,6 +176,8 @@ describe('happier relay host arch resolution', () => {
             outputs: [
                 { status: 0, stdout: `${JSON.stringify({ platform: 'linux', arch: 'aarch64' })}\n` },
                 { status: 0, stdout: 'yes\n' },
+                { status: 0, stdout: '\n' },
+                successfulRemoteRelayHostInstallOutput,
             ],
         });
 

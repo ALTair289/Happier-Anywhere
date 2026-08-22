@@ -1,5 +1,6 @@
 import * as React from 'react';
-import { Animated, Platform, Pressable, StyleSheet, View } from 'react-native';
+import { Animated, Platform, Pressable, View } from 'react-native';
+import { StyleSheet } from 'react-native-unistyles';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ResolvedPaneLayout } from './paneBreakpoints';
 import { ResizableDockedPane } from './ResizableDockedPane';

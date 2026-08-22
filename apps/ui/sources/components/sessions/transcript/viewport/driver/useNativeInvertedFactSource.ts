@@ -122,7 +122,7 @@ export function useNativeInvertedFactSource(params: Readonly<{
     }, [resolveNativeFactSource]);
     const resolveViewportReachedEdge = React.useCallback((edge: 'start' | 'end'): 'older' | 'newer' => {
         if (platformOS === 'web') return edge === 'start' ? 'older' : 'newer';
-        return resolveNativeFactSource()?.resolveReachedEdge(edge) ?? (edge === 'start' ? 'older' : 'newer');
+        return resolveNativeFactSource()?.resolveReachedEdge(edge) ?? (edge === 'start' ? 'newer' : 'older');
     }, [platformOS, resolveNativeFactSource]);
 
     return {

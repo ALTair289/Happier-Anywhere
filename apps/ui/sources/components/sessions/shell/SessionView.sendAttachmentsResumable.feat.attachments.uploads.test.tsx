@@ -511,7 +511,13 @@ vi.mock('@/sync/domains/session/control/submitMode', () => ({
         mode: chooseSubmitModeState.mode,
         intent: 'default',
         reason: 'test_decision',
-        pendingSupportState: 'supported',
+        // Direct-send cases deliberately model a pre-queue-v2 session. Once
+        // submitSessionUserMessage became the shared delivery boundary, marking an
+        // agent_queue decision as queue-v2 supported correctly routes it through
+        // enqueuePendingMessage instead of the direct send this suite exercises.
+        pendingSupportState: chooseSubmitModeState.mode === 'server_pending'
+            ? 'supported'
+            : 'unknown_pending_version',
         ...(chooseSubmitModeState.mode === 'agent_queue'
             ? { directBypassReason: 'selected_direct' }
             : chooseSubmitModeState.mode === 'interrupt'
